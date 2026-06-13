@@ -1,0 +1,60 @@
+# cargo-deny configuration for the Tabibu Rust core.
+#
+# cargo-deny is NOT installed locally (`which cargo-deny` -> not found); this
+# file is validated syntactically here and executed in CI via
+# EmbarkStudios/cargo-deny-action@v2 (see .github/workflows/ci.yml and
+# docs/release.md).
+
+[graph]
+all-features = false
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
+[advisories]
+# Fail the build on any crate with a known security vulnerability.
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Everything in the current tree resolves to one of these (verified against
+# `cargo metadata` license fields on 2026-06-13). GPL and other copyleft
+# licenses are NOT allowed.
+#
+# NOTE on tabibu-malware: a future `clamav` feature will link libclamav,
+# which is GPL-2.0. That dependency must stay behind an off-by-default
+# feature and be dynamically linked / process-isolated; if it ever enters the
+# default graph, this config will (correctly) fail CI, forcing an explicit
+# decision rather than silent GPL contamination of the MIT-licensed core.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+]
+# MPL-2.0 is file-level copyleft. We would prefer "warn", but the version-2
+# licenses config in cargo-deny dropped per-license warn levels (allow-list
+# only), so it sits in `allow` with this note: any crate introducing MPL-2.0
+# code should be flagged in review and its file-level obligations checked.
+# No MPL-2.0 crates are in the tree today.
+
+[bans]
+# Duplicate versions bloat the universal binary; warn so they show up in CI
+# logs without blocking unrelated work.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

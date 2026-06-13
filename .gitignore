@@ -1,0 +1,16 @@
+# Rust
+core/target/
+target/
+
+# SwiftPM
+.build/
+
+# Packaging output (apps, dmgs, staged libs)
+build/
+*.dmg
+
+# macOS / Xcode noise
+.DS_Store
+xcuserdata/
+
+memory/

@@ -1,0 +1,33 @@
+[package]
+name = "tabibu-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tabibu-engine.workspace = true
+tabibu-walk.workspace = true
+tabibu-dupes.workspace = true
+tabibu-junk.workspace = true
+tabibu-uninstall.workspace = true
+tabibu-malware.workspace = true
+tabibu-monitor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# The one crate where `unsafe` is permitted: it IS the C boundary.
+# Lints are therefore declared locally instead of inheriting the workspace
+# set (which denies unsafe_code).
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

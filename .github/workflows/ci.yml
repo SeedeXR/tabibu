@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: zsh {0}
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add rustfmt
+      - run: cargo fmt --check
+        working-directory: core
+
+  clippy:
+    name: clippy
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: core
+
+  test:
+    name: cargo test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo test --workspace
+        working-directory: core
+
+  deny:
+    name: cargo-deny
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-deny is not installed on dev machines; CI is the enforcement
+      # point for core/deny.toml (licenses, advisories, bans, sources).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: core/Cargo.toml
+          arguments: ""
+
+  bench-gate:
+    name: bench regression gate
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      # The gate only has teeth once a baseline has been blessed
+      # (scripts/bench-gate.sh --update-baseline) and committed. Until then
+      # this job is skipped rather than green-by-accident.
+      - name: Run bench gate
+        if: ${{ hashFiles('core/benches-baseline/**') != '' }}
+        run: ./scripts/bench-gate.sh
+      - name: No baseline yet
+        if: ${{ hashFiles('core/benches-baseline/**') == '' }}
+        run: echo "core/benches-baseline/ not present; bench gate skipped. Bless one with scripts/bench-gate.sh --update-baseline."
+
+  swift:
+    name: swift build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # The Swift packages land later; build each one only once its
+      # Package.swift exists so this job is a no-op until then.
+      - name: Build Tabibu
+        if: ${{ hashFiles('Tabibu/Package.swift') != '' }}
+        run: swift build -c release --package-path Tabibu
+      - name: Build TabibuMonitor
+        if: ${{ hashFiles('TabibuMonitor/Package.swift') != '' }}
+        run: swift build -c release --package-path TabibuMonitor
+      - name: No Swift packages yet
+        if: ${{ hashFiles('Tabibu/Package.swift', 'TabibuMonitor/Package.swift') == '' }}
+        run: echo "No Package.swift found; Swift build skipped."

@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build, package, (conditionally) sign
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - name: Build universal Rust core
+        run: ./scripts/build-core.sh
+
+      - name: Build Swift apps (universal)
+        run: |
+          if [ -f Tabibu/Package.swift ]; then
+            swift build -c release --arch arm64 --arch x86_64 --package-path Tabibu
+          else
+            echo "Tabibu/Package.swift missing; release cannot produce an app yet." >&2
+            exit 1
+          fi
+          if [ -f TabibuMonitor/Package.swift ]; then
+            swift build -c release --arch arm64 --arch x86_64 --package-path TabibuMonitor
+          else
+            echo "TabibuMonitor/Package.swift missing; continuing without the menu-bar agent."
+          fi
+
+      # ----------------------------------------------------------------------
+      # Signing -- EXTERNALLY BLOCKED until Apple Developer Program enrollment:
+      # there is no Developer ID Application certificate today (locally,
+      # `security find-identity -v -p codesigning` reports 0 identities).
+      # When the cert exists, add these repo secrets and the steps below
+      # activate automatically:
+      #   DEVELOPER_ID_CERT        base64 of the .p12 export
+      #   DEVELOPER_ID_CERT_PW     .p12 password
+      #   DEVELOPER_ID_IDENTITY    e.g. "Developer ID Application: BSA Inc (TEAMID)"
+      # Until then SIGN_IDENTITY stays "-" (ad-hoc) and the DMG is
+      # install-able only via right-click > Open.
+      # ----------------------------------------------------------------------
+      - name: Resolve signing identity
+        id: signing
+        env:
+          HAS_CERT: ${{ secrets.DEVELOPER_ID_CERT != '' && secrets.DEVELOPER_ID_IDENTITY != '' }}
+          DEVELOPER_ID_IDENTITY: ${{ secrets.DEVELOPER_ID_IDENTITY }}
+        run: |
+          echo "HAS_CERT=$HAS_CERT" >> "$GITHUB_ENV"
+          if [ "$HAS_CERT" = "true" ]; then
+            echo "identity=$DEVELOPER_ID_IDENTITY" >> "$GITHUB_OUTPUT"
+            echo "Signing with Developer ID."
+          else
+            echo "identity=-" >> "$GITHUB_OUTPUT"
+            echo "No Developer ID secrets configured -> ad-hoc signing (externally blocked: see workflow comments)."
+          fi
+
+      - name: Import Developer ID certificate
+        if: ${{ env.HAS_CERT == 'true' }}
+        env:
+          DEVELOPER_ID_CERT: ${{ secrets.DEVELOPER_ID_CERT }}
+          DEVELOPER_ID_CERT_PW: ${{ secrets.DEVELOPER_ID_CERT_PW }}
+        run: |
+          KEYCHAIN=build.keychain
+          security create-keychain -p ci "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p ci "$KEYCHAIN"
+          echo "$DEVELOPER_ID_CERT" | base64 --decode > /tmp/cert.p12
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$DEVELOPER_ID_CERT_PW" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN"
+          rm /tmp/cert.p12
+
+      - name: Assemble Tabibu.app
+        env:
+          SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: ./scripts/make-app.sh
+
+      - name: Create DMG
+        env:
+          # NOTARIZE=1 is safe to leave on: make-dmg.sh checks for notarytool
+          # credentials and prints exactly what is skipped when (as today)
+          # APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD secrets are absent --
+          # notarization is externally blocked together with Developer ID.
+          NOTARIZE: "1"
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./scripts/make-dmg.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabibu-dmg
+          path: build/Tabibu-*.dmg
+          if-no-files-found: error

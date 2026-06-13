@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tabibu-engine",
+    "crates/tabibu-walk",
+    "crates/tabibu-dupes",
+    "crates/tabibu-junk",
+    "crates/tabibu-uninstall",
+    "crates/tabibu-malware",
+    "crates/tabibu-monitor",
+    "crates/tabibu-ffi",
+    "crates/tabibu-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tabibu-engine = { path = "crates/tabibu-engine" }
+tabibu-walk = { path = "crates/tabibu-walk" }
+tabibu-dupes = { path = "crates/tabibu-dupes" }
+tabibu-junk = { path = "crates/tabibu-junk" }
+tabibu-uninstall = { path = "crates/tabibu-uninstall" }
+tabibu-malware = { path = "crates/tabibu-malware" }
+tabibu-monitor = { path = "crates/tabibu-monitor" }
+
+rayon = "1.10"
+blake3 = { version = "1.5", features = ["rayon"] }
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+plist = "1"
+sysinfo = "0.33"
+trash = "5"
+proptest = "1"
+criterion = "0.5"
+tempfile = "3"
+
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_code = "deny"          # overridden to allow only in tabibu-ffi / syscall wrappers
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.bench]
+debug = true

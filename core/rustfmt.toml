@@ -1,0 +1,13 @@
+# rustfmt configuration for the Tabibu core workspace.
+#
+# Stable options only -- nightly-only options (imports_granularity,
+# group_imports, wrap_comments, ...) are deliberately excluded because CI and
+# contributors run stable rustfmt, which errors-or-ignores them.
+#
+# use_small_heuristics = "Max" was considered and rejected: the workspace is
+# rustfmt-clean with default heuristics, and "Max" would reformat ~10 files
+# across tabibu-dupes/-engine/-malware/-monitor (verified with
+# `cargo fmt --check` on 2026-06-13). max_width stays at the rustfmt default
+# of 100, stated explicitly so the team's intent survives any future default
+# change.
+max_width = 100

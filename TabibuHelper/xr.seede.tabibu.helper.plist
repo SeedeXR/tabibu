@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd plist for the privileged helper, registered via SMAppService
+     (SMAppService.daemon) from the signed main app. BundleProgram is the
+     path to the helper executable inside the app bundle's Contents/MacOS.
+     MachServices must match kHelperMachServiceName. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>xr.seede.tabibu.helper</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/TabibuHelper</string>
+    <key>MachServices</key>
+    <dict>
+        <key>xr.seede.tabibu.helper</key>
+        <true/>
+    </dict>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>xr.seede.tabibu</string>
+    </array>
+</dict>
+</plist>
