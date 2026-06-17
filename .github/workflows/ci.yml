@@ -47,7 +47,10 @@ jobs:
 
   deny:
     name: cargo-deny
-    runs-on: macos-14
+    # Linux: cargo-deny-action is a container action (Docker), unsupported on
+    # macOS runners. cargo-deny is a pure license/advisory/ban check — no macOS
+    # frameworks needed — so a Linux runner is correct (and faster/cheaper).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # cargo-deny is not installed on dev machines; CI is the enforcement

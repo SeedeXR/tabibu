@@ -204,7 +204,7 @@ fn build_children(
         })
         .collect::<Result<Vec<_>, WalkError>>()?;
     let size_bytes = children.iter().map(|c| c.size_bytes).sum();
-    children.sort_unstable_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    children.sort_unstable_by_key(|c| std::cmp::Reverse(c.size_bytes));
     if max_depth.is_some_and(|m| depth >= m) {
         children.clear();
     }
