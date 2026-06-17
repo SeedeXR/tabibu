@@ -1,5 +1,11 @@
 # Tabibu FFI Contract
 
+> **SUPERSEDED (ADR-0003).** The C-FFI bridge existed only for the Swift shell,
+> which has been replaced by a Tauri shell that calls the Rust core directly
+> (serde over Tauri commands — no C ABI). `tabibu-ffi` and this contract are
+> removed from the build; this file is retained for history.
+
+
 Audience: anyone touching `core/crates/tabibu-ffi` or
 `Tabibu/Sources/Tabibu/Core/CoreBridge.swift`. Decision record: ADR-0001.
 Header of record: `core/include/tabibu_core.h` (copied into the Swift C

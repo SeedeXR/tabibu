@@ -3,33 +3,37 @@
 How a commit becomes a downloadable DMG, what is automated today, and what is
 externally blocked.
 
+> **Updated for the Tauri shell (ADR-0003).** Packaging is now done by
+> `tauri build`, not the hand-rolled `build-core.sh`/`make-app.sh`/`make-dmg.sh`
+> (removed). Those scripts and the DMG-compression measurements below are
+> historical — Tauri produces its own `.app` and DMG. The signing /
+> notarization *external blockers* still apply.
+
 ## Pipeline
 
 ```mermaid
 flowchart LR
-    src[Source\ncore/ + Tabibu/ + TabibuMonitor/] --> lib[Universal static lib\nscripts/build-core.sh\nlipo arm64+x86_64]
-    lib --> swift[swift build -c release\n--arch arm64 --arch x86_64]
-    swift --> app[Tabibu.app\nscripts/make-app.sh\nInfo.plist + LoginItems embed]
-    app --> sign[codesign, nested-first\nad-hoc today / Developer ID later]
-    sign --> dmg[DMG, LZMA\nscripts/make-dmg.sh\nhdiutil -format ULMO]
-    dmg --> notarize[notarytool + staple]
-    notarize --> sparkle[Sparkle appcast\nEdDSA-signed updates]
+    src[Source\ncore/ crates + app/] --> build["tauri build\n--target universal-apple-darwin\n(compiles Rust backend + core, lipo)"]
+    build --> app[Tabibu.app]
+    app --> sign[codesign\nunsigned today / Developer ID later]
+    sign --> dmg[DMG\ntauri bundler]
+    dmg --> notarize[notarytool + staple\nvia Apple env vars]
 
+    style sign stroke-dasharray: 5 5
     style notarize stroke-dasharray: 5 5
-    style sparkle stroke-dasharray: 5 5
 ```
 
-Dashed boxes are **externally blocked** (see below). Everything solid runs
-today, locally and in CI (`.github/workflows/ci.yml`, `release.yml`).
+Dashed boxes are **externally blocked** (no Developer ID / notarization
+credentials). `tauri build` activates them automatically when the Apple
+secrets are present (see `.github/workflows/release.yml`). CI
+(`ci.yml`) only `cargo build`s `app/src-tauri` to keep the runner light.
 
-## Scripts
+## Scripts (remaining)
 
 | Script | Purpose |
 |---|---|
-| `scripts/build-core.sh` | Rust core -> universal `build/libtabibu_ffi.a` + header |
-| `scripts/make-app.sh` | Assemble + sign `build/Tabibu.app` (embeds TabibuMonitor.app as a login item when built). `SIGN_IDENTITY` env, default `-` (ad-hoc) |
-| `scripts/make-dmg.sh` | `build/Tabibu-<version>.dmg`, LZMA-compressed, mount-verified. `NOTARIZE=1` opts in to notarization when credentials exist |
-| `scripts/bench-gate.sh` | Criterion regression gate, fails CI on >5% mean regression vs `core/benches-baseline/`; `--update-baseline` to bless |
+| `scripts/make-icon.sh` | Generate `build/AppIcon.icns` + iconset (copy into `app/src-tauri/icons/`) |
+| `scripts/bench-gate.sh` | Criterion regression gate (>5% mean) on a *consistent* machine; `--update-baseline` to bless, `--smoke` for CI (run-only, no cross-machine compare) |
 | `scripts/uninstall-tabibu.sh` | User-facing uninstaller; dry-run by default, `--yes` to delete |
 
 ## DMG compression choice
@@ -65,18 +69,26 @@ and update this table.
 output on this repo) and fails if any mean exceeds the blessed value in
 `core/benches-baseline/<benchmark>/estimates.json` by more than 5%.
 
-Reference numbers blessed on this machine (2026-06-13):
+**Runner awareness (important).** Criterion baselines are *hardware-specific*:
+a baseline blessed on an Apple-Silicon laptop is meaningless on a shared
+GitHub macos-14 runner and would report large bogus regressions. So:
+
+- The **regression gate** (plain `bench-gate.sh`) is for a *consistent* machine
+  — a developer's box or a dedicated self-hosted runner — where the baseline
+  was produced. `core/benches-baseline/` is **gitignored**, never committed.
+- **CI** runs `bench-gate.sh --smoke`: reduced criterion sampling
+  (`--sample-size 10 --warm-up-time 1 --measurement-time 2`), no baseline
+  comparison. It only proves the benches still compile and run, and keeps the
+  runner's CPU/memory/time use low.
+
+Reference numbers blessed on the dev machine (2026-06-13), for orientation
+only (not a CI gate):
 
 | Benchmark | Mean |
 |---|---|
-| `find_duplicates_2k_files_30pct_dupes` | 20.8 ms |
-| `size_tree_5k_files` | 4.8 ms |
-| `size_tree_5k_files_depth1` | 5.0 ms |
-
-Both the pass path and the fail path (tampered baseline -> exit 1) have been
-exercised. Note: hosted CI runners are noisier than this machine; if the 5%
-gate flaps on shared runners, bless a runner-recorded baseline rather than
-widening the threshold.
+| `find_duplicates_2k_files_30pct_dupes` | ~21 ms |
+| `size_tree_5k_files` | ~4.8 ms |
+| `size_tree_5k_files_depth1` | ~5.0 ms |
 
 ## Static checks
 

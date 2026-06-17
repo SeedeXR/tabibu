@@ -11,6 +11,8 @@
 use serde::Serialize;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
+mod rosetta;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessSample {
     pub pid: u32,
@@ -20,6 +22,12 @@ pub struct ProcessSample {
     /// Resident memory in bytes.
     pub memory_bytes: u64,
     pub exe_path: Option<String>,
+    /// Whether the process is running translated under Rosetta 2.
+    /// `None` = unknown (sysctl failed or process gone),
+    /// `Some(true)` = Rosetta (x86_64 on Apple Silicon),
+    /// `Some(false)` = native. Populated only for the returned top-N
+    /// processes; see [`Sampler::sample`].
+    pub is_translated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +100,8 @@ impl Sampler {
                 cpu_percent: p.cpu_usage(),
                 memory_bytes: p.memory(),
                 exe_path: p.exe().map(|e| e.to_string_lossy().into_owned()),
+                // Filled in below for the top-N only; default unknown.
+                is_translated: None,
             })
             .collect();
         match by {
@@ -103,6 +113,14 @@ impl Sampler {
             TopBy::Memory => procs.sort_by_key(|p| std::cmp::Reverse(p.memory_bytes)),
         }
         procs.truncate(n);
+
+        // Rosetta detection issues one `sysctl` per pid, so we run it only
+        // after `truncate(n)` — i.e. for the processes we actually return —
+        // to keep the sampler within the monitor CPU budget (memory/test.md
+        // §5) rather than probing every process on the system.
+        for p in &mut procs {
+            p.is_translated = rosetta::process_is_translated(p.pid);
+        }
 
         SystemSample {
             total_memory_bytes: self.sys.total_memory(),
@@ -134,6 +152,11 @@ mod tests {
         // Memory ordering holds.
         let mems: Vec<u64> = snap.top_processes.iter().map(|p| p.memory_bytes).collect();
         assert!(mems.windows(2).all(|w| w[0] >= w[1]));
+        // Each returned process exposes a translation verdict without panic
+        // (value may be None for a process that exited between sampling steps).
+        for p in &snap.top_processes {
+            let _ = p.is_translated;
+        }
         // Serializes for the FFI boundary.
         assert!(serde_json::to_string(&snap).is_ok());
     }

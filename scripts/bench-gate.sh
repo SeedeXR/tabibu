@@ -6,6 +6,15 @@
 #                                          and exit 1 if any mean regressed > 5%
 #   scripts/bench-gate.sh --update-baseline  run benches, then bless the new numbers
 #                                            into core/benches-baseline/
+#   scripts/bench-gate.sh --smoke          run benches once with reduced sampling and
+#                                          DO NOT compare to any baseline. For CI.
+#
+# IMPORTANT — runner awareness: criterion baselines are HARDWARE-SPECIFIC.
+# A baseline blessed on one machine is meaningless on a GitHub runner of a
+# different CPU class (it would report huge bogus "regressions"). So the
+# regression gate (plain invocation) is for a *consistent* machine/self-hosted
+# runner; GitHub CI uses `--smoke`, which only proves the benches still compile
+# and run (catching broken benches) while keeping resource use low.
 #
 # How it works:
 #   1. Runs the criterion benches in tabibu-walk and tabibu-dupes:
@@ -35,11 +44,19 @@ BASELINE_DIR="$CORE/benches-baseline"
 THRESHOLD_PCT=5
 
 UPDATE=0
-if [[ "${1:-}" == "--update-baseline" ]]; then
-  UPDATE=1
-elif [[ -n "${1:-}" ]]; then
-  echo "usage: $0 [--update-baseline]" >&2
-  exit 2
+SMOKE=0
+case "${1:-}" in
+  --update-baseline) UPDATE=1 ;;
+  --smoke) SMOKE=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--update-baseline|--smoke]" >&2; exit 2 ;;
+esac
+
+# Reduced criterion sampling for smoke runs — keeps CI fast and within the
+# runner's limited cores/memory/time. Empty for full runs.
+typeset -a SMOKE_ARGS
+if (( SMOKE )); then
+  SMOKE_ARGS=(--sample-size 10 --warm-up-time 1 --measurement-time 2)
 fi
 
 # crate:bench-target pairs to run.
@@ -82,9 +99,18 @@ fi
 for pair in "${BENCHES[@]}"; do
   crate="${pair%%:*}"
   bench="${pair##*:}"
-  echo "==> cargo bench -p $crate --bench $bench -- --save-baseline current"
-  (cd "$CORE" && cargo bench -p "$crate" --bench "$bench" -- --save-baseline current)
+  echo "==> cargo bench -p $crate --bench $bench -- --save-baseline current ${SMOKE_ARGS[*]}"
+  (cd "$CORE" && cargo bench -p "$crate" --bench "$bench" -- \
+    --save-baseline current "${SMOKE_ARGS[@]}")
 done
+
+# Smoke mode: prove the benches run, nothing more. No hardware-specific
+# baseline comparison (see header).
+if (( SMOKE )); then
+  echo ""
+  echo "SMOKE: benches compiled and ran. No baseline comparison (runner-aware)."
+  exit 0
+fi
 
 # --- collect results ---------------------------------------------------------
 typeset -a CURRENT_DIRS
@@ -102,7 +128,8 @@ if (( UPDATE )); then
     cp "$cur/estimates.json" "$cur/benchmark.json" "$BASELINE_DIR/$name/"
     printf '  %s: mean %.3f ms\n' "$name" "$(( $(mean_of "$cur/estimates.json") / 1e6 ))"
   done
-  echo "Baseline updated. Commit core/benches-baseline/ to make it the CI reference."
+  echo "Baseline updated locally. NOTE: baselines are hardware-specific and"
+  echo "gitignored — keep this one on the machine that produced it; CI uses --smoke."
   exit 0
 fi
 

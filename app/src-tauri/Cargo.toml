@@ -1,0 +1,42 @@
+[package]
+name = "tabibu-app"
+version = "0.1.3"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "Tabibu — macOS optimization tool (Tauri shell)"
+
+# Standalone package: NOT a member of the core/ workspace, so the heavy Tauri
+# dependency tree never touches `cargo test --workspace` in core/. It depends
+# on the core crates by path — Tauri's Rust backend calls them directly, with
+# no C ABI bridge (that was the Swift shell's requirement; see ADR-0003).
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+plist = "1"
+sysinfo = "0.33"
+trash = "5"
+libc = "0.2"
+
+# The Rust core — called directly, no FFI.
+tabibu-engine = { path = "../../core/crates/tabibu-engine" }
+tabibu-walk = { path = "../../core/crates/tabibu-walk" }
+tabibu-dupes = { path = "../../core/crates/tabibu-dupes" }
+tabibu-junk = { path = "../../core/crates/tabibu-junk" }
+tabibu-uninstall = { path = "../../core/crates/tabibu-uninstall" }
+tabibu-malware = { path = "../../core/crates/tabibu-malware" }
+tabibu-monitor = { path = "../../core/crates/tabibu-monitor" }
+tabibu-telemetry = { path = "../../core/crates/tabibu-telemetry" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+panic = "abort"

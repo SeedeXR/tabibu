@@ -120,7 +120,11 @@ fn unselected_items_are_never_touched() {
 }
 
 #[test]
-fn denied_target_aborts_before_any_mutation() {
+fn denied_target_is_skipped_others_reclaimed() {
+    // A denied (protected) path in the batch is SKIPPED and reported — never
+    // touched — while the legitimate items still reclaim. (Previously a denied
+    // path aborted the whole batch, which broke whole-home duplicate cleanup
+    // whenever one copy lived in a protected folder.)
     let f = fixture();
     let doc = f.home.join("Documents/thesis.txt");
     let good = CleanupItem {
@@ -133,15 +137,26 @@ fn denied_target_aborts_before_any_mutation() {
             "test",
         )
     };
-    let evil = CleanupItem {
+    let denied = CleanupItem {
         action: ReclaimAction::Delete,
-        ..CleanupItem::new(doc.clone(), Category::Temp, 8, SafetyTier::Safe, "smuggled")
+        ..CleanupItem::new(
+            doc.clone(),
+            Category::Temp,
+            8,
+            SafetyTier::Safe,
+            "protected",
+        )
     };
-    let err = reclaim(&ctx(&f), &[good, evil], &f.undo).unwrap_err();
-    assert!(matches!(err, ReclaimError::Denied(_)));
-    // Batch validation means even the legitimate item was not touched.
-    assert!(f.caches.join("stray.tmp").exists());
-    assert!(doc.exists());
+    let report = reclaim(&ctx(&f), &[good, denied], &f.undo).unwrap();
+
+    // The legitimate item was reclaimed…
+    assert_eq!(report.succeeded, 1);
+    assert!(!f.caches.join("stray.tmp").exists());
+    // …and the protected path was NEVER touched, but is reported as skipped.
+    assert!(doc.exists(), "protected path must never be touched");
+    assert_eq!(report.failed, 1);
+    let skipped = report.outcomes.iter().find(|o| o.path == doc).unwrap();
+    assert!(skipped.error.as_deref().unwrap_or("").contains("protected"));
 }
 
 #[test]

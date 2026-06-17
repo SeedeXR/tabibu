@@ -1,6 +1,8 @@
 # ADR-0001: Hand-written C ABI with JSON payloads for the Rust↔Swift bridge
 
-Date: 2026-06-13 · Status: Accepted
+Date: 2026-06-13 · Status: **Superseded by ADR-0003** (the Swift shell and its
+C-FFI bridge were removed in favour of a Tauri shell that calls the Rust core
+directly). Kept for history.
 
 ## Context
 

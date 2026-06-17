@@ -52,7 +52,13 @@ allow = [
 # Duplicate versions bloat the universal binary; warn so they show up in CI
 # logs without blocking unrelated work.
 multiple-versions = "warn"
+# Deny external wildcard (`*`) version requirements, but NOT the intra-
+# workspace path dependencies (`tabibu-engine.workspace = true` resolves to a
+# path dep with no version, which cargo-deny would otherwise flag as a
+# wildcard). Without this, `cargo deny check bans` fails on every internal
+# crate edge — a GitHub-runner failure that doesn't reproduce as a build error.
 wildcards = "deny"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

@@ -1,52 +1,63 @@
 # Tabibu — Build & Setup
 
-From clean machine to running app. Verified on macOS 26.5 / Xcode 26.5 /
-Rust 1.94 (2026-06-13). Re-verify each milestone (docs.md rule 4).
+From a clean machine to a running app. Verified on macOS 26.5 / Rust 1.94 /
+Node 22 (2026-06-13). The shell is Tauri v2 (ADR-0003).
 
 ## Prerequisites
 
-- Xcode (full, not just CLT) — `xcodebuild -version`
-- Rust via rustup with both targets:
+- **Rust** via rustup. For a universal release build also:
   `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
+- **Node + npm** — only to install the Tauri CLI (the frontend itself has no
+  bundler/build step).
+- **Xcode Command Line Tools** (`xcode-select --install`) for the macOS WebView
+  SDK and `cc`.
 
-## Build everything
+## Build & run
 
 ```sh
-# 1. Rust core → universal static lib staged into build/
-scripts/build-core.sh                 # add --debug for fast iteration
+cd app
+npm install                 # installs @tauri-apps/cli locally (one-time)
 
-# 2. Main app (SwiftPM)
-swift build --package-path Tabibu
-Tabibu/.build/debug/Tabibu --version   # must print "Tabibu 0.1.0 (ffi v1)"
+# Develop with hot reload (compiles the Rust backend + core crates):
+npm run dev                 # = npx tauri dev
 
-# 3. Menu-bar agent + helper
-swift build --package-path TabibuMonitor
-swift build --package-path TabibuHelper
+# Compile-only check of the backend:
+cargo build --manifest-path src-tauri/Cargo.toml
 
-# 4. App bundle + DMG (ad-hoc signed locally; see docs/release.md)
-scripts/make-icon.sh                  # build/AppIcon.icns
-scripts/make-app.sh                   # build/Tabibu.app
-scripts/make-dmg.sh                   # build/Tabibu-<ver>.dmg (LZMA)
+# Bundle a .app + DMG:
+npx tauri build --debug                              # fast, for testing
+npx tauri build --target universal-apple-darwin      # release, universal
 ```
 
-## Test & verify
+The first backend build compiles the Tauri dependency tree (wry/objc2/…) —
+slow once, cached after.
+
+## Test & verify (core)
 
 ```sh
 cd core
-cargo test --workspace                # all suites
-cargo clippy --workspace --all-targets   # deny(warnings) + pedantic
+cargo test --workspace                  # 89 tests
+cargo clippy --workspace --all-targets  # clippy::all denied
+cargo fmt --check
 cargo bench -p tabibu-walk -p tabibu-dupes   # criterion benches
-scripts/bench-gate.sh                 # fails on >5% regression vs baseline
-TabibuMonitor/budget-test.sh          # monitor CPU/RSS budget
+scripts/bench-gate.sh --smoke           # runner-aware bench run
 ```
+
+## App icon
+
+`scripts/make-icon.sh` generates `build/AppIcon.icns` + an iconset
+programmatically. Tauri reads its icons from `app/src-tauri/icons/`
+(`icon.icns`, `icon.png`, and sized PNGs) — regenerate and copy there if the
+brand mark changes, or run `npx tauri icon <1024.png>` to produce the full set.
 
 ## Gotchas
 
-- **Deployment target:** `build-core.sh` exports
-  `MACOSX_DEPLOYMENT_TARGET=14.0` to match `Package.swift`; building the Rust
-  lib by hand without it causes ld version warnings.
 - **FDA:** scans of `~/Library/Safari` etc. return empty without Full Disk
-  Access — that's the TCC design, not a bug; the app detects and deep-links.
-- **No Developer ID on this machine:** bundles are ad-hoc signed; Gatekeeper
-  (`spctl -a`) will reject them on other Macs. External blocker tracked in
-  `docs/release.md`.
+  Access — that's the TCC design, not a bug; the app detects it
+  (`system_info` → the sidebar "Limited access" indicator) and deep-links to
+  Privacy settings.
+- **No Developer ID on this machine:** `tauri build` produces an unsigned
+  bundle; Gatekeeper rejects it on other Macs without right-click → Open.
+  Signing/notarization are wired and conditional — see `docs/release.md`.
+- **Backend ↔ core is not FFI:** edit `app/src-tauri/src/commands.rs` to add a
+  command; the core types serialize via serde automatically.

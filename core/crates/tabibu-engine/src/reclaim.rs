@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReclaimError {
-    #[error("denied path refused: {0}")]
-    Denied(PathBuf),
     #[error("action {action:?} not allowed for tier {tier:?} ({path})")]
     TierViolation {
         path: PathBuf,
@@ -26,14 +24,14 @@ pub enum ReclaimError {
 }
 
 /// Per-item outcome, reported honestly (partial failures are normal).
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ItemOutcome {
     pub path: PathBuf,
     pub reclaimed_bytes: u64,
     pub error: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct ReclaimReport {
     /// Sum of bytes actually freed, measured per item post-op.
     pub reclaimed_bytes: u64,
@@ -78,13 +76,17 @@ fn perform(item: &CleanupItem) -> std::io::Result<()> {
     }
 }
 
-/// Reclaim the **selected** items. Fails fast on contract violations
-/// (denylist, tier rules, manifest write); per-item I/O failures are
-/// recorded and skipped, never hidden.
+/// Reclaim the **selected** items.
+///
+/// Denied (protected) paths are skipped per item — recorded in the report as a
+/// failed outcome and never touched — so a batch spanning protected and
+/// unprotected locations still reclaims everything it safely can. A non-`Safe`
+/// item with a destructive action is a programming error the UI never produces,
+/// so that still fails fast. Per-item I/O failures are recorded, never hidden.
 ///
 /// # Errors
-/// [`ReclaimError::Denied`] / [`ReclaimError::TierViolation`] if any selected
-/// item violates the contract (nothing is touched in that case), and
+/// [`ReclaimError::TierViolation`] if a selected item requests a destructive
+/// action on a non-`Safe` tier (nothing is touched in that case), and
 /// [`ReclaimError::Manifest`] if the undo manifest cannot be written.
 pub fn reclaim(
     ctx: &ScanCtx,
@@ -92,11 +94,23 @@ pub fn reclaim(
     undo_dir: &Path,
 ) -> Result<ReclaimReport, ReclaimError> {
     let selected: Vec<&CleanupItem> = items.iter().filter(|i| i.selected).collect();
+    let mut report = ReclaimReport::default();
 
-    // 1+2: validate the whole batch before touching anything.
+    // 1+2: validate. Denied paths are SKIPPED (recorded, never touched) rather
+    // than aborting the whole batch — so a whole-home duplicate/leftover set
+    // can reclaim everything outside protected folders while leaving the
+    // protected copies untouched. A non-Safe item with a destructive action is
+    // a programming error the UI never produces, so that still fails fast.
+    let mut to_act: Vec<&CleanupItem> = Vec::new();
     for item in &selected {
         if !denylist::permitted(&item.path, &ctx.allowed_roots, &ctx.home) {
-            return Err(ReclaimError::Denied(item.path.clone()));
+            report.failed += 1;
+            report.outcomes.push(ItemOutcome {
+                path: item.path.clone(),
+                reclaimed_bytes: 0,
+                error: Some("protected location — left untouched".to_string()),
+            });
+            continue;
         }
         if item.tier != SafetyTier::Safe && item.action != ReclaimAction::Trash {
             return Err(ReclaimError::TierViolation {
@@ -105,10 +119,16 @@ pub fn reclaim(
                 action: item.action,
             });
         }
+        to_act.push(item);
     }
 
-    // 3: manifest on disk before the first mutation.
-    let entries = selected
+    // Nothing actionable (all skipped / none selected): no manifest, no mutation.
+    if to_act.is_empty() {
+        return Ok(report);
+    }
+
+    // 3: manifest on disk before the first mutation (only the actionable items).
+    let entries = to_act
         .iter()
         .map(|i| ManifestEntry {
             path: i.path.clone(),
@@ -120,18 +140,22 @@ pub fn reclaim(
         })
         .collect();
     let mut manifest = UndoManifest::create(undo_dir, entries).map_err(ReclaimError::Manifest)?;
+    report.manifest_path = Some(manifest.path().to_path_buf());
 
     // 4: act, measuring true before/after sizes per item.
-    let mut report = ReclaimReport {
-        manifest_path: Some(manifest.path().to_path_buf()),
-        ..ReclaimReport::default()
-    };
-    for (idx, item) in selected.iter().enumerate() {
+    for (idx, item) in to_act.iter().enumerate() {
         let before = size_on_disk(&item.path);
         match perform(item) {
             Ok(()) => {
-                let after = size_on_disk(&item.path); // 0 unless truncate left the file
-                let freed = before.saturating_sub(after);
+                // Only `Truncate` leaves the path in place, so it's the only
+                // action that needs a post-op walk; for `Trash`/`Delete` the
+                // path is gone and a second walk would just measure 0 — re-using
+                // `before` avoids re-walking a (possibly huge) tree for nothing.
+                let freed = if item.action == ReclaimAction::Truncate {
+                    before.saturating_sub(size_on_disk(&item.path))
+                } else {
+                    before
+                };
                 report.reclaimed_bytes += freed;
                 report.succeeded += 1;
                 report.outcomes.push(ItemOutcome {

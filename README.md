@@ -3,7 +3,7 @@
 # Tabibu
 
 **A high-performance, honest macOS optimization tool.**
-Rust core + Swift/SwiftUI shell · benchmark-gated · safety-first.
+Rust core + Tauri shell · benchmark-gated · safety-first.
 
 </div>
 
@@ -14,13 +14,13 @@ on **honesty, safety, and measurable speed** — no scareware, no fake "GB freed
 no resident background hog. The cleanup logic is the easy 20%; the discipline
 around it (safety invariants, benchmark gates, honest UX) is the product.
 
-> **macOS only** (Apple Silicon + Intel). Target: macOS 14+. Distribution:
-> notarized, non-sandboxed direct download (signing/notarization pending a
-> Developer ID — see [Limitations](#current-limitations)).
+> **macOS only** (Apple Silicon + Intel). Target: macOS 13+. Distribution:
+> notarized direct download (signing/notarization pending a Developer ID —
+> see [Limitations](#current-limitations)).
 
 This README is for developers. The deeper "why" lives in
-[`memory/`](#the-knowledge-base-memory); architecture and contracts live in
-[`docs/`](#documentation-map).
+[`memory/`](#the-knowledge-base-memory); architecture decisions live in
+[`docs/adr/`](#documentation-map).
 
 ## Table of contents
 
@@ -38,106 +38,98 @@ This README is for developers. The deeper "why" lives in
 ## Quick start
 
 ```sh
-# Prerequisites: Xcode (full), Rust via rustup with both Apple targets
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
+# Prerequisites: Rust (rustup), Node + npm (for the Tauri CLI only).
+cd app
+npm install                 # installs @tauri-apps/cli locally
 
-# 1. Build the Rust core → universal static lib staged into build/
-scripts/build-core.sh                      # --debug for fast iteration
+# Run the app with hot-reload (compiles the Rust backend + core crates):
+npm run dev                 # = tauri dev
 
-# 2. Build & smoke-test the app (links the static lib)
-swift build --package-path Tabibu
-Tabibu/.build/debug/Tabibu --version        # -> "Tabibu 0.1.0 (ffi v1)"
+# Or just compile the backend to check it builds:
+cargo build --manifest-path src-tauri/Cargo.toml
 
-# 3. Run the full core test suite
-cd core && cargo test --workspace           # 95 tests
+# Run the core test suite (fast — the Tauri tree is not in this workspace):
+cd ../core && cargo test --workspace      # 95 tests
 ```
-
-To produce a runnable bundle + DMG, see [Packaging & release](#packaging--release).
 
 ## Repository layout
 
 ```
 tabibu/
-├── core/                       # Rust workspace → libtabibu_ffi.a (universal)
+├── core/                       # Rust workspace — the engine + scanners
 │   ├── Cargo.toml              # [workspace] + shared deps, lints, release profile
 │   ├── deny.toml               # cargo-deny: licenses + advisories
 │   ├── rustfmt.toml            # stable-only formatting config
-│   ├── include/tabibu_core.h   # hand-maintained C ABI header (lockstep w/ -ffi)
 │   └── crates/
 │       ├── tabibu-engine/      # traits, SafetyTier, denylist, undo, orchestration
 │       ├── tabibu-walk/        # parallel fs traversal + size tree
 │       ├── tabibu-dupes/       # 3-stage blake3 duplicate funnel
-│       ├── tabibu-junk/        # cache/temp/log/trash/large-old scanners
+│       ├── tabibu-junk/        # cache/temp/log/trash/large-old scanners (rayon-parallel)
 │       ├── tabibu-uninstall/   # remnants, orphans, unused apps, stale binaries
 │       ├── tabibu-malware/     # adware/profile heuristics + quarantine vault
 │       ├── tabibu-monitor/     # sysinfo system + per-process sampling
-│       ├── tabibu-ffi/         # the ONLY C ABI surface (unsafe lives here)
-│       └── tabibu-bench/       # (criterion benches live per-crate in benches/)
-├── Tabibu/                     # SwiftUI app (SwiftPM)
-│   └── Sources/
-│       ├── CTabibuCore/        # C target exposing the FFI header to Swift
-│       └── Tabibu/             # Core/ Model/ Views/ Components/ Services/
-├── TabibuMonitor/              # menu-bar agent (pure AppKit, SwiftPM)
-├── TabibuHelper/               # privileged XPC helper skeleton (SwiftPM)
-├── scripts/                    # build-core, make-icon/app/dmg, bench-gate, uninstall
-├── docs/                       # ADRs, FFI contract, module guides (mermaid)
+│       └── tabibu-bench/       # criterion benches (also live per-crate in benches/)
+├── app/                        # Tauri v2 desktop shell
+│   ├── package.json            # @tauri-apps/cli (CLI only; frontend has no bundler)
+│   ├── src/                    # static frontend: index.html, styles.css, main.js, icons.js
+│   └── src-tauri/              # Rust backend — calls the core crates directly (no FFI)
+│       ├── Cargo.toml          # standalone package, path deps into ../../core/crates
+│       ├── tauri.conf.json     # window, bundle, CSP
+│       ├── capabilities/       # Tauri v2 permissions
+│       ├── icons/              # app icon set
+│       └── src/                # main.rs, commands.rs, system.rs
+├── scripts/                    # make-icon, bench-gate, uninstall-tabibu
+├── docs/                       # ADRs, module guides (mermaid)
 ├── memory/                     # the project "brain" — read this first
-├── build/                      # generated artifacts (gitignored)
 └── .github/workflows/          # CI + release pipelines
 ```
 
 ## Architecture
 
-Two languages, split along their strengths (full rationale: ADR-0001/0002 and
-`memory/architecture.md`):
+One language end to end (Rust) for all logic; the view layer is the web
+platform. Full rationale: **ADR-0003** (and `memory/architecture.md`). The
+project began with a SwiftUI shell over a C-FFI bridge — that was replaced by
+Tauri, which removed the bridge entirely (ADR-0001/0002 are superseded).
 
-- **Rust core** does all throughput work — walking, hashing, scanning,
-  reclaiming — and owns the safety invariants. Compiled to a universal static
-  library `libtabibu_ffi.a`.
-- **Swift/SwiftUI shell** does the native macOS UI and platform access (IOKit,
-  TCC/FDA, `SMAppService`, XPC). Four signed binaries: the app, the menu-bar
-  monitor, the privileged helper, and the linked-in Rust lib.
+- **Rust core** (`core/`) does all throughput work — walking, hashing,
+  scanning, reclaiming — and owns the safety invariants.
+- **Tauri shell** (`app/`): the Rust backend (`src-tauri`) depends on the core
+  crates *by path* and exposes them as `#[tauri::command]`s; the frontend
+  (`src`) is static HTML/CSS/JS using `window.__TAURI__`.
 
 ```
-┌─ Tabibu.app (SwiftUI) ─┐   C ABI / JSON   ┌─ libtabibu_ffi.a (Rust) ─┐
-│ views, review, reclaim │◄────────────────►│ engine + scanners (in-proc)│
-└───────────┬────────────┘   (ADR-0001)     └────────────────────────────┘
-            │ XPC (allowlisted)
-   ┌────────▼─────────┐                      ┌──────────────────────────┐
-   │ TabibuHelper(root)│                     │ TabibuMonitor (menu-bar) │
-   └──────────────────┘                      └──────────────────────────┘
+┌─ app/src (web UI) ─┐  invoke / Channel  ┌─ app/src-tauri (Rust) ─┐  path dep  ┌─ core crates ─┐
+│ sidebar, scan flow │◄──────────────────►│ #[tauri::command]s     │◄──────────►│ engine+scanners│
+│ review, treemap…   │  (serde, no FFI)   │ system.rs (macOS facts)│            │ (in-process)   │
+└────────────────────┘                    └────────────────────────┘            └────────────────┘
 ```
 
-**Safety backbone** (engine, property- and golden-image-tested): scanning is
-read-only behind a denylist guard; reclaim is the *only* mutating path, writes
-an undo manifest before touching anything, trashes rather than deletes below
-`Safe`, and reports *measured* freed bytes. The denylist invariant — *no
-returned path escapes the allowed roots* — is property-tested against a
-deliberately malicious scanner.
+**Safety backbone** (in the engine, property- and golden-image-tested):
+scanning is read-only behind a denylist guard; reclaim is the *only* mutating
+path, writes an undo manifest before touching anything, trashes rather than
+deletes below `Safe`, and reports *measured* freed bytes. The denylist
+invariant — *no returned path escapes the allowed roots* — is property-tested
+against a deliberately malicious scanner.
 
-**FFI** (`tabibu-ffi`, the only crate allowed `unsafe`): ~10 hand-written
-`extern "C"` functions, composite data as JSON, cancellation via opaque op
-handles, streaming via C callbacks, `Rust allocates / Rust frees`, ABI version
-asserted by Swift at launch. Contract + diagrams: `docs/ffi.md`.
+**Backend ↔ core**: no FFI. Tauri serializes command args/returns with serde,
+which the core types already derive. Streaming scan results use a Tauri
+`Channel`; `system.rs` gathers macOS facts (home, Full Disk Access probe,
+running-app bundle IDs, battery via `ioreg`/`pmset`, launch agents) without
+Objective-C bindings.
 
 ## Building
 
-All commands assume repo root unless noted. Verified on macOS 26.5 / Xcode 26.5
-/ Rust 1.94.
-
 | Goal | Command |
 |---|---|
-| Rust core (universal, staged to `build/`) | `scripts/build-core.sh` |
-| Rust core (fast, debug) | `scripts/build-core.sh --debug` |
-| App (single-arch, dev) | `swift build --package-path Tabibu` |
-| App (universal, release) | `swift build -c release --arch arm64 --arch x86_64 --package-path Tabibu` |
-| Menu-bar agent | `swift build -c release --arch arm64 --arch x86_64 --package-path TabibuMonitor` |
-| Helper (build-verify only) | `swift build --package-path TabibuHelper` |
+| Run the app (hot reload) | `cd app && npm run dev` |
+| Compile the backend only | `cargo build --manifest-path app/src-tauri/Cargo.toml` |
+| Bundle `.app` + DMG (debug) | `cd app && npx tauri build --debug` |
+| Bundle universal (release) | `cd app && npx tauri build --target universal-apple-darwin` |
+| App icon set | `scripts/make-icon.sh` then copy into `app/src-tauri/icons/` |
 
-The Swift packages link the Rust lib via `linkerSettings` (`-L<root>/build
--ltabibu_ffi`); run `build-core.sh` first. `build-core.sh` exports
-`MACOSX_DEPLOYMENT_TARGET=14.0` to match `Package.swift` — building the Rust
-lib by hand without it produces ld version warnings.
+The frontend is static — no Node bundler, no build step. `npm install` in
+`app/` exists only to provide the Tauri CLI. The first backend build compiles
+the Tauri dependency tree (one-time, cached thereafter).
 
 ## Testing & quality gates
 
@@ -146,45 +138,33 @@ These are merge requirements, not suggestions (`memory/test.md`):
 ```sh
 cd core
 cargo test --workspace            # 95 tests: unit, integration, property, golden-image
-cargo clippy --workspace --all-targets   # deny(warnings) + pedantic
+cargo clippy --workspace --all-targets   # clippy::all denied; pedantic advisory (CI-portable)
 cargo fmt --check                 # rustfmt clean
-cargo build -p tabibu-malware --features clamav   # feature-gated path compiles
 
-# Performance: criterion benches + >5% regression gate
-scripts/bench-gate.sh --update-baseline   # bless current numbers into core/benches-baseline/
-scripts/bench-gate.sh                      # fail if any bench regresses >5% vs baseline
-
-# Monitor resource budget (hard CPU gate; honest RSS ceiling)
-swift build -c release --arch arm64 --arch x86_64 --package-path TabibuMonitor
-TabibuMonitor/budget-test.sh
+# Performance: criterion benches + >5% regression gate (consistent machine only)
+scripts/bench-gate.sh --update-baseline   # bless numbers locally (gitignored, hardware-specific)
+scripts/bench-gate.sh                      # compare vs baseline
+scripts/bench-gate.sh --smoke              # CI mode: run-only, no cross-machine comparison
 ```
 
 What's enforced and why:
 - **Safety invariants** are property-tested (`tabibu-engine/tests/denylist_prop.rs`)
   and golden-image-tested (`golden_reclaim.rs`: snapshot → reclaim → assert
   exactly the intended files changed; plus fault injection).
-- **FFI** has round-trip contract tests (`tabibu-ffi/tests/roundtrip.rs`) that
-  drive the C ABI exactly as Swift does. Changing the surface means changing
-  that test + the header + `CoreBridge.swift` + the version constant together.
-- **Benchmarks** gate merges: `bench-gate.sh` parses criterion's
-  `estimates.json` and fails on >5% mean regression.
+- **clippy** gates on `clippy::all` (correctness); `pedantic` is advisory
+  because its lint set drifts between toolchain versions and would flap on CI.
+- **cargo-deny** (CI) checks licenses, advisories, bans, sources.
+- **Benchmarks**: `bench-gate.sh` is hardware-specific, so CI runs `--smoke`
+  (compile + run, no comparison); the real >5% gate runs on a consistent box.
 
 ## Packaging & release
 
-```sh
-scripts/make-icon.sh     # build/AppIcon.icns (generated programmatically)
-scripts/make-app.sh      # build/Tabibu.app (universal, icon, monitor login item, signed)
-scripts/make-dmg.sh      # build/Tabibu-<VERSION>.dmg (LZMA/ULMO, mount-verified)
-```
-
-- `SIGN_IDENTITY` defaults to `-` (ad-hoc). With a real Developer ID it enables
-  Hardened Runtime; set `NOTARIZE=1` on `make-dmg.sh` once `notarytool`
-  credentials exist.
-- DMG uses ULMO (LZMA) for best ratio, falling back to ULFO/UDZO if
-  unsupported, and prints the achieved ratio.
-- `scripts/uninstall-tabibu.sh` is the honest self-uninstaller (`--dry-run` by
-  default; `--yes` to act).
-- Full pipeline and the external blockers: `docs/release.md`.
+`tauri build` produces the universal `.app` and DMG directly — there is no
+hand-rolled bundler. Push a `v*` tag and `.github/workflows/release.yml` runs
+`npx tauri build --target universal-apple-darwin`; signing and notarization
+activate automatically when the Apple secrets exist (see the workflow header).
+`scripts/uninstall-tabibu.sh` is the honest self-uninstaller (`--dry-run` by
+default; `--yes` to act).
 
 ## The knowledge base (`memory/`)
 
@@ -193,55 +173,58 @@ scripts/make-dmg.sh      # build/Tabibu-<VERSION>.dmg (LZMA/ULMO, mount-verified
 
 | File | What it holds |
 |---|---|
-| `tabibu-engineering-guide.md` | The technical spine: platform constraints, features, milestones |
+| `tabibu-engineering-guide.md` | Platform constraints, features, milestones |
 | `agent_profile.md` | Operating contract: zero-hallucination, testing culture |
 | `architecture.md` / `mindmap.md` | System structure (deep / at-a-glance) |
 | `philosophy.md` | Why safety > honesty > performance > features |
 | `mac_pain_points.md` | The real Mac complaints each feature targets |
 | `test.md` | Testing methodology + resource budgets |
 | `design.md` | Design system, the Scan→Review→Reclaim flow, tokens, a11y |
-| `todo.md` | Roadmap M0–M8 + honest status of what's done |
+| `todo.md` | Roadmap + honest status of what's done |
 | `handover_session.md` | Timestamped dev log — newest first |
 
 ## Documentation map
 
 | Location | Content |
 |---|---|
-| `docs/adr/` | Architecture Decision Records (FFI choice, SwiftPM) |
-| `docs/ffi.md` | The C ABI contract + scan/reclaim flow diagrams |
-| `docs/setup.md` | Clean-machine build instructions + gotchas |
-| `docs/release.md` | Signing, notarization, compression, external blockers |
-| `docs/modules/*.md` | Per-crate/component guides with mermaid diagrams |
+| `docs/adr/` | Architecture Decision Records (0003 = Tauri; 0001/0002 superseded) |
+| `docs/setup.md` | Clean-machine build instructions |
+| `docs/release.md` | Signing, notarization, external blockers |
+| `docs/modules/*.md` | Per-crate guides with mermaid diagrams |
 
 ## Contributing workflow
 
 1. **Start** by reading the last 2–3 `memory/handover_session.md` entries and
    the active milestone in `memory/todo.md`.
-2. **Branch** `m<N>/<topic>`; commit messages scoped (`engine:`, `dupes:`,
-   `shell:`, `ci:`).
-3. **For a new scanner:** implement `Scanner`, register in your crate's
-   `scanners()`, add fixtures + tests, add a bench if it's on a hot path, wire
-   the id through `tabibu-ffi`'s scan registry and the UI.
-4. **For any mutating change:** design the undo first; add a golden-image test
+2. **For a new scanner:** implement `Scanner`, register in your crate's
+   `scanners()`, add fixtures + tests, add a bench if it's on a hot path, then
+   expose it through a command in `app/src-tauri/src/commands.rs` and the UI.
+3. **For any mutating change:** design the undo first; add a golden-image test
    before implementing.
-5. **Before pushing:** the gates in [Testing](#testing--quality-gates) must be
-   green, and the relevant `docs/` / `memory/` files updated in the same change
-   (stale docs are bugs).
-6. **End** with a timestamped `handover_session.md` entry.
+4. **Before pushing:** the gates above must be green, and the relevant `docs/`
+   / `memory/` files updated in the same change (stale docs are bugs).
+5. **End** with a timestamped `handover_session.md` entry.
 
 ## Current limitations
 
 Honest, and tracked in `memory/todo.md`:
 
-- **Not distributable yet** — no Developer ID / notarization credentials in the
-  build environment; builds are ad-hoc signed (Gatekeeper rejects on other
-  Macs). The pipeline is wired and conditional.
+- **Not distributable yet** — no Developer ID / notarization credentials, so
+  bundles are unsigned (Gatekeeper rejects on other Macs without right-click →
+  Open). The pipeline is wired and conditional.
 - **ClamAV** is a feature-gated stub; v1 ships native adware heuristics.
   Real-time (Endpoint Security) scanning is deferred (Apple entitlement).
-- **SMART** status is a helper stub; Rosetta flagging, free-space *trend*, GPU
-  `powermetrics`, and deselection telemetry are not yet built.
-- The privileged **helper** is build-verified only (install needs the signed
-  app via `SMAppService`).
+- **Tray is minimal** — a Tauri status item with a live CPU/memory tooltip and
+  Open/Quit menu. A rich health *popover window* (CleanMyMac-style) is a
+  follow-up. No privileged helper (not needed — all features are user-space).
+- **Exact CPU die temperature and GPU `powermetrics` need root** — Tabibu
+  ships the honest **thermal pressure** signal (`pmset -g therm`) instead; true
+  per-degree readings would require the deferred privileged helper.
+- **Install-time artifact monitoring** (FSEvents) is a follow-up — the
+  Uninstaller's disk-wide leftover/orphan scan covers post-uninstall artifacts.
+  (v0.1.3 shipped: whole-home duplicates, force-quit, thermal pressure,
+  dashboard line graphs + free-space trend, leftovers scan, Security scan UI,
+  SMART status, FDA onboarding, per-volume trashes.)
 
 ## License
 

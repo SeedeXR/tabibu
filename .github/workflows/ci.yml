@@ -57,37 +57,40 @@ jobs:
           manifest-path: core/Cargo.toml
           arguments: ""
 
-  bench-gate:
-    name: bench regression gate
+  bench-smoke:
+    name: bench smoke
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
-      # The gate only has teeth once a baseline has been blessed
-      # (scripts/bench-gate.sh --update-baseline) and committed. Until then
-      # this job is skipped rather than green-by-accident.
-      - name: Run bench gate
-        if: ${{ hashFiles('core/benches-baseline/**') != '' }}
-        run: ./scripts/bench-gate.sh
-      - name: No baseline yet
-        if: ${{ hashFiles('core/benches-baseline/**') == '' }}
-        run: echo "core/benches-baseline/ not present; bench gate skipped. Bless one with scripts/bench-gate.sh --update-baseline."
+      # Criterion baselines are hardware-specific, so the >5% regression gate
+      # cannot run meaningfully on a shared GitHub runner (its CPU differs from
+      # any contributor's, producing bogus "regressions"). CI runs benches in
+      # --smoke mode: reduced sampling, no baseline comparison — it only proves
+      # the benches still compile and run. The real regression gate
+      # (scripts/bench-gate.sh) runs locally or on a consistent self-hosted
+      # runner. See the script header.
+      - name: Bench smoke (no cross-machine comparison)
+        run: ./scripts/bench-gate.sh --smoke
 
-  swift:
-    name: swift build
+  app:
+    name: tauri app build
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      # The Swift packages land later; build each one only once its
-      # Package.swift exists so this job is a no-op until then.
-      - name: Build Tabibu
-        if: ${{ hashFiles('Tabibu/Package.swift') != '' }}
-        run: swift build -c release --package-path Tabibu
-      - name: Build TabibuMonitor
-        if: ${{ hashFiles('TabibuMonitor/Package.swift') != '' }}
-        run: swift build -c release --package-path TabibuMonitor
-      - name: No Swift packages yet
-        if: ${{ hashFiles('Tabibu/Package.swift', 'TabibuMonitor/Package.swift') == '' }}
-        run: echo "No Package.swift found; Swift build skipped."
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      # Compile the Tauri shell (Rust backend + core crates, via path deps).
+      # The frontend is static (no Node build step), so a plain cargo build is
+      # the lightest way to verify the app compiles. Full bundling + signing +
+      # notarization happens in release.yml, not on every CI run, to keep the
+      # runner's CPU/time low.
+      - name: Build Tabibu app (compile only)
+        if: ${{ hashFiles('app/src-tauri/Cargo.toml') != '' }}
+        run: cargo build --manifest-path app/src-tauri/Cargo.toml
+      - name: No app yet
+        if: ${{ hashFiles('app/src-tauri/Cargo.toml') == '' }}
+        run: echo "app/src-tauri not present; app build skipped."

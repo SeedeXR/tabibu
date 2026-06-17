@@ -14,3 +14,11 @@ build/
 xcuserdata/
 
 memory/
+
+# Bench baselines are hardware-specific; never commit (see scripts/bench-gate.sh)
+core/benches-baseline/
+
+# Tauri / Node
+app/src-tauri/target/
+app/src-tauri/gen/
+app/node_modules/

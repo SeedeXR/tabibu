@@ -1,6 +1,7 @@
 # ADR-0002: SwiftPM packages + bundle-assembly script instead of .xcodeproj
 
-Date: 2026-06-13 · Status: Accepted
+Date: 2026-06-13 · Status: **Superseded by ADR-0003** (the Swift packages were
+removed in favour of a Tauri shell). Kept for history.
 
 ## Context
 

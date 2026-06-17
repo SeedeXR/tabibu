@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use rayon::prelude::*;
 use tabibu_engine::{CancelToken, Category, CleanupItem, SafetyTier, ScanCtx, ScanError, Scanner};
 
 const SEVEN_DAYS: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -75,7 +76,7 @@ pub use large_old::LargeOldScanner;
 #[must_use]
 pub fn scanners() -> Vec<Box<dyn Scanner>> {
     vec![
-        Box::new(TrashScanner),
+        Box::new(TrashScanner::new()),
         Box::new(UserCacheScanner),
         Box::new(DevCacheScanner),
         Box::new(TempScanner::new()),
@@ -88,9 +89,11 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
 // Sizing and staleness helpers
 // ---------------------------------------------------------------------------
 
-/// Recursive size of a directory tree. Symlinks are counted by their own
-/// metadata and never followed; unreadable entries count as zero. Checks
-/// `cancel` on entering every directory.
+/// Recursive directory size, parallelized with `rayon`: a directory's
+/// children are sized concurrently (nested recursion uses the same work-
+/// stealing pool). Never follows symlinks. Per-entry I/O errors count as 0,
+/// matching the read-only "skip what we can't read" rule; cancellation is
+/// checked at every directory boundary.
 fn dir_size(path: &Path, cancel: &CancelToken) -> Result<u64, ScanError> {
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
@@ -98,17 +101,28 @@ fn dir_size(path: &Path, cancel: &CancelToken) -> Result<u64, ScanError> {
     let Ok(entries) = fs::read_dir(path) else {
         return Ok(0);
     };
-    let mut total = 0u64;
-    for entry in entries.flatten() {
-        // `DirEntry::metadata` does not traverse symlinks.
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.is_dir() {
-            total += dir_size(&entry.path(), cancel)?;
-        } else {
-            total += meta.len();
-        }
-    }
-    Ok(total)
+    let children: Vec<fs::DirEntry> = entries.flatten().collect();
+    // Propagate cancellation OUT of the parallel walk rather than swallowing it
+    // to 0: a cancel deep in a subtree now aborts the whole sizing via
+    // `try_reduce`'s short-circuit, instead of contributing 0 while the rest of
+    // the level finishes and is summed.
+    children
+        .par_iter()
+        .map(|entry| -> Result<u64, ScanError> {
+            if cancel.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            // `DirEntry::metadata` does not traverse symlinks.
+            let Ok(meta) = entry.metadata() else {
+                return Ok(0);
+            };
+            if meta.is_dir() {
+                dir_size(&entry.path(), cancel)
+            } else {
+                Ok(meta.len())
+            }
+        })
+        .try_reduce(|| 0, |a, b| Ok(a + b))
 }
 
 /// Size of one filesystem entry: recursive for directories, `len()` for
@@ -135,9 +149,62 @@ fn is_older_than(meta: &fs::Metadata, max_age: Duration, now: SystemTime) -> boo
 // TrashScanner
 // ---------------------------------------------------------------------------
 
-/// Lists every top-level entry of `~/.Trash` as an individually reviewable
-/// item, sized recursively.
-pub struct TrashScanner;
+/// Lists every top-level entry of `~/.Trash` **and** per-volume trashes
+/// (`/Volumes/*/.Trashes/<uid>`) as individually reviewable items, sized
+/// recursively. Hidden entries are included — the Trash holds whatever was
+/// deleted, hidden or not.
+pub struct TrashScanner {
+    /// Root that holds mounted volumes (default `/Volumes`; injectable for tests).
+    volumes_root: PathBuf,
+}
+
+impl Default for TrashScanner {
+    fn default() -> Self {
+        Self {
+            volumes_root: PathBuf::from("/Volumes"),
+        }
+    }
+}
+
+impl TrashScanner {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_volumes_root(volumes_root: PathBuf) -> Self {
+        Self { volumes_root }
+    }
+
+    /// Emit each top-level entry of one trash directory.
+    fn scan_trash_dir(
+        dir: &Path,
+        where_label: &str,
+        cancel: &CancelToken,
+        sink: &mut dyn FnMut(CleanupItem),
+    ) -> Result<(), ScanError> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(());
+        };
+        for entry in entries.flatten() {
+            if cancel.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            let path = entry.path();
+            let size = entry_size(&path, cancel)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            sink(CleanupItem::new(
+                path,
+                Category::Trash,
+                size,
+                SafetyTier::Safe,
+                format!("\"{name}\" is in {where_label} — emptying frees its space"),
+            ));
+        }
+        Ok(())
+    }
+}
 
 impl Scanner for TrashScanner {
     fn id(&self) -> &'static str {
@@ -153,27 +220,52 @@ impl Scanner for TrashScanner {
         if cancel.is_cancelled() {
             return Err(ScanError::Cancelled);
         }
-        let root = ctx.home.join(".Trash");
-        let Ok(entries) = fs::read_dir(&root) else {
+        // 1. The main Trash.
+        Self::scan_trash_dir(&ctx.home.join(".Trash"), "the Trash", cancel, sink)?;
+
+        // 2. Per-volume trashes — the dir list comes from the SINGLE shared
+        // derivation `per_volume_trash_dirs` (also used by the app's
+        // allowed-roots builder, so the scanned paths and the reclaim guard
+        // can never drift).
+        use std::os::unix::fs::MetadataExt;
+        let Ok(uid) = fs::metadata(&ctx.home).map(|m| m.uid()) else {
             return Ok(());
         };
-        for entry in entries.flatten() {
+        for trash in per_volume_trash_dirs(&self.volumes_root, uid) {
             if cancel.is_cancelled() {
                 return Err(ScanError::Cancelled);
             }
-            let path = entry.path();
-            let size = entry_size(&path, cancel)?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            sink(CleanupItem::new(
-                path,
-                Category::Trash,
-                size,
-                SafetyTier::Safe,
-                format!("\"{name}\" is already in the Trash — emptying frees its space"),
-            ));
+            Self::scan_trash_dir(&trash, "an external volume's Trash", cancel, sink)?;
         }
         Ok(())
     }
+}
+
+/// The per-volume Trash directories (`<volumes_root>/<vol>/.Trashes/<uid>`) for
+/// mounted non-boot volumes. The SINGLE source of truth for these paths: both
+/// [`TrashScanner`] (what it emits) and the app's allowed-roots builder (what
+/// reclaim permits) call this, so the two can't drift.
+///
+/// The boot volume's `/Volumes` entry is a symlink to `/`; we skip it with a
+/// non-blocking `symlink_metadata` + `read_link` (NOT `canonicalize`, which
+/// resolves the target and can hang on a stale/slow network mount).
+#[must_use]
+pub fn per_volume_trash_dirs(volumes_root: &Path, uid: u32) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(volumes_root) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        // Skip the boot-volume firmlink symlink (-> /) without traversing it.
+        let is_root_link = fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink())
+            && fs::read_link(&p).is_ok_and(|t| t == Path::new("/"));
+        if is_root_link {
+            continue;
+        }
+        dirs.push(p.join(".Trashes").join(uid.to_string()));
+    }
+    dirs
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +276,14 @@ impl Scanner for TrashScanner {
 /// a bundle ID whose app is currently running are skipped entirely
 /// (running-process guard).
 pub struct UserCacheScanner;
+
+/// A cache folder selected for sizing — tier/reason decided up front so the
+/// expensive sizing can run in parallel without touching the sink.
+struct CacheCandidate {
+    path: PathBuf,
+    tier: SafetyTier,
+    reason: String,
+}
 
 /// Heuristic reverse-DNS check: at least two non-empty, dot-separated
 /// segments of ASCII alphanumerics, hyphens, or underscores.
@@ -200,6 +300,21 @@ fn looks_like_bundle_id(name: &str) -> bool {
         segments += 1;
     }
     segments >= 2
+}
+
+/// True when a cache folder named `name` belongs to a currently-running app.
+/// Beyond an exact bundle-id match this also treats a folder as in-use when it
+/// is a dotted *sub-identifier* of a running id (e.g. `com.foo.Bar.Helper`
+/// while `com.foo.Bar` runs) or vice-versa, so a running app's helper/XPC cache
+/// is not offered as Safe-to-delete while the app is live.
+fn belongs_to_running(name: &str, running: &std::collections::HashSet<String>) -> bool {
+    running.iter().any(|r| {
+        name == r
+            || name
+                .strip_prefix(r.as_str())
+                .is_some_and(|s| s.starts_with('.'))
+            || r.strip_prefix(name).is_some_and(|s| s.starts_with('.'))
+    })
 }
 
 impl Scanner for UserCacheScanner {
@@ -220,6 +335,10 @@ impl Scanner for UserCacheScanner {
         let Ok(entries) = fs::read_dir(&root) else {
             return Ok(());
         };
+
+        // Phase 1 (cheap, sequential): decide which folders are candidates and
+        // their tier/reason, applying the running-process guard. No sizing yet.
+        let mut candidates: Vec<CacheCandidate> = Vec::new();
         for entry in entries.flatten() {
             if cancel.is_cancelled() {
                 return Err(ScanError::Cancelled);
@@ -233,36 +352,54 @@ impl Scanner for UserCacheScanner {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            let item = if looks_like_bundle_id(&name) {
-                if ctx.running_bundle_ids.contains(&name) {
-                    continue; // running-process guard
+            let (tier, reason) = if looks_like_bundle_id(&name) {
+                if belongs_to_running(&name, &ctx.running_bundle_ids) {
+                    continue; // running-process guard (incl. sub-identifiers)
                 }
-                let size = dir_size(&entry.path(), cancel)?;
                 let reason = if BROWSER_BUNDLE_IDS.contains(&name.as_str()) {
                     format!("Browser cache for {name} (not running)")
                 } else {
                     format!("Cache for {name} (not running)")
                 };
-                CleanupItem::new(
-                    entry.path(),
-                    Category::UserCache,
-                    size,
-                    SafetyTier::Safe,
-                    reason,
-                )
+                (SafetyTier::Safe, reason)
             } else {
-                let size = dir_size(&entry.path(), cancel)?;
-                CleanupItem::new(
-                    entry.path(),
-                    Category::UserCache,
-                    size,
+                (
                     SafetyTier::Review,
                     format!(
                         "Cache folder \"{name}\" — owning app not identified, review before removing"
                     ),
                 )
             };
-            sink(item);
+            candidates.push(CacheCandidate {
+                path: entry.path(),
+                tier,
+                reason,
+            });
+        }
+
+        // Phase 2 (the expensive part): size every candidate concurrently.
+        // `dir_size` is itself parallel, so this saturates the rayon pool
+        // across folders instead of sizing them one at a time.
+        // Short-circuit on cancellation instead of swallowing each folder's
+        // sizing error to 0: `collect::<Result<_,_>>` aborts on the first
+        // `Cancelled` from `dir_size`.
+        let sized: Vec<(CacheCandidate, u64)> = candidates
+            .into_par_iter()
+            .map(|c| -> Result<(CacheCandidate, u64), ScanError> {
+                let size = dir_size(&c.path, cancel)?;
+                Ok((c, size))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Phase 3 (cheap, sequential): emit through the single-threaded sink.
+        for (c, size) in sized {
+            sink(CleanupItem::new(
+                c.path,
+                Category::UserCache,
+                size,
+                c.tier,
+                c.reason,
+            ));
         }
         Ok(())
     }

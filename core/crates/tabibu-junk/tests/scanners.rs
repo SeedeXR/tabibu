@@ -69,7 +69,9 @@ fn trash_lists_top_level_entries_with_recursive_sizes() {
     write_file(&home.path().join(".Trash/Folder/nested/b.bin"), b"1234");
 
     let ctx = make_ctx(home.path());
-    let mut items = run(&TrashScanner, &ctx);
+    // Inject an empty volumes root so the test never reads the real /Volumes.
+    let scanner = TrashScanner::with_volumes_root(home.path().join("no-volumes"));
+    let mut items = run(&scanner, &ctx);
     items.sort_by(|a, b| a.path.cmp(&b.path));
 
     assert_eq!(items.len(), 2);
@@ -91,7 +93,32 @@ fn trash_lists_top_level_entries_with_recursive_sizes() {
 fn trash_missing_dir_yields_no_items() {
     let home = tempfile::tempdir().unwrap();
     let ctx = make_ctx(home.path());
-    assert!(run(&TrashScanner, &ctx).is_empty());
+    let scanner = TrashScanner::with_volumes_root(home.path().join("no-volumes"));
+    assert!(run(&scanner, &ctx).is_empty());
+}
+
+#[test]
+fn trash_includes_per_volume_trashes() {
+    use std::os::unix::fs::MetadataExt;
+    let home = tempfile::tempdir().unwrap();
+    let uid = std::fs::metadata(home.path()).unwrap().uid();
+    // A fake mounted volume with a per-uid trash holding one deleted file.
+    let vols = home.path().join("Volumes");
+    let vtrash = vols.join("BackupDrive/.Trashes").join(uid.to_string());
+    write_file(&vtrash.join("old-export.zip"), b"abcdef");
+
+    let ctx = make_ctx(home.path());
+    let scanner = TrashScanner::with_volumes_root(vols);
+    let items = run(&scanner, &ctx);
+
+    assert_eq!(
+        items.len(),
+        1,
+        "the external-volume trashed file should be found"
+    );
+    assert_eq!(items[0].path, vtrash.join("old-export.zip"));
+    assert_eq!(items[0].size_bytes, 6);
+    assert_eq!(items[0].tier, SafetyTier::Safe);
 }
 
 // ---------------------------------------------------------------------------

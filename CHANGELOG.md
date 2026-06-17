@@ -12,6 +12,83 @@ User-facing entries are written honestly — no inflated counts, no marketing
 
 Nothing yet.
 
+## [0.1.3] — 2026-06-16
+
+### Added
+- **Duplicates: whole-home scan** — no folder pick required; "Scan Home" by
+  default (or choose a folder). Documents/Desktop/Pictures/Mail/iCloud stay
+  protected by the denylist even here (reported as skipped, never touched).
+- **Force-quit from Memory & CPU** — per-process Quit (SIGTERM); on failure,
+  offer Force Quit (SIGKILL). Confirms and warns about unsaved work.
+- **Thermal pressure** card (Dashboard + Memory) from `pmset -g therm` —
+  honest: exact CPU die temperature needs root, so we show the real
+  thermal/throttle signal instead, with a note.
+- **Dashboard line graphs** — colorful live CPU% and memory% time-series
+  (gradient-filled SVG), plus a **free-space trend** persisted across launches.
+- **Uninstaller → Find Leftovers** — disk-wide orphan scan for support files
+  whose owning app is gone (Risky tier, never pre-selected); review + trash.
+- **Security scan UI** — runs adware/rogue-profile heuristics; review and send
+  detections to the locked **quarantine vault** (move + lock, never delete).
+- **SMART status** on the Disk view (`diskutil info -plist /`).
+- **Full Disk Access onboarding** — explains FDA is the one-time universal
+  grant (no per-folder shortcut, no self-grant possible) with a re-check button.
+- **Per-volume trashes** — `TrashScanner` now also lists
+  `/Volumes/*/.Trashes/<uid>` (external-drive Trash), hidden entries included.
+
+### Notes / honest limits
+- Exact CPU **die temperature** and **GPU `powermetrics`** require root (a
+  privileged helper we don't ship); thermal *pressure* is shown instead.
+- The menu-bar tray remains icon + live tooltip + menu; a **rich popover
+  window** is still a follow-up.
+
+## [0.1.2] — 2026-06-16
+
+### Added
+- **Rosetta flagging** — `tabibu-monitor` detects translated (x86_64-on-arm64)
+  processes via per-pid `sysctl` (`P_TRANSLATED`, empirically verified:
+  `p_flag` `0x34004` translated vs `0x4004` native); Memory & CPU shows a
+  "Rosetta" badge.
+- **Deselection telemetry** — new `tabibu-telemetry` crate: opt-in (default
+  OFF), privacy-respecting. Records only {category, tier, size bucket, ts} when
+  a user unchecks a `Safe` suggestion — never paths/contents. Turning it off
+  deletes collected data. Settings toggle with a plain-language explanation.
+- **Mac Health dashboard** (new default view) — honest, measured cards:
+  storage free/used, memory %, CPU %, battery (charge/cycles/health), last
+  Smart Scan. No invented metrics.
+- **Themed hero landings** — per-section accent gradients, glyph, feature list,
+  and a prominent Scan button (CleanMyMac-inspired, honest copy).
+- **Menu-bar tray** — Tauri tray with a live CPU/memory tooltip and Open/Quit
+  menu, replacing the removed Swift `TabibuMonitor` (Swift-free).
+
+### Changed
+- **Shell is Tauri v2** (ADR-0003), finalized from the prior SwiftUI shell. The Rust backend
+  (`app/src-tauri`) now calls the core crates directly through
+  `#[tauri::command]`s — the C-FFI/JSON bridge is gone. Frontend is a static
+  HTML/CSS/JS app (`app/src`) using `window.__TAURI__`, with the same design
+  system, Lucide icons, and feature views (Smart Scan, Junk, Large & Old,
+  Duplicates, Disk treemap, Memory & CPU, Battery, Uninstaller, Startup,
+  Security placeholder). Battery/startup facts come from `ioreg`/`pmset`/plist
+  parsing (no Objective-C bindings).
+- Cache sizing parallelized with `rayon` (`tabibu-junk`): real-home scan
+  ~7.8s → ~0.26s.
+- CI/release retargeted: `swift build` job → `cargo build` of `app/src-tauri`;
+  release runs `tauri build --target universal-apple-darwin`.
+- **Zero Swift:** `scripts/make-icon.sh` rewritten to generate the icon via
+  SVG + `qlmanage` + `tauri icon` (no `swift` CLI). Removed the dead Swift
+  module docs. The only remaining "swift" is `swift-rs`, a transitive crate
+  inside Tauri's own macOS plumbing (not our code).
+
+### Removed
+- `Tabibu/`, `TabibuMonitor/`, `TabibuHelper/` (Swift shell);
+  `core/crates/tabibu-ffi/` + `core/include/` (C ABI); the Swift-era packaging
+  scripts (`build-core.sh`, `make-app.sh`, `make-dmg.sh`). ADR-0001/0002 and
+  `docs/ffi.md` superseded.
+
+### Fixed
+- CI failures: cargo-deny wildcard-path bans (crates marked `publish = false`),
+  clippy pedantic version-drift (no longer gated), bench gate cross-machine
+  baseline (now `--smoke` on CI).
+
 ## [0.1.0] — 2026-06-13
 
 First end-to-end vertical slice: Rust core ↔ Swift shell, building, tested,

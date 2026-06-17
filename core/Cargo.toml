@@ -8,12 +8,12 @@ members = [
     "crates/tabibu-uninstall",
     "crates/tabibu-malware",
     "crates/tabibu-monitor",
-    "crates/tabibu-ffi",
+    "crates/tabibu-telemetry",
     "crates/tabibu-bench",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"
@@ -26,6 +26,7 @@ tabibu-junk = { path = "crates/tabibu-junk" }
 tabibu-uninstall = { path = "crates/tabibu-uninstall" }
 tabibu-malware = { path = "crates/tabibu-malware" }
 tabibu-monitor = { path = "crates/tabibu-monitor" }
+tabibu-telemetry = { path = "crates/tabibu-telemetry" }
 
 rayon = "1.10"
 blake3 = { version = "1.5", features = ["rayon"] }
@@ -47,7 +48,13 @@ unsafe_code = "deny"          # overridden to allow only in tabibu-ffi / syscall
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+# `pedantic` is intentionally NOT gated: its lint set changes between clippy
+# versions, so denying it makes CI fail whenever the GitHub runner's clippy
+# differs from a contributor's (the local toolchain may be clean while the
+# runner's is not). Correctness (`clippy::all`) and rustc `warnings` stay
+# hard-denied; pedantic stays available for opt-in local runs
+# (`cargo clippy -- -W clippy::pedantic`).
+pedantic = { level = "allow", priority = -1 }
 
 [profile.release]
 lto = "thin"
