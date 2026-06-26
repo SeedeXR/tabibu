@@ -31,6 +31,7 @@ tabibu-walk = { path = "../../core/crates/tabibu-walk" }
 tabibu-dupes = { path = "../../core/crates/tabibu-dupes" }
 tabibu-junk = { path = "../../core/crates/tabibu-junk" }
 tabibu-uninstall = { path = "../../core/crates/tabibu-uninstall" }
+tabibu-brew = { path = "../../core/crates/tabibu-brew" }
 tabibu-malware = { path = "../../core/crates/tabibu-malware" }
 tabibu-monitor = { path = "../../core/crates/tabibu-monitor" }
 tabibu-telemetry = { path = "../../core/crates/tabibu-telemetry" }

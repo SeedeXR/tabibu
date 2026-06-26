@@ -41,6 +41,10 @@ fn main() {
             commands::scan_malware,
             commands::quarantine,
             commands::record_free_space,
+            commands::brew_analyze,
+            commands::brew_cleanup,
+            commands::brew_autoremove,
+            commands::brew_uninstall,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tabibu");

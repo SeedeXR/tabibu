@@ -97,7 +97,7 @@ html, body {
   background: linear-gradient(160deg, var(--accent-deep), var(--accent));
   display: grid; place-items: center; color: #fff;
 }
-.brand .logo svg { width: 14px; height: 14px; }
+.brand .logo svg { height: 15px; width: auto; display: block; }
 .nav { flex: 1; overflow-y: auto; padding: var(--space-s); }
 .nav-section { margin-top: var(--space-m); }
 .nav-section > .label {
@@ -405,3 +405,48 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .dupe-path input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
 .dupe-path .keep { font-size: 10px; font-weight: 600; color: var(--tier-review);
   background: color-mix(in srgb, var(--tier-review) 16%, transparent); padding: 1px 6px; border-radius: 10px; }
+
+/* Live-scan loader: animated radar + ticking total + category chips */
+.scan-stage { display: flex; flex-direction: column; align-items: center; padding: 40px 24px 24px; }
+.scan-radar { width: 124px; height: 124px; }
+.scan-radar svg { width: 100%; height: 100%; overflow: visible; }
+.scan-radar .r-core { fill: var(--view-accent); }
+.scan-radar .r-ring { fill: none; stroke: var(--view-accent); stroke-width: 2;
+  transform-origin: 60px 60px; animation: radar-pulse 2.4s ease-out infinite; }
+.scan-radar .r-ring:nth-of-type(2) { animation-delay: 0.8s; }
+.scan-radar .r-ring:nth-of-type(3) { animation-delay: 1.6s; }
+.scan-radar .r-sweep { stroke: var(--view-accent); stroke-width: 2; stroke-linecap: round;
+  opacity: 0.7; transform-origin: 60px 60px; animation: radar-sweep 1.8s linear infinite; }
+@keyframes radar-pulse { 0% { transform: scale(0.3); opacity: 0.7; } 100% { transform: scale(3.4); opacity: 0; } }
+@keyframes radar-sweep { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .scan-radar .r-ring, .scan-radar .r-sweep { animation: none; }
+}
+.scan-amt { font-size: 34px; font-weight: 700; letter-spacing: -0.02em; margin-top: 8px; }
+.scan-sub { font-size: 12px; margin-top: 2px; }
+.scan-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 22px; max-width: 640px; }
+.scan-chip { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--bg-elev); color: var(--text-dim); transition: color 0.3s, border-color 0.3s, box-shadow 0.3s; }
+.scan-chip .ci { display: flex; }
+.scan-chip .ci svg { width: 15px; height: 15px; display: block; }
+.scan-chip .cl { font-size: 12px; font-weight: 600; }
+.scan-chip .cc { font-size: 11px; color: var(--text-dim); }
+.scan-chip.on { color: var(--text); border-color: color-mix(in srgb, var(--view-accent) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--view-accent) 12%, transparent); }
+.scan-chip.on .ci { color: var(--view-accent); }
+
+/* Developer / CLI (Homebrew) view */
+.brew-card { display: flex; align-items: center; gap: 14px; margin: 0 24px 10px;
+  padding: 14px 16px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); }
+.brew-card .bc-icon { width: 34px; height: 34px; flex: none; display: grid; place-items: center;
+  border-radius: 8px; background: var(--bar); color: var(--view-accent); }
+.brew-card .bc-icon svg { width: 18px; height: 18px; }
+.brew-out { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: pre-wrap;
+  word-break: break-word; max-height: 160px; overflow: auto; margin: 0; }
+.toast { margin-top: var(--space-m); padding: var(--space-m); border-radius: var(--radius-s); text-align: left;
+  background: color-mix(in srgb, var(--tier-safe) 12%, var(--bg-elev)); }
+.btags { display: flex; gap: 5px; flex: none; align-items: center; }
+.btag { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  background: var(--bar); color: var(--text-dim); }
+.btag.safe { color: var(--tier-safe); background: color-mix(in srgb, var(--tier-safe) 16%, transparent); }
+.btag.review { color: var(--tier-review); background: color-mix(in srgb, var(--tier-review) 16%, transparent); }

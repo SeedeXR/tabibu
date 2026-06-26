@@ -958,6 +958,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabibu-brew"
+version = "0.1.3"
+dependencies = [
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tabibu-dupes"
 version = "0.1.3"
 dependencies = [

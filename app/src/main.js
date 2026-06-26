@@ -2,7 +2,7 @@
 // commands in src-tauri/src/commands.rs). Data fields use snake_case to match
 // serde; only top-level invoke arg keys are camelCase (Tauri maps them).
 
-import { ICONS } from "./icons.js";
+import { ICONS, BRAND_PATH } from "./icons.js";
 
 const TAURI = window.__TAURI__;
 const invoke = TAURI.core.invoke;
@@ -66,6 +66,7 @@ const NAV = [
   ]},
   { section: "Applications", items: [
     { id: "uninstall", title: "Uninstaller", icon: "rocket" },
+    { id: "brew", title: "Developer / CLI", icon: "terminal" },
     { id: "startup", title: "Startup Items", icon: "activity" },
   ]},
   { section: "Health", items: [
@@ -80,7 +81,7 @@ const NAV = [
 // Per-view accent (honest theming, inspired by CleanMyMac's section colors).
 const THEME = {
   dashboard: "#14b8a6", smart: "#8b5cf6", junk: "#16a34a", dupes: "#3b82f6",
-  large: "#0ea5e9", uninstall: "#6366f1", startup: "#f59e0b", disk: "#a855f7",
+  large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", startup: "#f59e0b", disk: "#a855f7",
   memory: "#f97316", battery: "#22c55e", security: "#ec4899", settings: "#64748b",
 };
 // Hero copy + sub-features per scan view.
@@ -103,7 +104,9 @@ function buildShell() {
     nav.append(sec);
   }
   const sidebar = h("div", { class: "sidebar" },
-    h("div", { class: "brand" }, h("span", { class: "logo" }, icon("sparkles")), "Tabibu"),
+    h("div", { class: "brand" },
+      h("span", { class: "logo", html: `<svg viewBox="0 0 551 888" fill="currentColor"><path d="${BRAND_PATH}" /></svg>` }),
+      "Tabibu"),
     nav,
     h("div", { class: "footer", id: "footer" }));
   const content = h("div", { class: "content" },
@@ -131,6 +134,9 @@ function navigate(id) {
   document.getElementById("view").style.setProperty("--view-accent", accent);
   document.querySelector(".nav-item.active")?.style.setProperty("--view-accent", accent);
   cancelTimers();
+  // Leaving the Developer/CLI view drops its transient action toast + stale flag
+  // so neither can reappear without context on return.
+  if (id !== "brew") { brewState.outcome = null; brewState.stale = false; }
   render();
 }
 function setTitle(t, actions = []) {
@@ -160,6 +166,21 @@ const SCAN_DEFS = {
   large: { title: "Large & Old", icon: "files", scanners: ["large_old"],
     sub: "Suggestions only — big files in Downloads you may have forgotten. Nothing is selected for you." },
 };
+
+// Live-scan "stages": one chip per junk category, lit up as items arrive. Smart
+// Scan (empty `scanners`) runs the whole junk set, so it shows them all.
+const SCAN_STAGES = {
+  trash: { cat: "Trash", label: "Trash", icon: "trash-2" },
+  user_cache: { cat: "UserCache", label: "App Caches", icon: "package" },
+  dev_cache: { cat: "DevCache", label: "Dev Caches", icon: "terminal" },
+  temp: { cat: "Temp", label: "Temp Files", icon: "files" },
+  log: { cat: "Log", label: "Logs", icon: "activity" },
+  large_old: { cat: "LargeOldFile", label: "Large & Old", icon: "hard-drive" },
+};
+const ALL_JUNK_STAGES = ["trash", "user_cache", "dev_cache", "temp", "log", "large_old"];
+function stagesFor(def) {
+  return (def.scanners.length ? def.scanners : ALL_JUNK_STAGES).map((s) => SCAN_STAGES[s]).filter(Boolean);
+}
 
 const sessions = {}; // id -> session
 function getSession(id) {
@@ -221,29 +242,53 @@ function tallies(items) {
 const foundBytes = (s) => s.items.reduce((a, i) => a + Number(i.size_bytes), 0);
 const selectedBytes = (s) => s.items.reduce((a, i) => s.selection.has(i.path) ? a + Number(i.size_bytes) : a, 0);
 
+// Creative live-scan loader: an animated radar (built ONCE so its CSS animation
+// isn't restarted by the ~100ms streaming re-renders), a ticking total-found
+// counter, and a chip per category that lights up as items of that kind stream
+// in. Only the numbers/chips update on each tick — the radar is left alone.
 function scanningPanel(id) {
-  const s = getSession(id);
-  const wrap = h("div", {}, h("div", { id: "scan-live" }));
-  refreshScanningInto(wrap.querySelector("#scan-live"), id);
+  const radar = h("div", {
+    class: "scan-radar", "aria-hidden": "true", html:
+      `<svg viewBox="0 0 120 120">
+         <circle class="r-ring" cx="60" cy="60" r="14" />
+         <circle class="r-ring" cx="60" cy="60" r="14" />
+         <circle class="r-ring" cx="60" cy="60" r="14" />
+         <line class="r-sweep" x1="60" y1="60" x2="60" y2="12" />
+         <circle class="r-core" cx="60" cy="60" r="5" />
+       </svg>` });
+  const wrap = h("div", { class: "scan-stage" }, radar,
+    h("div", { class: "scan-amt mono", id: "scan-amt" }, "0 B"),
+    h("div", { class: "scan-sub dim", id: "scan-sub" }, "Starting scan…"),
+    h("div", { class: "scan-chips", id: "scan-chips" }),
+    h("div", { class: "row", style: "justify-content:center;margin-top:18px" },
+      h("button", { onClick: () => stopScan(id) }, "Stop")),
+    h("p", { class: "faint", style: "text-align:center;margin-top:10px;font-size:11px" },
+      "Reviewing happens after the scan — nothing is removed yet."));
+  scanLiveUpdate(id, wrap);
   return wrap;
 }
-function refreshScanning(id) { const c = document.getElementById("scan-live"); if (c) refreshScanningInto(c, id); }
-function refreshScanningInto(c, id) {
-  const s = getSession(id);
-  c.innerHTML = "";
-  c.append(progressBar("Scanning…", s.items.length, foundBytes(s), () => stopScan(id)));
-  const list = h("div", { class: "pad" }, h("h3", { style: "margin-bottom:12px" }, "Found so far"));
-  const ts = tallies(s.items);
-  if (!ts.length) list.append(h("p", { class: "dim" }, "Looking through caches, temporary files, logs, and large files…"));
-  for (const t of ts) {
-    list.append(h("div", { class: "tally" },
-      h("span", { class: "name" }, t.category),
-      h("span", { class: "count mono" }, `${t.count} items`),
-      h("span", { class: "size" }, fmtBytes(t.bytes))));
+function refreshScanning(id) { scanLiveUpdate(id); }
+// Update only the dynamic parts (count, total, chips) — never the radar.
+function scanLiveUpdate(id, root) {
+  root = root || document.querySelector(".scan-stage");
+  if (!root) return;
+  const s = getSession(id), def = SCAN_DEFS[id];
+  const amt = root.querySelector("#scan-amt");
+  if (amt) amt.textContent = fmtBytes(foundBytes(s));
+  const sub = root.querySelector("#scan-sub");
+  if (sub) sub.textContent = `${s.items.length} item${s.items.length === 1 ? "" : "s"} found · scanning your Mac…`;
+  const chipsEl = root.querySelector("#scan-chips");
+  if (!chipsEl) return;
+  const ts = {};
+  for (const it of s.items) { const e = ts[it.category] || [0, 0]; ts[it.category] = [e[0] + 1, e[1] + Number(it.size_bytes)]; }
+  chipsEl.innerHTML = "";
+  for (const st of stagesFor(def)) {
+    const t = ts[st.cat], active = !!t;
+    chipsEl.append(h("div", { class: `scan-chip${active ? " on" : ""}` },
+      h("span", { class: "ci" }, icon(st.icon)),
+      h("span", { class: "cl" }, st.label),
+      h("span", { class: "cc mono" }, active ? `${t[0]} · ${fmtBytes(t[1])}` : "…")));
   }
-  list.append(h("p", { class: "faint", style: "margin-top:12px;font-size:11px" },
-    "Reviewing happens after the scan — nothing is removed yet."));
-  c.append(list);
 }
 
 function reviewPanel(id) {
@@ -451,12 +496,6 @@ function centeredSpinner(msg) { return h("div", { class: "center" }, h("div", { 
 function cancellableSpinner(msg) {
   return h("div", { class: "center" }, h("div", { class: "spinner" }), h("p", {}, msg),
     h("button", { style: "margin-top:8px", onClick: () => invoke("cancel_sync").catch(() => {}) }, "Stop"));
-}
-function progressBar(label, count, bytes, onCancel) {
-  return h("div", { class: "progress" }, h("div", { class: "spinner" }),
-    h("div", { style: "flex:1" }, h("div", { style: "font-weight:600" }, label),
-      h("div", { class: "dim mono", style: "font-size:12px" }, `${count} items · ${fmtBytes(bytes)} found so far`)),
-    h("button", { onClick: onCancel }, "Cancel"));
 }
 function fdaNotice() {
   const recheck = h("button", { onClick: recheckFDA }, "I've enabled it — re-check");
@@ -931,6 +970,190 @@ async function doUninstall() {
 }
 
 // =====================================================================
+// Developer / CLI (Homebrew)
+// =====================================================================
+const brewState = { phase: "idle", report: null, error: null, working: null, outcome: null, stale: false, sort: "size", filter: "" };
+
+// Relative install age. Homebrew records install time but NOT last-used time,
+// so this is honestly labelled "installed N ago" — never "last used".
+function agoText(unix) {
+  if (!Number.isFinite(unix) || unix <= 0) return "date unknown";
+  // Floor the difference of seconds (not two separately-floored day counts) so
+  // there's no boundary off-by-one; future/skewed timestamps clamp to "today".
+  const days = Math.floor((Date.now() / 1000 - unix) / 86400);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days}d ago`;
+  if (days < 365) return `${Math.round(days / 30)}mo ago`;
+  return `${(days / 365).toFixed(1)}y ago`;
+}
+
+async function brewView() {
+  setTitle("Developer / CLI", []);
+  const b = brewState;
+  if (b.phase === "idle") return setView(heroLanding("terminal", "Developer / CLI cleanup",
+    "Review software installed from the terminal with Homebrew — reclaim old versions and caches, find orphaned dependencies, and spot tools you installed once and forgot.",
+    ["Safe: every removal is delegated to brew itself", "Old versions & stale download cache", "Orphaned dependencies & rarely-used tools"],
+    analyzeBrew));
+  if (b.phase === "analyzing") return setView(centeredSpinner("Analyzing Homebrew packages… (this can take a few seconds)"));
+  if (b.phase === "working") return setView(centeredSpinner(b.working || "Working…"));
+  if (b.phase === "error") return setView(centered("circle-alert", "Homebrew error", b.error, "Back", () => { b.phase = "idle"; render(); }));
+  return setView(renderBrewReport());
+}
+
+async function analyzeBrew() {
+  const b = brewState;
+  b.outcome = null; // a fresh analysis is not "after an action" — drop any toast
+  b.phase = "analyzing"; render();
+  try { b.report = await invoke("brew_analyze"); b.stale = false; b.phase = "ready"; }
+  catch (e) { b.phase = "error"; b.error = String(e); }
+  render();
+}
+// Refresh the report after a destructive action WITHOUT discarding the
+// just-set outcome toast, and without bouncing to the error screen on a
+// transient analyze failure — the action already happened, so keep showing its
+// result over the last good report. If the refresh fails we flag the list as
+// stale (so the user knows to re-analyze rather than acting on a removed row).
+async function refreshBrewAfterAction() {
+  const b = brewState;
+  try { b.report = await invoke("brew_analyze"); b.stale = false; }
+  catch (e) { b.stale = true; }
+  b.phase = "ready"; render();
+}
+
+function renderBrewReport() {
+  const b = brewState, r = b.report;
+  if (!r.status.installed) {
+    return centered("terminal", "Homebrew not detected",
+      "Homebrew wasn't found at /opt/homebrew or /usr/local. This screen manages packages installed with Homebrew (brew); install it from brew.sh to use it here.",
+      "Re-check", analyzeBrew);
+  }
+  const wrap = h("div", { class: "review" });
+  wrap.append(h("div", { class: "row", style: "padding:16px 24px;align-items:center" },
+    h("div", {}, h("div", { style: "font-weight:600" }, `${r.packages.length} package${r.packages.length === 1 ? "" : "s"} installed`),
+      h("div", { class: "dim", style: "font-size:11px" }, `${r.status.version || "Homebrew"} · ${r.status.prefix || ""}`)),
+    h("div", { class: "spacer" }),
+    h("button", { onClick: analyzeBrew }, "Re-analyze")));
+  if (b.outcome) {
+    const o = b.outcome;
+    wrap.append(h("div", { class: o.ok ? "toast" : "toast-fail", style: "margin:0 24px 10px" },
+      h("div", { style: "font-weight:600;margin-bottom:4px" }, o.ok ? (o.freed_bytes ? `Done — about ${fmtBytes(o.freed_bytes)} freed` : "Done") : "Could not complete"),
+      h("pre", { class: "brew-out" }, o.message)));
+  }
+  if (b.stale) {
+    wrap.append(h("div", { class: "toast-fail", style: "margin:0 24px 10px" },
+      h("div", { class: "ln" }, "The action completed, but the package list couldn't be refreshed — it may be out of date. Click “Re-analyze”.")));
+  }
+  wrap.append(brewCleanupCard(r));
+  if (r.autoremovable.length) wrap.append(brewAutoremoveCard(r));
+  wrap.append(brewPackages(r));
+  return wrap;
+}
+
+function brewCleanupCard(r) {
+  const free = Number(r.cleanup.freeable_bytes);
+  return h("div", { class: "brew-card" },
+    h("div", { class: "bc-icon" }, icon("trash-2")),
+    h("div", { style: "flex:1;min-width:0" },
+      h("div", { style: "font-weight:600" }, free > 0 ? `${fmtBytes(free)} reclaimable` : "Download cache is clean"),
+      h("div", { class: "dim", style: "font-size:11px" }, "Old package versions and stale download cache. Your installed tools are untouched.")),
+    free > 0 ? h("button", { class: "primary", onClick: () => runBrewAction("brew_cleanup", "brew cleanup",
+      `Run “brew cleanup”?\n\nThis removes old versions and stale download cache (about ${fmtBytes(free)}). Your currently-installed packages are NOT removed.`) }, "Run cleanup") : null);
+}
+
+function brewAutoremoveCard(r) {
+  const names = r.autoremovable;
+  return h("div", { class: "brew-card" },
+    h("div", { class: "bc-icon" }, icon("package")),
+    h("div", { style: "flex:1;min-width:0" },
+      h("div", { style: "font-weight:600" }, `${names.length} unused ${names.length === 1 ? "dependency" : "dependencies"}`),
+      h("div", { class: "dim", style: "font-size:11px;word-break:break-word" }, names.join(", "))),
+    h("button", { class: "primary", onClick: () => runBrewAction("brew_autoremove", "brew autoremove",
+      `Remove ${names.length} orphaned dependenc${names.length === 1 ? "y" : "ies"} that nothing installed needs anymore?\n\n${names.join(", ")}`) }, "Remove unused"));
+}
+
+function brewPackages(r) {
+  const b = brewState;
+  const wrap = h("div", {});
+  const search = h("input", { class: "toolbar-input", placeholder: "Filter packages" });
+  search.value = b.filter;
+  const listEl = h("div", { class: "list" });
+  search.addEventListener("input", () => { b.filter = search.value; renderBrewList(listEl); });
+  const sortSel = h("select", { class: "toolbar-input", style: "width:auto" },
+    h("option", { value: "size" }, "Largest"),
+    h("option", { value: "date" }, "Newest"),
+    h("option", { value: "old" }, "Oldest"),
+    h("option", { value: "name" }, "Name (A–Z)"));
+  sortSel.value = b.sort;
+  sortSel.addEventListener("change", () => { b.sort = sortSel.value; renderBrewList(listEl); });
+  wrap.append(h("div", { class: "row", style: "padding:8px 24px;align-items:center;gap:8px" },
+    h("div", { style: "font-weight:600" }, "Installed packages"), h("div", { class: "spacer" }), search, sortSel));
+  wrap.append(h("div", { class: "dim", style: "padding:0 24px 8px;font-size:11px" },
+    "Homebrew doesn't record last-used times — install date and dependency status are shown instead. “Uninstall” is refused by brew if another package still depends on it."));
+  wrap.append(listEl);
+  renderBrewList(listEl);
+  return wrap;
+}
+
+function renderBrewList(listEl) {
+  const b = brewState, r = b.report;
+  const q = b.filter.trim().toLowerCase();
+  const pkgs = r.packages
+    .filter((p) => !q || p.name.toLowerCase().includes(q))
+    .slice()
+    .sort((a, c) => {
+      if (b.sort === "name") return a.name.localeCompare(c.name);
+      if (b.sort === "date") return (c.installed_unix || 0) - (a.installed_unix || 0);
+      if (b.sort === "old") return (a.installed_unix || 0) - (c.installed_unix || 0);
+      return (Number(c.size_bytes) || 0) - (Number(a.size_bytes) || 0);
+    });
+  listEl.innerHTML = "";
+  if (!pkgs.length) { listEl.append(h("div", { class: "dim", style: "padding:16px 24px" }, "No matching packages.")); return; }
+  for (const p of pkgs) listEl.append(brewPkgRow(p));
+}
+
+function brewPkgRow(p) {
+  const tags = [];
+  if (p.kind === "cask") tags.push(h("span", { class: "btag" }, "cask"));
+  if (p.autoremovable) tags.push(h("span", { class: "btag review" }, "unused dep"));
+  else if (p.as_dependency && !p.on_request) tags.push(h("span", { class: "btag" }, "dependency"));
+  else if (p.on_request) tags.push(h("span", { class: "btag safe" }, "you installed"));
+  // Honest "you installed this and it's been a while" hint — not a usage claim.
+  const ageDays = Number.isFinite(p.installed_unix) && p.installed_unix > 0
+    ? (Date.now() / 1000 - p.installed_unix) / 86400 : 0;
+  if (p.on_request && !p.as_dependency && ageDays > 365) tags.push(h("span", { class: "btag review" }, "installed >1y ago"));
+  return h("div", { class: "item" },
+    h("div", { class: "path", style: "flex:1;min-width:0" },
+      h("div", { class: "p", style: "direction:ltr;text-align:left" }, p.name,
+        h("span", { class: "dim mono", style: "font-size:11px;margin-left:8px" }, p.version)),
+      h("div", { class: "reason" }, `installed ${agoText(p.installed_unix)}`)),
+    h("div", { class: "btags" }, ...tags),
+    h("span", { class: "isize" }, fmtBytes(p.size_bytes)),
+    h("button", { class: "danger", onClick: () => brewUninstall(p) }, "Uninstall"));
+}
+
+async function runBrewAction(cmd, label, confirmMsg) {
+  if (!confirm(confirmMsg)) return;
+  const b = brewState;
+  b.phase = "working"; b.working = `Running ${label}…`; render();
+  try { b.outcome = await invoke(cmd); }
+  catch (e) { b.outcome = { ok: false, freed_bytes: 0, message: String(e) }; }
+  await refreshBrewAfterAction();
+}
+
+async function brewUninstall(p) {
+  const note = (p.as_dependency && !p.on_request)
+    ? `\n\nNote: ${p.name} was installed as a dependency. If anything still needs it, brew will refuse (use “Remove unused” instead).`
+    : "";
+  if (!confirm(`Uninstall ${p.name} (${p.kind})?\n\nRuns “brew uninstall ${p.name}”. Homebrew refuses if another package depends on it — nothing is forced.${note}`)) return;
+  const b = brewState;
+  b.phase = "working"; b.working = `Uninstalling ${p.name}…`; render();
+  try { b.outcome = await invoke("brew_uninstall", { name: p.name, cask: p.kind === "cask" }); }
+  catch (e) { b.outcome = { ok: false, freed_bytes: 0, message: String(e) }; }
+  await refreshBrewAfterAction();
+}
+
+// =====================================================================
 // Startup
 // =====================================================================
 async function startupView() {
@@ -1189,6 +1412,7 @@ function render() {
   if (id === "memory") return memoryView();
   if (id === "battery") return batteryView();
   if (id === "uninstall") return uninstallerView();
+  if (id === "brew") return brewView();
   if (id === "startup") return startupView();
   if (id === "security") return securityView();
   if (id === "settings") return settingsView();

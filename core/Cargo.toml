@@ -6,6 +6,7 @@ members = [
     "crates/tabibu-dupes",
     "crates/tabibu-junk",
     "crates/tabibu-uninstall",
+    "crates/tabibu-brew",
     "crates/tabibu-malware",
     "crates/tabibu-monitor",
     "crates/tabibu-telemetry",
@@ -24,6 +25,7 @@ tabibu-walk = { path = "crates/tabibu-walk" }
 tabibu-dupes = { path = "crates/tabibu-dupes" }
 tabibu-junk = { path = "crates/tabibu-junk" }
 tabibu-uninstall = { path = "crates/tabibu-uninstall" }
+tabibu-brew = { path = "crates/tabibu-brew" }
 tabibu-malware = { path = "crates/tabibu-malware" }
 tabibu-monitor = { path = "crates/tabibu-monitor" }
 tabibu-telemetry = { path = "crates/tabibu-telemetry" }

@@ -36,7 +36,7 @@ fn begin_sync_op() -> CancelToken {
 }
 
 /// Cancel the in-flight synchronous op (duplicates / leftovers / security).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_sync() {
     if let Some(token) = CURRENT_SYNC
         .lock()
@@ -74,7 +74,7 @@ pub struct ScannerOutcomeDto {
 /// Start a scan over the given scanner ids (empty = all junk scanners).
 /// Items stream to `on_event` as found; a final `Done` carries the per-scanner
 /// summary. Returns immediately — work runs on a background thread.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan(scanners: Vec<String>, on_event: Channel<ScanEvent>) {
     let cancel = CancelToken::new();
     *CURRENT_SCAN
@@ -116,7 +116,7 @@ pub fn scan(scanners: Vec<String>, on_event: Channel<ScanEvent>) {
     });
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cancel_scan() {
     if let Some(token) = CURRENT_SCAN
         .lock()
@@ -134,7 +134,7 @@ pub fn cancel_scan() {
 /// Reclaim the supplied items. `extra_roots` widens the allowed-roots set for
 /// targets outside the standard junk locations (duplicates / remnants in a
 /// chosen folder); the engine still re-checks every path against the denylist.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reclaim(
     mut items: Vec<CleanupItem>,
     extra_roots: Vec<String>,
@@ -151,7 +151,7 @@ pub fn reclaim(
 // Space map
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn size_tree(root: String, max_depth: Option<usize>) -> Result<DirNode, String> {
     let cancel = CancelToken::new();
     tabibu_walk::size_tree(std::path::Path::new(&root), &cancel, max_depth)
@@ -166,7 +166,7 @@ pub fn size_tree(root: String, max_depth: Option<usize>) -> Result<DirNode, Stri
 /// is scanned (the user doesn't have to pick a folder). The walk skips
 /// unreadable/system dirs, so this is the practical "whole-disk" scope for a
 /// user's duplicate files.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn find_duplicates(root: Option<String>, min_size: u64) -> Result<Vec<DuplicateGroup>, String> {
     // Registers in CURRENT_SYNC (not CURRENT_SCAN) so the Duplicates view's
     // Stop button (cancel_sync) can abort this long whole-home scan without
@@ -183,7 +183,7 @@ pub fn find_duplicates(root: Option<String>, min_size: u64) -> Result<Vec<Duplic
 // Uninstaller
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn find_remnants(bundle_id: String, app_name: String) -> Vec<CleanupItem> {
     let home = system::home_dir();
     let extra = vec![home.join("Library").to_string_lossy().into_owned()];
@@ -199,7 +199,7 @@ pub struct InstalledApp {
 }
 
 /// Apps in /Applications and ~/Applications with their bundle IDs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn installed_apps() -> Vec<InstalledApp> {
     let home = system::home_dir();
     let roots = vec![
@@ -226,7 +226,7 @@ pub fn installed_apps() -> Vec<InstalledApp> {
 // Monitor
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn monitor_sample(top_n: usize, by_cpu: bool) -> SystemSample {
     // Poison-tolerant (matches system.rs): a panic in one sampler call must not
     // permanently break every later monitor_sample (and the tray thread).
@@ -245,7 +245,7 @@ pub struct DiskSpace {
 }
 
 /// Free/total bytes on the boot volume ("/"). Measured, for the dashboard.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn disk_space() -> DiskSpace {
     let disks = sysinfo::Disks::new_with_refreshed_list();
     // Prefer the disk mounted at "/"; fall back to the largest.
@@ -264,22 +264,22 @@ pub fn disk_space() -> DiskSpace {
 // System info + shell actions
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn system_info() -> system::SystemInfo {
     system::system_info()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn battery_info() -> system::BatteryInfo {
     system::battery_info()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn startup_items() -> system::StartupReport {
     system::startup_items()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reveal_in_finder(path: String) {
     let _ = std::process::Command::new("/usr/bin/open")
         .arg("-R")
@@ -287,21 +287,21 @@ pub fn reveal_in_finder(path: String) {
         .spawn();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_url(url: String) {
     let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
 }
 
 /// Move a path to the Trash via the OS (used by the uninstaller's "also trash
 /// the app", which lives outside the engine's user roots).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_path(path: String) -> Result<(), String> {
     trash::delete(&path).map_err(|e| e.to_string())
 }
 
 /// Native folder picker, done entirely in Rust (no reliance on the JS dialog
 /// global). Returns the chosen path, or null if cancelled.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     app.dialog()
@@ -314,12 +314,12 @@ pub fn pick_folder(app: tauri::AppHandle) -> Option<String> {
 // Deselection telemetry — opt-in, privacy-respecting (no paths/contents).
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn telemetry_enabled() -> bool {
     tabibu_telemetry::Telemetry::load(&system::telemetry_dir()).is_enabled()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_telemetry_enabled(on: bool) -> Result<(), String> {
     let mut t = tabibu_telemetry::Telemetry::load(&system::telemetry_dir());
     t.set_enabled(on).map_err(|e| e.to_string())
@@ -329,7 +329,7 @@ pub fn set_telemetry_enabled(on: bool) -> Result<(), String> {
 /// Records only the category, tier, and a coarse size bucket — never the path.
 /// No-op (returns false) when telemetry is disabled. `ts_unix` is supplied by
 /// the caller so the core stays clock-free.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_deselection(
     category: String,
     tier: String,
@@ -369,7 +369,7 @@ fn collect_with(scanner: &dyn Scanner, ctx: &ScanCtx, cancel: &CancelToken) -> V
 
 /// Ask a process to quit (SIGTERM) or force it (SIGKILL). The UI confirms
 /// first and warns about unsaved work. Returns Ok only if the signal was sent.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn quit_process(pid: u32, force: bool) -> Result<(), String> {
     // Reject pid 0 and out-of-range values: `kill(0, sig)` signals the
     // CALLER's whole process group (would kill Tabibu itself), and a pid that
@@ -403,7 +403,7 @@ pub struct ThermalInfo {
 /// Thermal pressure from `pmset -g therm` (no root). Exact CPU die temperature
 /// is intentionally NOT reported: on modern Macs it requires root/SMC access
 /// (a privileged helper we don't ship). We show the real management signal.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn thermal_info() -> ThermalInfo {
     let note = "Exact CPU temperature needs elevated access on modern Macs; \
                 Tabibu shows the system's real thermal-pressure signal instead."
@@ -446,7 +446,7 @@ pub fn thermal_info() -> ThermalInfo {
 
 /// Boot-volume SMART status via `diskutil info -plist /` (no root). Returns
 /// e.g. "Verified", "Not Supported", or "Unknown".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn smart_status() -> String {
     let out = std::process::Command::new("/usr/sbin/diskutil")
         .args(["info", "-plist", "/"])
@@ -468,7 +468,7 @@ pub fn smart_status() -> String {
 
 /// Scan for support files whose owning app is no longer installed — the
 /// "remaining artifacts after uninstalling software" feature.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_orphans() -> Vec<CleanupItem> {
     let home = system::home_dir();
     let installed: HashSet<String> = tabibu_uninstall::installed_apps(&[
@@ -495,7 +495,7 @@ pub fn scan_orphans() -> Vec<CleanupItem> {
 
 // ---- Security (adware / rogue-profile heuristics) ------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_malware() -> Vec<CleanupItem> {
     let home = system::home_dir();
     let ctx = ScanCtx {
@@ -521,7 +521,7 @@ pub fn scan_malware() -> Vec<CleanupItem> {
 }
 
 /// Move a detected item into the locked quarantine vault (never deletes).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn quarantine(path: String) -> Result<(), String> {
     let home = system::home_dir();
     let vault = tabibu_malware::Vault::new(
@@ -545,7 +545,7 @@ const FREE_SPACE_MIN_SPACING: u64 = 3600;
 
 /// Record a free-space reading (throttled to one per hour) and return the
 /// recent history (most recent last).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_free_space(ts_unix: u64, free_bytes: u64) -> Vec<(u64, u64)> {
     let dir = system::home_dir().join("Library/Application Support/Tabibu");
     let _ = std::fs::create_dir_all(&dir);
@@ -571,4 +571,66 @@ pub fn record_free_space(ts_unix: u64, free_bytes: u64) -> Vec<(u64, u64)> {
         let _ = std::fs::write(&file, json);
     }
     history
+}
+
+// ---------------------------------------------------------------------------
+// Homebrew (terminal-installed software): analysis + safe cleanup.
+//
+// All removal is delegated to `brew` itself (see tabibu-brew's safety doc):
+// `brew cleanup` (old versions + stale cache), `brew autoremove` (orphaned
+// dependencies), and `brew uninstall` WITHOUT force (refuses if depended on).
+// ---------------------------------------------------------------------------
+
+fn brew_not_found_outcome() -> tabibu_brew::ActionOutcome {
+    tabibu_brew::ActionOutcome {
+        ok: false,
+        freed_bytes: 0,
+        message: "Homebrew was not found at /opt/homebrew or /usr/local.".to_string(),
+    }
+}
+
+fn with_brew<F>(f: F) -> tabibu_brew::ActionOutcome
+where
+    F: FnOnce(&tabibu_brew::Brew) -> tabibu_brew::ActionOutcome,
+{
+    tabibu_brew::Brew::detect().map_or_else(brew_not_found_outcome, |b| f(&b))
+}
+
+/// Full Homebrew analysis (read-only): status, cleanup preview, orphaned
+/// dependencies, and every installed formula/cask with size + install date.
+/// Returns `status.installed = false` when Homebrew isn't present.
+#[tauri::command(async)]
+pub fn brew_analyze() -> tabibu_brew::Report {
+    tabibu_brew::Brew::detect().map_or_else(
+        || tabibu_brew::Report {
+            status: tabibu_brew::Status {
+                installed: false,
+                prefix: None,
+                version: None,
+            },
+            cleanup: tabibu_brew::CleanupPreview::default(),
+            autoremovable: Vec::new(),
+            packages: Vec::new(),
+        },
+        |b| b.analyze(),
+    )
+}
+
+/// Run `brew cleanup` (old versions + stale download cache only).
+#[tauri::command(async)]
+pub fn brew_cleanup() -> tabibu_brew::ActionOutcome {
+    with_brew(tabibu_brew::Brew::run_cleanup)
+}
+
+/// Run `brew autoremove` (orphaned dependencies only).
+#[tauri::command(async)]
+pub fn brew_autoremove() -> tabibu_brew::ActionOutcome {
+    with_brew(tabibu_brew::Brew::run_autoremove)
+}
+
+/// Uninstall one Homebrew package by name. Never forces — `brew` refuses if
+/// another installed package depends on it (surfaced as `ok = false`).
+#[tauri::command(async)]
+pub fn brew_uninstall(name: String, cask: bool) -> tabibu_brew::ActionOutcome {
+    with_brew(|b| b.uninstall(&name, cask))
 }
