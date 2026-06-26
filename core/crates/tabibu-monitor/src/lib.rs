@@ -5,7 +5,7 @@
 //! `NSProcessInfo.thermalState`; this crate only supplies raw usage figures.
 //!
 //! Budget note: the sampler itself is on the monitor's resource budget
-//! (<1% CPU, <30 MB RSS — see memory/test.md §5). Keep allocations flat:
+//! (<1% CPU, <30 MB RSS). Keep allocations flat:
 //! one `System`, refreshed in place.
 
 use serde::Serialize;
@@ -116,8 +116,8 @@ impl Sampler {
 
         // Rosetta detection issues one `sysctl` per pid, so we run it only
         // after `truncate(n)` — i.e. for the processes we actually return —
-        // to keep the sampler within the monitor CPU budget (memory/test.md
-        // §5) rather than probing every process on the system.
+        // to keep the sampler within the monitor CPU budget rather than
+        // probing every process on the system.
         for p in &mut procs {
             p.is_translated = rosetta::process_is_translated(p.pid);
         }

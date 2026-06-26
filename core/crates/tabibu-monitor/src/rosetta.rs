@@ -30,8 +30,8 @@
 //! bit clear). The `sysctl`/`p_flag` path is the one that actually works.
 //!
 //! This module is the only place in the crate that uses `unsafe`. The crate
-//! otherwise denies `unsafe_code`; per memory/instruction.md §2, the syscall
-//! wrapper is the allowed exception, hence the file-wide allow below.
+//! otherwise denies `unsafe_code`; a syscall wrapper is the allowed exception,
+//! hence the file-wide allow below.
 //!
 //! Non-aarch64 targets cannot be running under Rosetta, so on those targets we
 //! short-circuit to `Some(false)` without touching the syscall — see
@@ -40,7 +40,9 @@
 
 /// `P_TRANSLATED`: set in `extern_proc.p_flag` when the process is running
 /// translated under Rosetta 2. Defined in the XNU headers (`sys/proc.h`) and
-/// stable across macOS releases.
+/// stable across macOS releases. Only referenced on aarch64 (no Rosetta on
+/// Intel), so gate it to keep the x86_64 half of a universal build warning-free.
+#[cfg(target_arch = "aarch64")]
 const P_TRANSLATED: i32 = 0x0002_0000;
 
 /// Byte offset of the `int p_flag` field within the `kinfo_proc` buffer

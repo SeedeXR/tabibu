@@ -27,8 +27,6 @@ use tabibu_engine::{CancelToken, Category, CleanupItem, SafetyTier};
 
 /// Bytes sampled from each end of a file in stage 2.
 const SAMPLE_LEN: usize = 16 * 1024;
-const SAMPLE_LEN_U64: u64 = 16 * 1024;
-const SAMPLE_LEN_I64: i64 = 16 * 1024;
 /// Read-buffer size for the stage-3 streaming hash.
 const FULL_HASH_BUF_LEN: usize = 1024 * 1024;
 
@@ -280,13 +278,13 @@ fn prune_singletons<K>(map: HashMap<K, Vec<Candidate>>) -> Vec<Candidate> {
 fn sample_hash(path: &Path, size: u64) -> io::Result<blake3::Hash> {
     let mut file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
-    if size < 2 * SAMPLE_LEN_U64 {
+    if size < 2 * SAMPLE_LEN as u64 {
         io::copy(&mut file, &mut hasher)?;
     } else {
         let mut buf = vec![0u8; SAMPLE_LEN];
         file.read_exact(&mut buf)?;
         hasher.update(&buf);
-        file.seek(SeekFrom::End(-SAMPLE_LEN_I64))?;
+        file.seek(SeekFrom::End(-(SAMPLE_LEN as i64)))?;
         file.read_exact(&mut buf)?;
         hasher.update(&buf);
     }

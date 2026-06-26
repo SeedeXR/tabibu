@@ -1,6 +1,6 @@
-/* Tabibu — design system (memory/design.md). System light/dark, semantic
-   colors, the 4/8/12/16/24 spacing scale, Space Grotesk UI + SF Mono. Premium,
-   calm, honest: no loud gradients in chrome, color never the sole signal. */
+/* Tabibu — design system. System light/dark, semantic colors, the
+   4/8/12/16/24 spacing scale, Space Grotesk UI + SF Mono. Premium, calm,
+   honest: no loud gradients in chrome, color never the sole signal. */
 
 /* Space Grotesk — bundled locally (no CDN; works offline, satisfies CSP). One
    variable file covers weights 300–700. */

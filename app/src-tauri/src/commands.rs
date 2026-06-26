@@ -18,31 +18,35 @@ use crate::system;
 
 /// Cancel token for the STREAMING `scan` (its Stop button → `cancel_scan`).
 static CURRENT_SCAN: LazyLock<Mutex<Option<CancelToken>>> = LazyLock::new(|| Mutex::new(None));
-/// Cancel token for the long SYNCHRONOUS commands (whole-home duplicates,
-/// leftovers, security) — a separate slot so their Stop button (`cancel_sync`)
-/// can't hijack a streaming scan's token, and vice versa.
-static CURRENT_SYNC: LazyLock<Mutex<Option<CancelToken>>> = LazyLock::new(|| Mutex::new(None));
+/// Cancel tokens for the long SYNCHRONOUS commands (whole-home duplicates,
+/// leftovers, security) — a registry, not a single slot, because commands run
+/// async on worker threads and can overlap (e.g. Duplicates still walking while
+/// Security starts). A single slot would orphan the earlier op's token and make
+/// it uncancellable; the registry keeps every in-flight op cancellable.
+static CURRENT_SYNC: LazyLock<Mutex<Vec<CancelToken>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 /// Persistent monitor sampler (CPU deltas need a long-lived `System`).
 static SAMPLER: LazyLock<Mutex<Option<Sampler>>> = LazyLock::new(|| Mutex::new(None));
 
-/// Register `token` as the current synchronous-op cancel token and return a
-/// clone to drive the operation.
+/// Register a fresh synchronous-op cancel token and return a clone to drive the
+/// operation. Already-cancelled tokens are pruned so the registry stays bounded.
 fn begin_sync_op() -> CancelToken {
     let token = CancelToken::new();
-    *CURRENT_SYNC
+    let mut reg = CURRENT_SYNC
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token.clone());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reg.retain(|t| !t.is_cancelled());
+    reg.push(token.clone());
     token
 }
 
-/// Cancel the in-flight synchronous op (duplicates / leftovers / security).
+/// Cancel every in-flight synchronous op (duplicates / leftovers / security).
+/// There is one Stop affordance, so stopping cancels all running scans.
 #[tauri::command(async)]
 pub fn cancel_sync() {
-    if let Some(token) = CURRENT_SYNC
+    let mut reg = CURRENT_SYNC
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-    {
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for token in reg.drain(..) {
         token.cancel();
     }
 }
@@ -542,11 +546,18 @@ pub fn quarantine(path: String) -> Result<(), String> {
 /// launches" would only hold the last few minutes and rewrite the file
 /// constantly.
 const FREE_SPACE_MIN_SPACING: u64 = 3600;
+/// Serializes the free-space-history read-modify-write. Commands run async on
+/// worker threads, so two overlapping calls would otherwise race on the file
+/// (lost point, or a torn read of a half-written file).
+static FREE_SPACE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Record a free-space reading (throttled to one per hour) and return the
 /// recent history (most recent last).
 #[tauri::command(async)]
 pub fn record_free_space(ts_unix: u64, free_bytes: u64) -> Vec<(u64, u64)> {
+    let _guard = FREE_SPACE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = system::home_dir().join("Library/Application Support/Tabibu");
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join("free-space-history.json");
@@ -567,8 +578,12 @@ pub fn record_free_space(ts_unix: u64, free_bytes: u64) -> Vec<(u64, u64)> {
     if len > 90 {
         history.drain(0..len - 90);
     }
+    // Atomic write: tmp + rename, so a concurrent reader never sees a torn file.
     if let Ok(json) = serde_json::to_vec(&history) {
-        let _ = std::fs::write(&file, json);
+        let tmp = file.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &file);
+        }
     }
     history
 }

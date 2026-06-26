@@ -1,0 +1,47 @@
+name: Docs
+
+# Renders the Markdown docs into the designed HTML site (docs/build.mjs) and
+# publishes to GitHub Pages. Markdown is the source of truth; the styled HTML is
+# generated here on publish, never committed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    name: build + deploy Pages
+    runs-on: macos-14
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Render Markdown → designed HTML
+        working-directory: docs
+        run: |
+          npm install
+          node build.mjs
+          rm -rf node_modules   # keep it out of the published artifact
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4

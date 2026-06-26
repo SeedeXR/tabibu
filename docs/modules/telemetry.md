@@ -4,7 +4,7 @@ Opt-in, privacy-respecting telemetry crate. It records exactly one thing: a
 **false-positive signal**. When a user *unchecks* a `Safe`-tier cleanup item
 during review — Tabibu suggested removing it and the user disagreed — we learn
 *which category* of suggestion users distrust, so we can improve defaults.
-Per memory/philosophy.md (honesty) and the engineering guide §8.
+Built on Tabibu's honesty principle (opt-in, no content, no PII).
 
 ## Privacy contract (this is the design, not a feature)
 

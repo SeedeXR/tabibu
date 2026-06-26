@@ -1,1 +1,1 @@
-//! tabibu-bench — implemented per milestone plan (see memory/todo.md).
+//! tabibu-bench — criterion benchmarks for the hot paths.

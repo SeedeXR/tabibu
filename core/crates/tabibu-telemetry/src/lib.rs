@@ -1,11 +1,10 @@
 //! tabibu-telemetry — opt-in, privacy-respecting deselection telemetry.
 //!
-//! Implemented in v0.1.2 (see memory/todo.md). This crate records a single,
-//! deliberately coarse "false-positive" signal: when a user **unchecks** a
-//! `Safe`-tier cleanup item during review — i.e. Tabibu suggested removing it
-//! and the user disagreed — we want to learn *which category of suggestion*
-//! users distrust, so we can improve defaults. See memory/philosophy.md
-//! (honesty) and the engineering guide §8.
+//! Implemented in v0.1.2. This crate records a single, deliberately coarse
+//! "false-positive" signal: when a user **unchecks** a `Safe`-tier cleanup item
+//! during review — i.e. Tabibu suggested removing it and the user disagreed —
+//! we want to learn *which category of suggestion* users distrust, so we can
+//! improve defaults. Opt-in and content-free, per Tabibu's honesty principle.
 //!
 //! # Privacy contract (non-negotiable — this is the design)
 //!

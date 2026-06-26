@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tabibu — Developer Docs</title>
+<meta name="description" content="Tabibu: a high-performance, honest macOS optimization tool. Rust core + Tauri shell, safety-first, benchmark-gated." />
+<link rel="stylesheet" href="assets/docs.css" />
+</head>
+<body>
+
+<nav>
+  <span class="brand"><svg viewBox="0 0 551 888" id="navmark" aria-hidden="true"></svg> Tabibu</span>
+  <span class="links" id="nav">
+    <a href="#overview">Overview</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#safety">Safety</a>
+    <a href="#scan">Scan flow</a>
+    <a href="#crates">Crates</a>
+    <a href="#build">Build &amp; test</a>
+    <a href="#limits">Limitations</a>
+    <a href="#docs">Docs</a>
+  </span>
+</nav>
+
+<main>
+  <!-- HERO -->
+  <header class="hero" id="overview">
+    <div>
+      <div class="eyebrow">Swahili · physician / healer</div>
+      <h1>The <span class="grad-text">honest</span> macOS optimizer.</h1>
+      <p class="lead">A CleanMyMac-class utility that wins on honesty, safety, and measurable speed — no scareware, no fake "GB freed", no resident background hog. A Rust core does the throughput work; a Tauri shell renders it.</p>
+      <div class="cta">
+        <a class="btn primary" href="#build">Build it</a>
+        <a class="btn" href="#architecture">How it works</a>
+      </div>
+      <div class="tags">
+        <span class="tag"><b>Rust</b> core</span>
+        <span class="tag"><b>Tauri v2</b> shell</span>
+        <span class="tag"><b>110</b> tests</span>
+        <span class="tag">macOS 13+ · Apple Silicon + Intel</span>
+      </div>
+    </div>
+    <div class="mark"><div class="orb"><svg viewBox="0 0 551 888" id="heromark" aria-hidden="true"></svg></div></div>
+  </header>
+
+  <!-- OVERVIEW / pillars -->
+  <section>
+    <div class="eyebrow">Principles</div>
+    <h2>Safety &gt; honesty &gt; performance &gt; features</h2>
+    <p class="lead">The cleanup logic is the easy 20%. The discipline around it — safety invariants, benchmark gates, honest UX — is the product.</p>
+    <div class="pillars">
+      <div class="pillar"><div class="n">01</div><h3>Safety-first</h3><p>Scanning is read-only behind a denylist guard. Reclaim is the only mutating path: it writes an undo manifest before touching anything and trashes rather than deletes.</p></div>
+      <div class="pillar"><div class="n">02</div><h3>Honest</h3><p>Reports <em>measured</em> freed bytes, never estimates. No inflated counts, no marketing. When a metric needs root we say "unavailable" rather than fake it.</p></div>
+      <div class="pillar"><div class="n">03</div><h3>Measurable</h3><p>Criterion benchmarks with a &gt;5% regression gate. Property tests and golden-image tests defend the safety invariants on every merge.</p></div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section id="features">
+    <div class="eyebrow">What it does</div>
+    <h2>One scan, full review, nothing removed until you choose</h2>
+    <div class="grid cols-3">
+      <div class="card"><div class="ic">◎</div><h3>Smart Scan</h3><p>Streaming scan across caches, temp, logs, and large old files — a live radar loader with per-category chips. Review every item first.</p></div>
+      <div class="card blue"><div class="ic">⧉</div><h3>Duplicates</h3><p>Whole-home blake3 funnel: size group → head hash → full hash. Pick which copies go.</p></div>
+      <div class="card teal"><div class="ic">⌦</div><h3>Uninstaller</h3><p>Remove apps and trace their leftover support files; disk-wide orphan scan for apps already gone.</p></div>
+      <div class="card"><div class="ic">⌘</div><h3>Developer / CLI</h3><p>Homebrew analysis + safe cleanup. <code>brew cleanup</code>/<code>autoremove</code> previews; every formula sized with install date. Removal is delegated to <code>brew</code> itself.</p></div>
+      <div class="card blue"><div class="ic">▤</div><h3>Disk &amp; Memory</h3><p>Treemap of what's eating space; live CPU/memory graphs, force-quit, Rosetta flagging.</p></div>
+      <div class="card teal"><div class="ic">⛨</div><h3>Security</h3><p>Adware and rogue-profile heuristics with a locked quarantine vault — never deletes, never fakes a verdict.</p></div>
+    </div>
+  </section>
+
+  <!-- ARCHITECTURE -->
+  <section id="architecture">
+    <div class="eyebrow">Architecture</div>
+    <h2>One language, end to end</h2>
+    <p class="lead">All logic is Rust; the view layer is the web platform. The Tauri backend depends on the core crates <em>by path</em> and exposes them as commands — no FFI bridge (ADR-0003 superseded the original Swift + C-ABI design).</p>
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+  subgraph UI["app/src · web UI"]
+    A["sidebar · scan flow<br/>review · treemap"]
+  end
+  subgraph BE["app/src-tauri · Rust"]
+    B["#[tauri::command]s"]
+    S["system.rs<br/>macOS facts"]
+  end
+  subgraph CORE["core/ · crates"]
+    E["engine + scanners<br/>(in-process)"]
+  end
+  A -- "invoke / Channel<br/>(serde, no FFI)" --> B
+  B -- "path dependency" --> E
+  S --- B
+      </div>
+      <figcaption>Frontend ⇄ Rust backend ⇄ core crates. Streaming results use a Tauri Channel; commands run off the main thread.</figcaption>
+    </figure>
+  </section>
+
+  <!-- SAFETY -->
+  <section id="safety">
+    <div class="eyebrow">The only mutating path</div>
+    <h2>Reclaim, with an undo written first</h2>
+    <p class="lead">Every selected item is re-validated against the denylist and tier rules. Protected paths are skipped per item — recorded, never touched — while everything safe is reclaimed. Freed bytes are measured, not estimated.</p>
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart TD
+  A["Selected CleanupItems"] --> B{"Per item:<br/>denylist + tier check"}
+  B -- "protected" --> K["Skip · record as<br/>'left untouched'"]
+  B -- "non-Safe destructive" --> X["Fail fast<br/>(UI never produces this)"]
+  B -- "ok" --> C["Write undo manifest<br/>to disk"]
+  C --> D["Trash / Delete / Truncate<br/>· measure before & after"]
+  D --> E["Report: measured bytes,<br/>per-item failures listed honestly"]
+  K --> E
+      </div>
+      <figcaption>The denylist invariant — no returned path escapes the allowed roots — is property-tested against a deliberately malicious scanner.</figcaption>
+    </figure>
+  </section>
+
+  <!-- SCAN FLOW -->
+  <section id="scan">
+    <div class="eyebrow">Streaming scan</div>
+    <h2>Concurrent scanners, live results</h2>
+    <p class="lead">A scan spawns one thread per scanner; every item streams through the denylist guard into a single sink and out over a Tauri Channel, so the UI fills in as discovery happens.</p>
+    <figure class="diagram">
+      <div class="mermaid">
+sequenceDiagram
+  participant UI as Web UI
+  participant CMD as tauri::command (worker thread)
+  participant ENG as smart_scan
+  participant SC as scanners (1 thread each)
+  UI->>CMD: invoke("scan", Channel)
+  CMD->>ENG: spawn → smart_scan
+  ENG->>SC: one thread per scanner
+  loop each item found
+    SC->>ENG: emit(CleanupItem)
+    ENG->>ENG: denylist guard (drop + count if denied)
+    ENG-->>UI: Channel → row appears live (radar + chips)
+  end
+  SC->>ENG: done / error per scanner
+  ENG-->>UI: summary → per-scanner truth
+      </div>
+      <figcaption>Cancel any time — tokens fire at directory boundaries; commands run off the main thread so the UI never freezes.</figcaption>
+    </figure>
+  </section>
+
+  <!-- DUPES funnel -->
+  <section id="dupes">
+    <div class="eyebrow">Duplicates</div>
+    <h2>A three-stage funnel</h2>
+    <p class="lead">Hashing every file is wasteful. Tabibu groups by size, then hashes only a head sample, then does a full blake3 hash on the survivors — each stage shrinks the candidate set.</p>
+    <figure class="diagram">
+      <div class="mermaid">
+flowchart LR
+  A["All files"] --> B["Stage 1<br/>group by size"]
+  B --> C["Stage 2<br/>head-sample hash"]
+  C --> D["Stage 3<br/>full blake3 hash"]
+  D --> E["Confirmed<br/>duplicate sets"]
+      </div>
+      <figcaption>Only files that collide at every stage are confirmed duplicates — newest copy kept by default.</figcaption>
+    </figure>
+  </section>
+
+  <!-- CRATES -->
+  <section id="crates">
+    <div class="eyebrow">core/crates</div>
+    <h2>The Rust workspace</h2>
+    <div class="grid cols-3">
+      <div class="card"><h3>tabibu-engine</h3><p>Traits, SafetyTier, denylist, undo manifest, scan orchestration.</p><div class="meta">the safety backbone</div></div>
+      <div class="card"><h3>tabibu-walk</h3><p>Parallel filesystem traversal and size tree.</p><div class="meta">rayon</div></div>
+      <div class="card"><h3>tabibu-dupes</h3><p>Three-stage blake3 duplicate funnel.</p><div class="meta">size → head → full</div></div>
+      <div class="card"><h3>tabibu-junk</h3><p>Cache / temp / log / trash / large-old scanners.</p><div class="meta">rayon-parallel sizing</div></div>
+      <div class="card"><h3>tabibu-uninstall</h3><p>Remnants, orphans, unused apps, stale binaries.</p><div class="meta">artifact tracing</div></div>
+      <div class="card"><h3>tabibu-brew</h3><p>Homebrew analysis + safe cleanup; delegates removal to <code>brew</code>.</p><div class="meta">reads on-disk receipts</div></div>
+      <div class="card"><h3>tabibu-malware</h3><p>Adware / rogue-profile heuristics + quarantine vault.</p><div class="meta">never deletes</div></div>
+      <div class="card"><h3>tabibu-monitor</h3><p>sysinfo system + per-process sampling; Rosetta detection.</p><div class="meta">honest RSS budget</div></div>
+      <div class="card"><h3>tabibu-telemetry</h3><p>Opt-in, content-free deselection signal.</p><div class="meta">no PII, no paths</div></div>
+    </div>
+  </section>
+
+  <!-- BUILD -->
+  <section id="build">
+    <div class="eyebrow">Quick start</div>
+    <h2>Build &amp; test</h2>
+    <p class="lead">Prerequisites: Rust (rustup) and Node + npm (for the Tauri CLI only). The frontend is static — no bundler, no build step.</p>
+    <div class="code">
+      <button data-copy>Copy</button>
+      <pre><span class="cmt"># run the app with hot reload (compiles the Rust backend + core)</span>
+cd app &amp;&amp; npm install &amp;&amp; npm run dev
+
+<span class="cmt"># bundle the .app + DMG</span>
+cd app &amp;&amp; npx tauri build
+
+<span class="cmt"># the core test suite — 110 tests: unit, property, golden-image</span>
+cd core &amp;&amp; cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check</pre>
+    </div>
+    <div class="grid cols-3">
+      <div class="card teal"><div class="ic">✓</div><h3>Safety</h3><p>Property tests + golden-image reclaim (snapshot → reclaim → assert exactly the intended files changed).</p></div>
+      <div class="card teal"><div class="ic">✓</div><h3>Lint</h3><p><code>clippy::all</code> denied; pedantic advisory (its lint set drifts between toolchains).</p></div>
+      <div class="card teal"><div class="ic">✓</div><h3>CI</h3><p>fmt · clippy · test · cargo-deny · bench-smoke · app build — all on macOS runners.</p></div>
+    </div>
+  </section>
+
+  <!-- LIMITATIONS -->
+  <section id="limits">
+    <div class="eyebrow">Honest status</div>
+    <h2>Current limitations</h2>
+    <ul class="clean">
+      <li><b>Not distributable yet</b> — no Developer ID / notarization credentials, so bundles are unsigned. The pipeline is wired and conditional.</li>
+      <li><b>ClamAV</b> is a feature-gated stub; v1 ships native adware heuristics. Real-time (Endpoint Security) scanning is deferred behind an Apple entitlement.</li>
+      <li><b>Exact CPU die temperature &amp; GPU powermetrics need root</b> — Tabibu ships the honest thermal-pressure signal (<code>pmset -g therm</code>) instead.</li>
+      <li><b>Tray is minimal</b> — a status item with a live CPU/memory tooltip; a rich health popover is a follow-up. No privileged helper (all features are user-space).</li>
+    </ul>
+  </section>
+
+  <!-- DOCS -->
+  <section id="docs">
+    <div class="eyebrow">Documentation</div>
+    <h2>Dig deeper</h2>
+    <p class="lead">Per-crate guides and decision records. These pages are generated from the Markdown in <code>docs/</code> and rendered into this same design on publish.</p>
+    <div class="grid cols-3 doclinks">
+      <a href="modules/engine.html"><div class="card"><h3>Engine</h3><p>Traits, SafetyTier, denylist, undo, orchestration.</p></div></a>
+      <a href="modules/dupes.html"><div class="card"><h3>Duplicates</h3><p>The three-stage blake3 funnel.</p></div></a>
+      <a href="modules/junk.html"><div class="card"><h3>Junk</h3><p>Cache / temp / log / trash / large-old scanners.</p></div></a>
+      <a href="modules/uninstall.html"><div class="card"><h3>Uninstall</h3><p>Remnants, orphans, unused apps, stale binaries.</p></div></a>
+      <a href="modules/malware.html"><div class="card"><h3>Malware</h3><p>Heuristics + quarantine vault; ClamAV boundary.</p></div></a>
+      <a href="modules/walk.html"><div class="card"><h3>Walk</h3><p>Parallel filesystem traversal + size tree.</p></div></a>
+      <a href="modules/telemetry.html"><div class="card"><h3>Telemetry</h3><p>Opt-in, content-free deselection signal.</p></div></a>
+      <a href="adr/0003-tauri-shell-supersedes-swift.html"><div class="card"><h3>ADR-0003</h3><p>Tauri shell supersedes the Swift + C-ABI design.</p></div></a>
+      <a href="setup.html"><div class="card"><h3>Setup &amp; release</h3><p>Clean-machine build; signing &amp; notarization.</p></div></a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="mono">Tabibu · Rust core + Tauri shell · macOS</div>
+  <div>Honest, safe, measurable. Built with discipline.</div>
+</footer>
+
+<script src="assets/mermaid.min.js"></script>
+<script>
+  // Mermaid vendored locally (no CDN) so the docs render offline, like the app.
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "base",
+    themeVariables: {
+      fontFamily: "Space Grotesk, sans-serif",
+      background: "#0a1d27",
+      primaryColor: "#0e2531", primaryBorderColor: "#2f8ed4", primaryTextColor: "#eaf3f6",
+      lineColor: "#5d727c", secondaryColor: "#112c39", tertiaryColor: "#04323f",
+      noteBkgColor: "#13313f", noteTextColor: "#eaf3f6", noteBorderColor: "#ec6a40",
+      actorBkg: "#0e2531", actorBorder: "#2f8ed4", actorTextColor: "#eaf3f6",
+      signalColor: "#8ba1ac", signalTextColor: "#cfe0e6", labelBoxBkgColor: "#112c39", labelTextColor: "#eaf3f6",
+    },
+  });
+
+</script>
+<script>
+  const PATH = "M274.52 0.239045C275.4 0.169891 276.28 0.111232 277.161 0.0631151C286.365 -0.436236 336.113 2.01859 341.76 7.74416C344.894 10.9218 347.977 35.8308 350.115 42.348C355.36 58.3335 362.15 73.2643 371.821 87.0895C378.115 96.087 385.678 103.868 393.146 111.87C402.353 121.734 411.43 131.656 419.345 142.615C461.689 201.117 468.437 278.153 436.906 343.121C426.867 363.775 411.167 381.418 411.408 404.418C411.668 429.194 427.884 444.125 444.775 459.532C451.364 465.469 457.813 471.555 464.112 477.795C519.929 533.428 553.823 601.467 550.819 680.994C550.528 688.645 550.575 696.164 549.713 703.801C544.656 750.101 524.157 793.35 491.51 826.582C429.562 888.451 359.343 886.933 278.734 887.008C208.871 887.078 140.807 887.467 82.1684 842.292C35.4757 806.543 7.94702 750.068 1.47528 692.669C-8.57918 603.495 33.6742 520.642 100.304 463.665C109.933 455.428 121.336 446.001 129.157 435.919C142.384 418.69 145.393 395.707 137.047 375.656C132.332 364.579 124.615 352.915 119.219 341.702C102.856 307.695 98.2824 274.021 101.002 236.57C103.974 195.643 125.439 151.743 154.615 122.998C183.394 94.6453 209.599 71.1148 217.412 29.0803C218.03 25.7594 221.048 9.23683 222.411 7.49378C229.008 3.01003 265.809 0.494249 274.52 0.239045ZM65.8895 720.663C74.0784 728.563 78.1515 730.821 86.533 737.629C54.0422 642.725 79.4235 538.094 156.607 474.492C160.022 471.681 181.967 454.786 182.576 453.648C182.102 453.137 182.294 453.154 181.773 453.011C169.095 458.694 160.602 461.538 148.033 468.491C101.183 494.348 65.0768 536.042 46.1855 586.094C33.0438 620.634 28.6754 668.212 49.3659 700.367C53.5506 706.87 60.0968 715.613 65.8895 720.663ZM149.255 283.264C151.359 285.719 159.308 294.132 162.038 294.47C162.205 293.079 161.666 291.641 161.37 290.263C154.683 259.24 155.452 223.156 165.995 193.118C172.004 176.374 180.269 160.528 190.564 146.019C204.04 126.996 222.293 112.161 234.263 92.3496C242.259 79.1176 246.278 60.7801 246.252 45.4013C246.249 43.5361 246.663 37.979 245.45 36.8405C243.091 41.9385 241.388 49.0881 239.414 54.5755C235.101 66.5626 230.273 77.4792 223.037 88.0345C209.512 107.762 190.684 120.651 174.955 138.44C154.711 161.335 139.954 187.973 133.52 218.019C132.666 222.004 132.359 229.244 132.085 233.285C131.512 241.734 132.145 252.66 135.057 260.572C137.56 267.374 143.682 278.684 149.255 283.264ZM294.828 16.8164C303.358 16.2846 327.687 14.5358 334.208 10.0596L334.549 9.19649C330.186 3.75919 276.947 3.75694 268.569 4.39395C260.224 4.72814 236.73 5.02936 229.672 8.73232L229.077 9.59558C233.692 16.3349 284.84 17.7107 294.828 16.8164Z";
+  const nav = document.getElementById("navmark");
+  nav.innerHTML = `<path d="${PATH}" fill="url(#g)"/><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec6a40"/><stop offset="1" stop-color="#2f8ed4"/></linearGradient></defs>`;
+  const hero = document.getElementById("heromark");
+  hero.innerHTML = `<path d="${PATH}" fill="url(#hg)"/><defs><linearGradient id="hg" x1="0.1" y1="0" x2="0.9" y2="1"><stop offset="0" stop-color="#ec6a40"/><stop offset="0.5" stop-color="#c75c7e"/><stop offset="1" stop-color="#2f8ed4"/></linearGradient></defs>`;
+  document.head.insertAdjacentHTML("beforeend", `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 551 888"><path d="'+PATH+'" fill="#ec6a40"/></svg>')}">`);
+
+  // scroll-spy: highlight the nav link of the section in view
+  const links = [...document.querySelectorAll("#nav a")];
+  const map = new Map(links.map(a => [a.getAttribute("href").slice(1), a]));
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      const link = map.get(e.target.id);
+      if (!link) return; // sections without a nav entry keep the current highlight
+      links.forEach(l => l.classList.remove("active"));
+      link.classList.add("active");
+    });
+  }, { rootMargin: "-45% 0px -50% 0px" });
+  document.querySelectorAll("section[id], header[id]").forEach(s => obs.observe(s));
+
+  // copy buttons
+  document.querySelectorAll("[data-copy]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const txt = btn.parentElement.querySelector("pre").innerText;
+      navigator.clipboard.writeText(txt).then(() => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1400); });
+    });
+  });
+</script>
+</body>
+</html>

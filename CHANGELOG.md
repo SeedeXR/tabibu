@@ -4,8 +4,8 @@ All notable changes to Tabibu are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project aims to adhere to [Semantic Versioning](https://semver.org/).
-User-facing entries are written honestly — no inflated counts, no marketing
-(see `memory/philosophy.md` §2). The canonical version lives in `VERSION` and
+User-facing entries are written honestly — no inflated counts, no marketing.
+The canonical version lives in `VERSION` and
 `core/Cargo.toml` (`workspace.package.version`); keep them in sync.
 
 ## [Unreleased]
@@ -144,7 +144,7 @@ and packaged. Not yet distributable (no Developer ID / notarization — see
 - Bundle identifier set to `xr.seede.tabibu`.
 - Monitor RSS budget recorded as a measured **70 MB** ceiling (CPU < 1% stays
   the hard gate); the guide's 30 MB was illustrative and unachievable for a
-  native menu-bar app. See `memory/test.md` and `docs/modules/monitor.md`.
+  native menu-bar app.
 
 ### Security
 

@@ -22,3 +22,9 @@ core/benches-baseline/
 app/src-tauri/target/
 app/src-tauri/gen/
 app/node_modules/
+
+# Docs site: deps + the HTML generated from Markdown by docs/build.mjs in CI.
+# Markdown is the source of truth; index.html is the only committed HTML.
+docs/node_modules/
+docs/**/*.html
+!docs/index.html

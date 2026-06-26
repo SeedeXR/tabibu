@@ -1,0 +1,12 @@
+{
+  "name": "tabibu-docs",
+  "private": true,
+  "description": "Renders the Markdown docs into the designed HTML site (build.mjs).",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "marked": "^14.0.0"
+  }
+}

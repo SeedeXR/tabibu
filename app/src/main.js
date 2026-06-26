@@ -224,7 +224,7 @@ function startScan(id) {
   };
   // batched re-render ~100ms so streaming never thrashes the UI
   const t = setInterval(() => {
-    if (dirty && s.phase === "scanning" && id === state.current) { dirty = false; refreshScanning(id); }
+    if (dirty && s.phase === "scanning" && id === state.current) { dirty = false; scanLiveUpdate(id); }
   }, 100);
   activeTimers.push(t);
   invoke("scan", { scanners: def.scanners, onEvent: ch });
@@ -267,7 +267,6 @@ function scanningPanel(id) {
   scanLiveUpdate(id, wrap);
   return wrap;
 }
-function refreshScanning(id) { scanLiveUpdate(id); }
 // Update only the dynamic parts (count, total, chips) — never the radar.
 function scanLiveUpdate(id, root) {
   root = root || document.querySelector(".scan-stage");
@@ -861,7 +860,7 @@ async function uninstallerView() {
 function renderAppBrowser() {
   const u = uninstallState;
   const wrap = h("div", {});
-  if (!state.fda) wrap.append(fdaNotice());
+  // Full Disk Access is granted from Settings now (not here).
   wrap.append(h("div", { class: "row", style: "padding:12px 24px" },
     (() => { const i = h("input", { class: "toolbar-input", placeholder: "Search apps" }); i.value = u.query; i.addEventListener("input", () => { u.query = i.value; renderAppList(listEl); }); return i; })(),
     h("div", { class: "spacer" }),
@@ -1392,7 +1391,20 @@ async function settingsView() {
     invoke("set_telemetry_enabled", { on: cb.checked }).catch((e) => { alert(String(e)); cb.checked = !cb.checked; });
   });
   const sw = h("label", { class: "switch" }, cb, h("span", { class: "track" }));
+
+  // Full Disk Access lives here — the one place to grant whole-disk access.
+  const on = state.fda;
+  const fda = h("div", { class: "setting" },
+    h("div", { class: "body" },
+      h("h3", {}, h("span", { class: "dot", style: `display:inline-block;margin-right:8px;background:${on ? "var(--tier-safe)" : "var(--tier-review)"}` }),
+        on ? "Full Disk Access — granted" : "Full Disk Access — not granted"),
+      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security), and there's no per-folder shortcut. Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access."),
+      on ? null : h("div", { class: "row", style: "gap:8px;margin-top:10px" },
+        h("button", { class: "primary", onClick: () => invoke("open_url", { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" }) }, "Open Privacy Settings"),
+        h("button", { onClick: recheckFDA }, "I've enabled it — re-check"))));
+
   setView(h("div", { class: "pad" },
+    fda,
     h("div", { class: "setting" },
       h("div", { class: "body" },
         h("h3", {}, "Share deselection feedback"),

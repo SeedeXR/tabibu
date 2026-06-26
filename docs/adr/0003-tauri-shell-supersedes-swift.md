@@ -22,8 +22,8 @@ application in `app/`:
   arguments and return values with serde, which the core types already derive.
   Streaming scan results use a Tauri `Channel`.
 - **`app/src/`** — a static HTML/CSS/JS frontend (no bundler, no Node build
-  step; `withGlobalTauri` exposes `window.__TAURI__`). Premium design system
-  from `memory/design.md`, Lucide icons (ISC) inlined.
+  step; `withGlobalTauri` exposes `window.__TAURI__`). Premium design system,
+  Lucide icons (ISC) inlined.
 
 ## Rationale
 

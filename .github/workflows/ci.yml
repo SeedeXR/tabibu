@@ -47,18 +47,18 @@ jobs:
 
   deny:
     name: cargo-deny
-    # Linux: cargo-deny-action is a container action (Docker), unsupported on
-    # macOS runners. cargo-deny is a pure license/advisory/ban check — no macOS
-    # frameworks needed — so a Linux runner is correct (and faster/cheaper).
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       # cargo-deny is not installed on dev machines; CI is the enforcement
       # point for core/deny.toml (licenses, advisories, bans, sources).
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # `install-action` drops in the prebuilt binary (no Docker — so this runs
+      # on macOS, unlike the container-based cargo-deny-action).
+      - uses: taiki-e/install-action@v2
         with:
-          manifest-path: core/Cargo.toml
-          arguments: ""
+          tool: cargo-deny
+      - run: cargo deny check
+        working-directory: core
 
   bench-smoke:
     name: bench smoke

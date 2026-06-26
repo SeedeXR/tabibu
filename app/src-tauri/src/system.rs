@@ -219,13 +219,19 @@ fn parse_pmset(info: &mut BatteryInfo) {
         if t.is_empty() {
             continue;
         }
+        // Take the FIRST match of each kind: the charge % and the time-left
+        // token both appear before any trailing fields, so first-wins avoids a
+        // later stray "N%" / "H:MM" token overwriting the real value.
         if let Some(pct) = t.strip_suffix('%') {
-            if let Ok(v) = pct.parse::<u32>() {
-                info.charge_percent = Some(v);
+            if info.charge_percent.is_none() {
+                if let Ok(v) = pct.parse::<u32>() {
+                    info.charge_percent = Some(v);
+                }
             }
         } else if matches!(t, "charging" | "discharging" | "charged") {
-            info.state = Some(t.to_string());
-        } else if t.contains(':')
+            info.state.get_or_insert_with(|| t.to_string());
+        } else if info.time_remaining.is_none()
+            && t.contains(':')
             && t.chars().all(|c| c.is_ascii_digit() || c == ':')
             && t != "0:00"
         {

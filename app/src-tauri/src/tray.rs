@@ -1,7 +1,7 @@
 //! Menu-bar tray — the Swift-free replacement for the old `TabibuMonitor`
 //! agent (inspiration: the CleanMyMac menu widget). A status item with a live
 //! tooltip (CPU% + memory%) and a small menu (Open Tabibu / Quit). Sampling
-//! runs on a 5s cadence to stay light (memory/test.md budget spirit).
+//! runs on a 5s cadence to stay light (within the monitor resource budget).
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
