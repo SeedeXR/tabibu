@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { marked } from "marked";
 
 const DOCS = dirname(fileURLToPath(import.meta.url));
-const GOURD = readFileSync(join(DOCS, "assets/gourd.path"), "utf8").trim();
 const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 // ```mermaid fences become <pre class="mermaid"> (raw, for client render);
@@ -31,7 +30,7 @@ function mdFiles(dir) {
   });
 }
 
-function shell(title, body, up) {
+function shell(title, body, up, file) {
   return `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -42,11 +41,15 @@ function shell(title, body, up) {
   <a class="brand" href="${up}index.html"><svg viewBox="0 0 551 888" id="navmark" aria-hidden="true"></svg> Tabibu</a>
   <span class="links"><a href="${up}index.html">← Home</a></span>
 </nav>
-<main><article class="doc">${body}</article></main>
+<main class="reveal"><div class="sheet"><div class="file">${esc(file)}</div><article class="doc">${body}</article></div></main>
 <footer><div class="mono">Tabibu · docs</div></footer>
 <script src="${up}assets/mermaid.min.js"></script>
 <script src="${up}assets/mermaid-init.js"></script>
-<script>document.getElementById("navmark").innerHTML='<path d="${GOURD}" fill="url(#g)"/><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec6a40"/><stop offset="1" stop-color="#2f8ed4"/></linearGradient></defs>';</script>
+<script src="${up}assets/gsap.min.js"></script>
+<script src="${up}assets/ScrollTrigger.min.js"></script>
+<script src="${up}assets/navmark.js"></script>
+<script>
+if(window.gsap&&window.ScrollTrigger&&!matchMedia("(prefers-reduced-motion: reduce)").matches){gsap.registerPlugin(ScrollTrigger);gsap.from(".reveal",{opacity:0,y:32,duration:0.6,ease:"power3.out"});}</script>
 </body></html>`;
 }
 
@@ -56,7 +59,8 @@ for (const file of mdFiles(DOCS)) {
   const title = (md.match(/^#\s+(.+)$/m)?.[1] ?? file.split(sep).pop().replace(/\.md$/, "")).trim();
   const depth = relative(DOCS, dirname(file)).split(sep).filter(Boolean).length;
   const up = "../".repeat(depth);
-  writeFileSync(file.replace(/\.md$/, ".html"), shell(title, marked.parse(md), up));
+  const label = relative(DOCS, file); // e.g. "modules/engine.md"
+  writeFileSync(file.replace(/\.md$/, ".html"), shell(title, marked.parse(md), up, label));
   n++;
 }
 console.log(`rendered ${n} doc page(s)`);

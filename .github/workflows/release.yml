@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Needed to publish a GitHub Release (attach the DMG to the tag).
+permissions:
+  contents: write
+
 jobs:
   release:
     name: Build universal app + DMG (unsigned)
@@ -33,9 +37,22 @@ jobs:
       - name: Build universal app + DMG (version from VERSION)
         run: ./scripts/build-app.sh
 
+      # Also keep a workflow artifact (handy for non-tag debugging runs).
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: tabibu-dmg
           path: app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
+
+      # Publish the GitHub Release for the tag and attach the DMG so it's a real
+      # download (artifacts expire and are buried in the run; a Release is not).
+      - name: Publish Release with DMG
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Unsigned universal (Apple Silicon + Intel) build. On first launch,
+            right-click the app → Open (Gatekeeper) since there's no Developer ID yet.
