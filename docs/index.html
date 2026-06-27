@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Tabibu · Developer Docs</title>
-<meta name="description" content="Tabibu: a high-performance, honest macOS optimization tool. Rust core plus a Tauri shell, safety-first, benchmark-gated." />
+<meta name="description" content="Tabibu: a high-performance, honest macOS optimization tool. Rust core + Tauri shell, safety-first, benchmark-gated." />
 <link rel="stylesheet" href="assets/docs.css" />
 </head>
 <body>
@@ -24,72 +24,60 @@
 </nav>
 
 <main>
-  <!-- HERO / cover sheet -->
-  <header class="reveal" id="overview">
-    <div class="sheet cover">
-      <div class="cover-grid">
-        <div>
-          <div class="file">README.md</div>
-          <h1>The <span class="grad-text">honest</span> macOS optimizer.</h1>
-          <p class="lead">A CleanMyMac-class utility that wins on honesty, safety, and measurable speed. No scareware, no fake "GB freed", no resident background hog. A Rust core does the throughput work; a Tauri shell renders it.</p>
-          <div class="cta">
-            <a class="btn primary" href="#build">Build it</a>
-            <a class="btn" href="#architecture">How it works</a>
-          </div>
-          <div class="tags">
-            <span class="tag"><b>v<span id="appver">0.1.4</span></b></span>
-            <span class="tag"><b>Rust</b> core</span>
-            <span class="tag"><b>Tauri v2</b> shell</span>
-            <span class="tag"><b>110</b> tests</span>
-            <span class="tag">macOS 13+ · Apple Silicon + Intel</span>
-          </div>
-        </div>
-        <div class="mark"><svg viewBox="0 0 551 888" id="heromark" aria-hidden="true"></svg></div>
+  <!-- HERO -->
+  <header class="hero" id="overview">
+    <div>
+      <div class="eyebrow">Swahili · physician / healer</div>
+      <h1>The <span class="grad-text">honest</span> macOS optimizer.</h1>
+      <p class="lead">A CleanMyMac-class utility that wins on honesty, safety, and measurable speed. No scareware, no fake "GB freed", no resident background hog. A Rust core does the throughput work; a Tauri shell renders it.</p>
+      <div class="cta">
+        <a class="btn primary" href="#build">Build it</a>
+        <a class="btn" href="#architecture">How it works</a>
       </div>
-      <span class="wm">tabibu</span>
+      <div class="tags">
+        <span class="tag"><b>v<span id="appver">0.1.4</span></b></span>
+        <span class="tag"><b>Rust</b> core</span>
+        <span class="tag"><b>Tauri v2</b> shell</span>
+        <span class="tag"><b>110</b> tests</span>
+        <span class="tag">macOS 13+ · Apple Silicon + Intel</span>
+      </div>
     </div>
+    <div class="mark"><svg viewBox="0 0 551 888" id="heromark" aria-hidden="true"></svg></div>
   </header>
 
-  <!-- PRINCIPLES -->
-  <section class="reveal">
-    <div class="sheet">
-      <div class="file">01 · principles.md</div>
-      <h2>Safety &gt; honesty &gt; performance &gt; features</h2>
-      <p class="lead">The cleanup logic is the easy 20%. The discipline around it (safety invariants, benchmark gates, honest UX) is the product.</p>
-      <div class="pillars">
-        <div class="pillar"><div class="n">01</div><h3>Safety-first</h3><p>Scanning is read-only behind a denylist guard. Reclaim is the only mutating path: it writes an undo manifest before touching anything and trashes rather than deletes.</p></div>
-        <div class="pillar"><div class="n">02</div><h3>Honest</h3><p>Reports <em>measured</em> freed bytes, never estimates. No inflated counts, no marketing. When a metric needs root we say "unavailable" rather than fake it.</p></div>
-        <div class="pillar"><div class="n">03</div><h3>Measurable</h3><p>Criterion benchmarks with a &gt;5% regression gate. Property tests and golden-image tests defend the safety invariants on every merge.</p></div>
-      </div>
-      <span class="wm">01</span>
+  <!-- OVERVIEW / pillars -->
+  <section>
+    <div class="eyebrow">Principles</div>
+    <h2>Safety &gt; honesty &gt; performance &gt; features</h2>
+    <p class="lead">The cleanup logic is the easy 20%. The discipline around it (safety invariants, benchmark gates, honest UX) is the product.</p>
+    <div class="pillars">
+      <div class="pillar"><div class="n">01</div><h3>Safety-first</h3><p>Scanning is read-only behind a denylist guard. Reclaim is the only mutating path: it writes an undo manifest before touching anything and trashes rather than deletes.</p></div>
+      <div class="pillar"><div class="n">02</div><h3>Honest</h3><p>Reports <em>measured</em> freed bytes, never estimates. No inflated counts, no marketing. When a metric needs root we say "unavailable" rather than fake it.</p></div>
+      <div class="pillar"><div class="n">03</div><h3>Measurable</h3><p>Criterion benchmarks with a &gt;5% regression gate. Property tests and golden-image tests defend the safety invariants on every merge.</p></div>
     </div>
   </section>
 
   <!-- FEATURES -->
-  <section class="reveal" id="features">
-    <div class="sheet">
-      <div class="file">02 · features.md</div>
-      <h2>One scan, full review, nothing removed until you choose</h2>
-      <div class="grid cols-3">
-        <div class="card"><div class="ic">◎</div><h3>Smart Scan</h3><p>Streaming scan across caches, temp, logs, and large old files. A live spinner streams each file as it's found, and you review every item first.</p></div>
-        <div class="card blue"><div class="ic">⧉</div><h3>Duplicates</h3><p>Whole-home blake3 funnel: size group, head hash, then full hash. Pick which copies go.</p></div>
-        <div class="card teal"><div class="ic">⌦</div><h3>Uninstaller</h3><p>Remove apps and trace their leftover support files, plus a disk-wide orphan scan for apps already gone.</p></div>
-        <div class="card"><div class="ic">⌘</div><h3>Developer / CLI</h3><p>Homebrew analysis and safe cleanup. <code>brew cleanup</code>/<code>autoremove</code> previews; every formula sized with install date. Removal is delegated to <code>brew</code> itself.</p></div>
-        <div class="card blue"><div class="ic">▤</div><h3>Disk &amp; Memory</h3><p>Treemap of what's eating space; live CPU/memory graphs, force-quit, Rosetta flagging.</p></div>
-        <div class="card teal"><div class="ic">⛨</div><h3>Security</h3><p>Adware and rogue-profile heuristics with a locked quarantine vault. It never deletes and never fakes a verdict.</p></div>
-      </div>
-      <span class="wm">02</span>
+  <section id="features">
+    <div class="eyebrow">What it does</div>
+    <h2>One scan, full review, nothing removed until you choose</h2>
+    <div class="grid cols-3">
+      <div class="card"><div class="ic">◎</div><h3>Smart Scan</h3><p>Streaming scan across caches, temp, logs, and large old files. A live radar loader with per-category chips. Review every item first.</p></div>
+      <div class="card blue"><div class="ic">⧉</div><h3>Duplicates</h3><p>Whole-home blake3 funnel: size group → head hash → full hash. Pick which copies go.</p></div>
+      <div class="card teal"><div class="ic">⌦</div><h3>Uninstaller</h3><p>Remove apps and trace their leftover support files; disk-wide orphan scan for apps already gone.</p></div>
+      <div class="card"><div class="ic">⌘</div><h3>Developer / CLI</h3><p>Homebrew analysis + safe cleanup. <code>brew cleanup</code>/<code>autoremove</code> previews; every formula sized with install date. Removal is delegated to <code>brew</code> itself.</p></div>
+      <div class="card blue"><div class="ic">▤</div><h3>Disk &amp; Memory</h3><p>Treemap of what's eating space; live CPU/memory graphs, force-quit, Rosetta flagging.</p></div>
+      <div class="card teal"><div class="ic">⛨</div><h3>Security</h3><p>Adware and rogue-profile heuristics with a locked quarantine vault. It never deletes and never fakes a verdict.</p></div>
     </div>
   </section>
 
   <!-- ARCHITECTURE -->
-  <section class="reveal" id="architecture">
-    <div class="sheet">
-      <div class="file">03 · architecture.md</div>
-      <h2>One language, end to end</h2>
-      <p class="lead">All logic is Rust; the view layer is the web platform. The Tauri backend depends on the core crates <em>by path</em> and exposes them as commands. There is no FFI bridge (ADR-0003 superseded the original Swift plus C-ABI design).</p>
-      <figure class="diagram">
-        <div class="mermaid">
+  <section id="architecture">
+    <div class="eyebrow">Architecture</div>
+    <h2>One language, end to end</h2>
+    <p class="lead">All logic is Rust; the view layer is the web platform. The Tauri backend depends on the core crates <em>by path</em> and exposes them as commands. There is no FFI bridge (ADR-0003 superseded the original Swift + C-ABI design).</p>
+    <figure class="diagram">
+      <div class="mermaid">
 flowchart LR
   subgraph UI["app/src · web UI"]
     A["sidebar · scan flow<br/>review · treemap"]
@@ -104,21 +92,18 @@ flowchart LR
   A -- "invoke / Channel<br/>(serde, no FFI)" --> B
   B -- "path dependency" --> E
   S --- B
-        </div>
-        <figcaption>Frontend to Rust backend to core crates. Streaming results use a Tauri Channel; commands run off the main thread.</figcaption>
-      </figure>
-      <span class="wm">03</span>
-    </div>
+      </div>
+      <figcaption>Frontend ⇄ Rust backend ⇄ core crates. Streaming results use a Tauri Channel; commands run off the main thread.</figcaption>
+    </figure>
   </section>
 
   <!-- SAFETY -->
-  <section class="reveal" id="safety">
-    <div class="sheet">
-      <div class="file">04 · reclaim.md</div>
-      <h2>Reclaim, with an undo written first</h2>
-      <p class="lead">Every selected item is re-validated against the denylist and tier rules. Protected paths are skipped per item (recorded, never touched) while everything safe is reclaimed. Freed bytes are measured, not estimated.</p>
-      <figure class="diagram">
-        <div class="mermaid">
+  <section id="safety">
+    <div class="eyebrow">The only mutating path</div>
+    <h2>Reclaim, with an undo written first</h2>
+    <p class="lead">Every selected item is re-validated against the denylist and tier rules. Protected paths are skipped per item (recorded, never touched) while everything safe is reclaimed. Freed bytes are measured, not estimated.</p>
+    <figure class="diagram">
+      <div class="mermaid">
 flowchart TD
   A["Selected CleanupItems"] --> B{"Per item:<br/>denylist + tier check"}
   B -- "protected" --> K["Skip · record as<br/>'left untouched'"]
@@ -127,21 +112,18 @@ flowchart TD
   C --> D["Trash / Delete / Truncate<br/>· measure before & after"]
   D --> E["Report: measured bytes,<br/>per-item failures listed honestly"]
   K --> E
-        </div>
-        <figcaption>The denylist invariant, that no returned path escapes the allowed roots, is property-tested against a deliberately malicious scanner.</figcaption>
-      </figure>
-      <span class="wm">04</span>
-    </div>
+      </div>
+      <figcaption>The denylist invariant, that no returned path escapes the allowed roots, is property-tested against a deliberately malicious scanner.</figcaption>
+    </figure>
   </section>
 
   <!-- SCAN FLOW -->
-  <section class="reveal" id="scan">
-    <div class="sheet">
-      <div class="file">05 · scan.md</div>
-      <h2>Concurrent scanners, live results</h2>
-      <p class="lead">A scan spawns one thread per scanner; every item streams through the denylist guard into a single sink and out over a Tauri Channel, so the UI fills in as discovery happens.</p>
-      <figure class="diagram">
-        <div class="mermaid">
+  <section id="scan">
+    <div class="eyebrow">Streaming scan</div>
+    <h2>Concurrent scanners, live results</h2>
+    <p class="lead">A scan spawns one thread per scanner; every item streams through the denylist guard into a single sink and out over a Tauri Channel, so the UI fills in as discovery happens.</p>
+    <figure class="diagram">
+      <div class="mermaid">
 sequenceDiagram
   participant UI as Web UI
   participant CMD as tauri::command (worker thread)
@@ -153,118 +135,101 @@ sequenceDiagram
   loop each item found
     SC->>ENG: emit(CleanupItem)
     ENG->>ENG: denylist guard (drop + count if denied)
-    ENG-->>UI: Channel → row appears live
+    ENG-->>UI: Channel → row appears live (radar + chips)
   end
   SC->>ENG: done / error per scanner
   ENG-->>UI: summary → per-scanner truth
-        </div>
-        <figcaption>Cancel any time. Tokens fire at directory boundaries, and commands run off the main thread so the UI never freezes.</figcaption>
-      </figure>
-      <span class="wm">05</span>
-    </div>
+      </div>
+      <figcaption>Cancel any time. Tokens fire at directory boundaries; commands run off the main thread so the UI never freezes.</figcaption>
+    </figure>
   </section>
 
   <!-- DUPES funnel -->
-  <section class="reveal" id="dupes">
-    <div class="sheet">
-      <div class="file">06 · duplicates.md</div>
-      <h2>A three-stage funnel</h2>
-      <p class="lead">Hashing every file is wasteful. Tabibu groups by size, then hashes only a head sample, then does a full blake3 hash on the survivors. Each stage shrinks the candidate set.</p>
-      <figure class="diagram">
-        <div class="mermaid">
+  <section id="dupes">
+    <div class="eyebrow">Duplicates</div>
+    <h2>A three-stage funnel</h2>
+    <p class="lead">Hashing every file is wasteful. Tabibu groups by size, then hashes only a head sample, then does a full blake3 hash on the survivors. Each stage shrinks the candidate set.</p>
+    <figure class="diagram">
+      <div class="mermaid">
 flowchart LR
   A["All files"] --> B["Stage 1<br/>group by size"]
   B --> C["Stage 2<br/>head-sample hash"]
   C --> D["Stage 3<br/>full blake3 hash"]
   D --> E["Confirmed<br/>duplicate sets"]
-        </div>
-        <figcaption>Only files that collide at every stage are confirmed duplicates. The newest copy is kept by default.</figcaption>
-      </figure>
-      <span class="wm">06</span>
-    </div>
+      </div>
+      <figcaption>Only files that collide at every stage are confirmed duplicates. The newest copy is kept by default.</figcaption>
+    </figure>
   </section>
 
   <!-- CRATES -->
-  <section class="reveal" id="crates">
-    <div class="sheet">
-      <div class="file">07 · crates.md</div>
-      <h2>The Rust workspace</h2>
-      <div class="grid cols-3">
-        <div class="card"><h3>tabibu-engine</h3><p>Traits, SafetyTier, denylist, undo manifest, scan orchestration.</p><div class="meta">the safety backbone</div></div>
-        <div class="card"><h3>tabibu-walk</h3><p>Parallel filesystem traversal and size tree.</p><div class="meta">rayon</div></div>
-        <div class="card"><h3>tabibu-dupes</h3><p>Three-stage blake3 duplicate funnel.</p><div class="meta">size, head, full</div></div>
-        <div class="card"><h3>tabibu-junk</h3><p>Cache / temp / log / trash / large-old scanners.</p><div class="meta">rayon-parallel sizing</div></div>
-        <div class="card"><h3>tabibu-uninstall</h3><p>Remnants, orphans, unused apps, stale binaries.</p><div class="meta">artifact tracing</div></div>
-        <div class="card"><h3>tabibu-brew</h3><p>Homebrew analysis and safe cleanup; delegates removal to <code>brew</code>.</p><div class="meta">reads on-disk receipts</div></div>
-        <div class="card"><h3>tabibu-malware</h3><p>Adware / rogue-profile heuristics plus a quarantine vault.</p><div class="meta">never deletes</div></div>
-        <div class="card"><h3>tabibu-monitor</h3><p>sysinfo system and per-process sampling; Rosetta detection.</p><div class="meta">honest RSS budget</div></div>
-        <div class="card"><h3>tabibu-telemetry</h3><p>Opt-in, content-free deselection signal.</p><div class="meta">no PII, no paths</div></div>
-      </div>
-      <span class="wm">07</span>
+  <section id="crates">
+    <div class="eyebrow">core/crates</div>
+    <h2>The Rust workspace</h2>
+    <div class="grid cols-3">
+      <div class="card"><h3>tabibu-engine</h3><p>Traits, SafetyTier, denylist, undo manifest, scan orchestration.</p><div class="meta">the safety backbone</div></div>
+      <div class="card"><h3>tabibu-walk</h3><p>Parallel filesystem traversal and size tree.</p><div class="meta">rayon</div></div>
+      <div class="card"><h3>tabibu-dupes</h3><p>Three-stage blake3 duplicate funnel.</p><div class="meta">size → head → full</div></div>
+      <div class="card"><h3>tabibu-junk</h3><p>Cache / temp / log / trash / large-old scanners.</p><div class="meta">rayon-parallel sizing</div></div>
+      <div class="card"><h3>tabibu-uninstall</h3><p>Remnants, orphans, unused apps, stale binaries.</p><div class="meta">artifact tracing</div></div>
+      <div class="card"><h3>tabibu-brew</h3><p>Homebrew analysis + safe cleanup; delegates removal to <code>brew</code>.</p><div class="meta">reads on-disk receipts</div></div>
+      <div class="card"><h3>tabibu-malware</h3><p>Adware / rogue-profile heuristics + quarantine vault.</p><div class="meta">never deletes</div></div>
+      <div class="card"><h3>tabibu-monitor</h3><p>sysinfo system + per-process sampling; Rosetta detection.</p><div class="meta">honest RSS budget</div></div>
+      <div class="card"><h3>tabibu-telemetry</h3><p>Opt-in, content-free deselection signal.</p><div class="meta">no PII, no paths</div></div>
     </div>
   </section>
 
   <!-- BUILD -->
-  <section class="reveal" id="build">
-    <div class="sheet">
-      <div class="file">08 · build.md</div>
-      <h2>Build &amp; test</h2>
-      <p class="lead">Prerequisites: Rust (rustup) and Node plus npm (for the Tauri CLI only). The frontend is static, with no bundler and no build step.</p>
-      <div class="code">
-        <button data-copy>Copy</button>
-        <pre><span class="cmt"># run the app with hot reload (compiles the Rust backend + core)</span>
+  <section id="build">
+    <div class="eyebrow">Quick start</div>
+    <h2>Build &amp; test</h2>
+    <p class="lead">Prerequisites: Rust (rustup) and Node + npm (for the Tauri CLI only). The frontend is static, with no bundler and no build step.</p>
+    <div class="code">
+      <button data-copy>Copy</button>
+      <pre><span class="cmt"># run the app with hot reload (compiles the Rust backend + core)</span>
 cd app &amp;&amp; npm install &amp;&amp; npm run dev
 
-<span class="cmt"># build the universal .app + DMG (stamps the version from VERSION)</span>
-./scripts/build-app.sh
+<span class="cmt"># bundle the .app + DMG</span>
+cd app &amp;&amp; npx tauri build
 
 <span class="cmt"># the core test suite (110 tests: unit, property, golden-image)</span>
 cd core &amp;&amp; cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check</pre>
-      </div>
-      <div class="grid cols-3">
-        <div class="card teal"><div class="ic">✓</div><h3>Safety</h3><p>Property tests plus golden-image reclaim: snapshot, reclaim, then assert exactly the intended files changed.</p></div>
-        <div class="card teal"><div class="ic">✓</div><h3>Lint</h3><p><code>clippy::all</code> denied; pedantic advisory (its lint set drifts between toolchains).</p></div>
-        <div class="card teal"><div class="ic">✓</div><h3>CI</h3><p>fmt · clippy · test · cargo-deny · bench-smoke · app build, all on macOS runners.</p></div>
-      </div>
-      <span class="wm">08</span>
+    </div>
+    <div class="grid cols-3">
+      <div class="card teal"><div class="ic">✓</div><h3>Safety</h3><p>Property tests + golden-image reclaim (snapshot → reclaim → assert exactly the intended files changed).</p></div>
+      <div class="card teal"><div class="ic">✓</div><h3>Lint</h3><p><code>clippy::all</code> denied; pedantic advisory (its lint set drifts between toolchains).</p></div>
+      <div class="card teal"><div class="ic">✓</div><h3>CI</h3><p>fmt · clippy · test · cargo-deny · bench-smoke · app build, all on macOS runners.</p></div>
     </div>
   </section>
 
   <!-- LIMITATIONS -->
-  <section class="reveal" id="limits">
-    <div class="sheet">
-      <div class="file">09 · status.md</div>
-      <h2>Current limitations</h2>
-      <ul class="clean">
-        <li><b>Not distributable yet.</b> No Developer ID or notarization credentials, so bundles are unsigned. The pipeline is wired and conditional.</li>
-        <li><b>ClamAV</b> is a feature-gated stub; v1 ships native adware heuristics. Real-time (Endpoint Security) scanning is deferred behind an Apple entitlement.</li>
-        <li><b>Exact CPU die temperature and GPU powermetrics need root.</b> Tabibu ships the honest thermal-pressure signal (<code>pmset -g therm</code>) instead.</li>
-        <li><b>Tray is minimal:</b> a status item with a live CPU/memory tooltip; a rich health popover is a follow-up. No privileged helper, since all features are user-space.</li>
-      </ul>
-      <span class="wm">09</span>
-    </div>
+  <section id="limits">
+    <div class="eyebrow">Honest status</div>
+    <h2>Current limitations</h2>
+    <ul class="clean">
+      <li><b>Not distributable yet.</b> No Developer ID / notarization credentials, so bundles are unsigned. The pipeline is wired and conditional.</li>
+      <li><b>ClamAV</b> is a feature-gated stub; v1 ships native adware heuristics. Real-time (Endpoint Security) scanning is deferred behind an Apple entitlement.</li>
+      <li><b>Exact CPU die temperature &amp; GPU powermetrics need root.</b> Tabibu ships the honest thermal-pressure signal (<code>pmset -g therm</code>) instead.</li>
+      <li><b>Tray is minimal:</b> a status item with a live CPU/memory tooltip; a rich health popover is a follow-up. No privileged helper (all features are user-space).</li>
+    </ul>
   </section>
 
   <!-- DOCS -->
-  <section class="reveal" id="docs">
-    <div class="sheet">
-      <div class="file">10 · docs.md</div>
-      <h2>Dig deeper</h2>
-      <p class="lead">Per-crate guides and decision records. These pages are generated from the Markdown in <code>docs/</code> and rendered into this same design on publish.</p>
-      <div class="grid cols-3 doclinks">
-        <a href="modules/engine.html"><div class="card"><h3>Engine</h3><p>Traits, SafetyTier, denylist, undo, orchestration.</p></div></a>
-        <a href="modules/dupes.html"><div class="card"><h3>Duplicates</h3><p>The three-stage blake3 funnel.</p></div></a>
-        <a href="modules/junk.html"><div class="card"><h3>Junk</h3><p>Cache / temp / log / trash / large-old scanners.</p></div></a>
-        <a href="modules/uninstall.html"><div class="card"><h3>Uninstall</h3><p>Remnants, orphans, unused apps, stale binaries.</p></div></a>
-        <a href="modules/malware.html"><div class="card"><h3>Malware</h3><p>Heuristics and quarantine vault; the ClamAV boundary.</p></div></a>
-        <a href="modules/walk.html"><div class="card"><h3>Walk</h3><p>Parallel filesystem traversal and size tree.</p></div></a>
-        <a href="modules/telemetry.html"><div class="card"><h3>Telemetry</h3><p>Opt-in, content-free deselection signal.</p></div></a>
-        <a href="adr/0003-tauri-shell-supersedes-swift.html"><div class="card"><h3>ADR-0003</h3><p>Tauri shell supersedes the Swift plus C-ABI design.</p></div></a>
-        <a href="setup.html"><div class="card"><h3>Setup &amp; release</h3><p>Clean-machine build; signing and notarization.</p></div></a>
-      </div>
-      <span class="wm">10</span>
+  <section id="docs">
+    <div class="eyebrow">Documentation</div>
+    <h2>Dig deeper</h2>
+    <p class="lead">Per-crate guides and decision records. These pages are generated from the Markdown in <code>docs/</code> and rendered into this same design on publish.</p>
+    <div class="grid cols-3 doclinks">
+      <a href="modules/engine.html"><div class="card"><h3>Engine</h3><p>Traits, SafetyTier, denylist, undo, orchestration.</p></div></a>
+      <a href="modules/dupes.html"><div class="card"><h3>Duplicates</h3><p>The three-stage blake3 funnel.</p></div></a>
+      <a href="modules/junk.html"><div class="card"><h3>Junk</h3><p>Cache / temp / log / trash / large-old scanners.</p></div></a>
+      <a href="modules/uninstall.html"><div class="card"><h3>Uninstall</h3><p>Remnants, orphans, unused apps, stale binaries.</p></div></a>
+      <a href="modules/malware.html"><div class="card"><h3>Malware</h3><p>Heuristics + quarantine vault; ClamAV boundary.</p></div></a>
+      <a href="modules/walk.html"><div class="card"><h3>Walk</h3><p>Parallel filesystem traversal + size tree.</p></div></a>
+      <a href="modules/telemetry.html"><div class="card"><h3>Telemetry</h3><p>Opt-in, content-free deselection signal.</p></div></a>
+      <a href="adr/0003-tauri-shell-supersedes-swift.html"><div class="card"><h3>ADR-0003</h3><p>Tauri shell supersedes the Swift + C-ABI design.</p></div></a>
+      <a href="setup.html"><div class="card"><h3>Setup &amp; release</h3><p>Clean-machine build; signing &amp; notarization.</p></div></a>
     </div>
   </section>
 </main>
@@ -282,41 +247,48 @@ cargo fmt --check</pre>
 <script src="assets/navmark.js"></script>
 <script>
   // GSAP scroll reveals. gsap.from animates FROM hidden TO the natural state, so
-  // if GSAP fails to load (or reduced motion) the content simply stays visible.
+  // if GSAP fails to load (or reduced motion is on) the content stays visible.
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (window.gsap && window.ScrollTrigger && !reduce) {
     gsap.registerPlugin(ScrollTrigger);
-    gsap.utils.toArray(".reveal").forEach((el) => {
-      gsap.from(el, {
-        opacity: 0, y: 48, duration: 0.7, ease: "power3.out",
-        scrollTrigger: { trigger: el, start: "top 88%" },
-      });
+    const from = (els, opts) => gsap.from(els, { opacity: 0, y: 28, duration: 0.6, ease: "power3.out", ...opts });
+    // hero plays on load
+    from(".hero .eyebrow, .hero h1, .hero .lead, .hero .cta, .hero .tags", { y: 24, stagger: 0.08 });
+    from(".hero .mark", { y: 0, scale: 0.92, duration: 0.9 });
+    // each section's intro text reveals as it scrolls in
+    gsap.utils.toArray("main section").forEach((sec) => {
+      from(sec.querySelectorAll(":scope > .eyebrow, :scope > h2, :scope > p.lead"),
+        { stagger: 0.06, scrollTrigger: { trigger: sec, start: "top 78%" } });
     });
-    // gentle parallax drift on each sheet's watermark
-    gsap.utils.toArray(".sheet .wm").forEach((wm) => {
-      gsap.to(wm, { y: -40, ease: "none", scrollTrigger: { trigger: wm.closest(".sheet"), scrub: true } });
+    // grids and pillars stagger their cards
+    gsap.utils.toArray(".grid, .pillars").forEach((grid) => {
+      from(grid.children, { y: 24, duration: 0.5, stagger: 0.06, scrollTrigger: { trigger: grid, start: "top 82%" } });
+    });
+    // diagrams and code blocks
+    gsap.utils.toArray(".diagram, .code").forEach((el) => {
+      from(el, { scrollTrigger: { trigger: el, start: "top 82%" } });
     });
   }
 
   // scroll-spy: highlight the nav link of the section in view
   const links = [...document.querySelectorAll("#nav a")];
-  const navMap = new Map(links.map((a) => [a.getAttribute("href").slice(1), a]));
+  const map = new Map(links.map(a => [a.getAttribute("href").slice(1), a]));
   const obs = new IntersectionObserver((entries) => {
-    entries.forEach((e) => {
+    entries.forEach(e => {
       if (!e.isIntersecting) return;
-      const link = navMap.get(e.target.id);
-      if (!link) return;
-      links.forEach((l) => l.classList.remove("active"));
+      const link = map.get(e.target.id);
+      if (!link) return; // sections without a nav entry keep the current highlight
+      links.forEach(l => l.classList.remove("active"));
       link.classList.add("active");
     });
   }, { rootMargin: "-45% 0px -50% 0px" });
-  document.querySelectorAll("section[id], header[id]").forEach((s) => obs.observe(s));
+  document.querySelectorAll("section[id], header[id]").forEach(s => obs.observe(s));
 
   // copy buttons
-  document.querySelectorAll("[data-copy]").forEach((btn) => {
+  document.querySelectorAll("[data-copy]").forEach(btn => {
     btn.addEventListener("click", () => {
       const txt = btn.parentElement.querySelector("pre").innerText;
-      navigator.clipboard.writeText(txt).then(() => { btn.textContent = "Copied"; setTimeout(() => (btn.textContent = "Copy"), 1400); });
+      navigator.clipboard.writeText(txt).then(() => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1400); });
     });
   });
 </script>
