@@ -224,9 +224,8 @@ Honest:
   per-degree readings would require the deferred privileged helper.
 - **Install-time artifact monitoring** (FSEvents) is a follow-up — the
   Uninstaller's disk-wide leftover/orphan scan covers post-uninstall artifacts.
-  (v0.1.3 shipped: whole-home duplicates, force-quit, thermal pressure,
-  dashboard line graphs + free-space trend, leftovers scan, Security scan UI,
-  SMART status, FDA onboarding, per-volume trashes.)
+
+See [`CHANGELOG.md`](CHANGELOG.md) for what shipped in each release.
 
 ## License
 

@@ -383,6 +383,7 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .switch input:checked + .track { background: var(--accent); }
 .switch input:checked + .track::before { transform: translateX(18px); }
 .setting { display: flex; align-items: flex-start; gap: var(--space-l); padding: var(--space-l); border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); max-width: 640px; }
+.setting + .setting { margin-top: var(--space-l); }
 .setting .body { flex: 1; }
 .setting h3 { font-size: 14px; margin-bottom: 4px; }
 .setting p { color: var(--text-dim); line-height: 1.5; font-size: 12.5px; }
@@ -406,34 +407,10 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .dupe-path .keep { font-size: 10px; font-weight: 600; color: var(--tier-review);
   background: color-mix(in srgb, var(--tier-review) 16%, transparent); padding: 1px 6px; border-radius: 10px; }
 
-/* Live-scan loader: animated radar + ticking total + category chips */
-.scan-stage { display: flex; flex-direction: column; align-items: center; padding: 40px 24px 24px; }
-.scan-radar { width: 124px; height: 124px; }
-.scan-radar svg { width: 100%; height: 100%; overflow: visible; }
-.scan-radar .r-core { fill: var(--view-accent); }
-.scan-radar .r-ring { fill: none; stroke: var(--view-accent); stroke-width: 2;
-  transform-origin: 60px 60px; animation: radar-pulse 2.4s ease-out infinite; }
-.scan-radar .r-ring:nth-of-type(2) { animation-delay: 0.8s; }
-.scan-radar .r-ring:nth-of-type(3) { animation-delay: 1.6s; }
-.scan-radar .r-sweep { stroke: var(--view-accent); stroke-width: 2; stroke-linecap: round;
-  opacity: 0.7; transform-origin: 60px 60px; animation: radar-sweep 1.8s linear infinite; }
-@keyframes radar-pulse { 0% { transform: scale(0.3); opacity: 0.7; } 100% { transform: scale(3.4); opacity: 0; } }
-@keyframes radar-sweep { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
-  .scan-radar .r-ring, .scan-radar .r-sweep { animation: none; }
-}
-.scan-amt { font-size: 34px; font-weight: 700; letter-spacing: -0.02em; margin-top: 8px; }
-.scan-sub { font-size: 12px; margin-top: 2px; }
-.scan-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 22px; max-width: 640px; }
-.scan-chip { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--border);
-  border-radius: 999px; background: var(--bg-elev); color: var(--text-dim); transition: color 0.3s, border-color 0.3s, box-shadow 0.3s; }
-.scan-chip .ci { display: flex; }
-.scan-chip .ci svg { width: 15px; height: 15px; display: block; }
-.scan-chip .cl { font-size: 12px; font-weight: 600; }
-.scan-chip .cc { font-size: 11px; color: var(--text-dim); }
-.scan-chip.on { color: var(--text); border-color: color-mix(in srgb, var(--view-accent) 55%, var(--border));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--view-accent) 12%, transparent); }
-.scan-chip.on .ci { color: var(--view-accent); }
+/* Live-scan loader: verbose one-line status under the spinner. Truncates the
+   current file path so the count + size + path stay on a single line. */
+.scan-line { margin-top: 12px; max-width: 560px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; font-size: 13px; color: var(--text-dim); }
 
 /* Developer / CLI (Homebrew) view */
 .brew-card { display: flex; align-items: center; gap: 14px; margin: 0 24px 10px;

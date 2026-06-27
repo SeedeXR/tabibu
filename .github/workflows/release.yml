@@ -10,13 +10,10 @@ env:
 
 jobs:
   release:
-    name: Build universal app + DMG (conditionally signed)
+    name: Build universal app + DMG (unsigned)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
-      - name: Add Rust targets (universal)
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -26,31 +23,15 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install CLI
-        working-directory: app
-        run: npm install
-
-      # ----------------------------------------------------------------------
-      # Signing + notarization — EXTERNALLY BLOCKED until Apple Developer
-      # Program enrollment (no Developer ID certificate today). Tauri reads
-      # these env vars natively WHEN PRESENT; when the secrets are absent the
-      # bundle is produced unsigned (install-able only via right-click > Open).
-      # Add these repo secrets to activate, no workflow change needed:
-      #   APPLE_CERTIFICATE            base64 of the Developer ID .p12
-      #   APPLE_CERTIFICATE_PASSWORD   .p12 password
-      #   APPLE_SIGNING_IDENTITY       "Developer ID Application: … (TEAMID)"
-      #   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   for notarization
-      # ----------------------------------------------------------------------
-      - name: Build universal app + DMG
-        working-directory: app
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx tauri build --target universal-apple-darwin
+      # Same script developers run locally: stamps the version from VERSION,
+      # adds the universal targets, installs the Tauri CLI, and bundles.
+      #
+      # No Apple Developer account → the bundle is UNSIGNED (installable via
+      # right-click → Open). No signing/notarization env is set, so the bundler
+      # never attempts (and never fails on) code signing. To sign later, add an
+      # `env:` block here with the APPLE_* secrets and Tauri picks them up.
+      - name: Build universal app + DMG (version from VERSION)
+        run: ./scripts/build-app.sh
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4

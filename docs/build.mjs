@@ -31,18 +31,6 @@ function mdFiles(dir) {
   });
 }
 
-const MERMAID_THEME = JSON.stringify({
-  startOnLoad: true, theme: "base",
-  themeVariables: {
-    fontFamily: "Space Grotesk, sans-serif", background: "#0a1d27",
-    primaryColor: "#0e2531", primaryBorderColor: "#2f8ed4", primaryTextColor: "#eaf3f6",
-    lineColor: "#5d727c", secondaryColor: "#112c39", tertiaryColor: "#04323f",
-    noteBkgColor: "#13313f", noteTextColor: "#eaf3f6", noteBorderColor: "#ec6a40",
-    actorBkg: "#0e2531", actorBorder: "#2f8ed4", actorTextColor: "#eaf3f6",
-    signalColor: "#8ba1ac", signalTextColor: "#cfe0e6",
-  },
-});
-
 function shell(title, body, up) {
   return `<!doctype html>
 <html lang="en"><head>
@@ -57,7 +45,7 @@ function shell(title, body, up) {
 <main><article class="doc">${body}</article></main>
 <footer><div class="mono">Tabibu · docs</div></footer>
 <script src="${up}assets/mermaid.min.js"></script>
-<script>mermaid.initialize(${MERMAID_THEME});</script>
+<script src="${up}assets/mermaid-init.js"></script>
 <script>document.getElementById("navmark").innerHTML='<path d="${GOURD}" fill="url(#g)"/><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec6a40"/><stop offset="1" stop-color="#2f8ed4"/></linearGradient></defs>';</script>
 </body></html>`;
 }

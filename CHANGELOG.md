@@ -5,12 +5,35 @@ All notable changes to Tabibu are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project aims to adhere to [Semantic Versioning](https://semver.org/).
 User-facing entries are written honestly — no inflated counts, no marketing.
-The canonical version lives in `VERSION` and
-`core/Cargo.toml` (`workspace.package.version`); keep them in sync.
+The canonical version lives in the root `VERSION` file; `scripts/sync-version.sh`
+propagates it into every manifest, so all builds stamp the same version.
 
 ## [Unreleased]
 
 Nothing yet.
+
+## [0.1.4] — 2026-06-27
+
+### Added
+- **Developer / CLI** view: Homebrew analysis + safe cleanup — `brew cleanup`
+  and `autoremove` previews, plus every installed formula/cask sized with its
+  install date and dependency status. All removal is delegated to `brew`
+  itself; Tabibu never deletes Homebrew files directly.
+- New gourd app icon and a themeable in-app brand mark.
+- Designed, interactive docs site (`docs/`) generated from Markdown on publish.
+
+### Changed
+- New live-scan loader: an animated radar with a running total and per-category
+  chips that light up as junk is found.
+- Homebrew scan is ~2.4× faster (reads on-disk install receipts instead of the
+  slow `brew info --json`).
+- Full Disk Access is now granted from **Settings** (was in the Uninstaller).
+- Version is single-sourced from the root `VERSION` file.
+
+### Fixed
+- Commands run off the main thread, so heavy scans no longer freeze the window
+  and Stop works mid-scan.
+- Universal (Intel + Apple Silicon) release build compiles cleanly.
 
 ## [0.1.3] — 2026-06-16
 

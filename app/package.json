@@ -1,7 +1,7 @@
 {
   "name": "tabibu-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Tabibu — macOS optimization tool (Tauri shell)",
   "scripts": {
     "tauri": "tauri",

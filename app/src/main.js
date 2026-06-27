@@ -153,7 +153,12 @@ function setView(node) {
 
 // timers (monitor polling) cleanup on navigation
 let activeTimers = [];
-function cancelTimers() { activeTimers.forEach(clearInterval); activeTimers = []; }
+function cancelTimers() { activeTimers.forEach(clearInterval); activeTimers = []; scanTimer = null; }
+// The single live-scan tick (only one scan view is active at a time). Tracked
+// separately so it's cleared when the scan ends or restarts — otherwise each
+// Rescan would stack another interval that only navigation reaps.
+let scanTimer = null;
+function clearScanTimer() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } }
 
 // =====================================================================
 // Scan flow (Smart Scan / Junk / Large & Old)
@@ -166,21 +171,6 @@ const SCAN_DEFS = {
   large: { title: "Large & Old", icon: "files", scanners: ["large_old"],
     sub: "Suggestions only — big files in Downloads you may have forgotten. Nothing is selected for you." },
 };
-
-// Live-scan "stages": one chip per junk category, lit up as items arrive. Smart
-// Scan (empty `scanners`) runs the whole junk set, so it shows them all.
-const SCAN_STAGES = {
-  trash: { cat: "Trash", label: "Trash", icon: "trash-2" },
-  user_cache: { cat: "UserCache", label: "App Caches", icon: "package" },
-  dev_cache: { cat: "DevCache", label: "Dev Caches", icon: "terminal" },
-  temp: { cat: "Temp", label: "Temp Files", icon: "files" },
-  log: { cat: "Log", label: "Logs", icon: "activity" },
-  large_old: { cat: "LargeOldFile", label: "Large & Old", icon: "hard-drive" },
-};
-const ALL_JUNK_STAGES = ["trash", "user_cache", "dev_cache", "temp", "log", "large_old"];
-function stagesFor(def) {
-  return (def.scanners.length ? def.scanners : ALL_JUNK_STAGES).map((s) => SCAN_STAGES[s]).filter(Boolean);
-}
 
 const sessions = {}; // id -> session
 function getSession(id) {
@@ -208,6 +198,7 @@ function scanView(id) {
 function startScan(id) {
   const def = SCAN_DEFS[id];
   const s = getSession(id);
+  clearScanTimer(); // don't stack a tick on Rescan
   s.phase = "scanning"; s.items = []; s.selection = new Set(); s.summary = null;
   let dirty = false;
   const ch = new Channel();
@@ -217,20 +208,21 @@ function startScan(id) {
       if (msg.item.tier === "Safe") s.selection.add(msg.item.path);
       dirty = true;
     } else if (msg.kind === "done") {
+      clearScanTimer(); // stop ticking once the scan ends
       s.summary = { cancelled: msg.cancelled, scanners: msg.scanners };
       s.phase = s.items.length ? "review" : "idle";
       if (id === state.current) scanView(id);
     }
   };
   // batched re-render ~100ms so streaming never thrashes the UI
-  const t = setInterval(() => {
+  scanTimer = setInterval(() => {
     if (dirty && s.phase === "scanning" && id === state.current) { dirty = false; scanLiveUpdate(id); }
   }, 100);
-  activeTimers.push(t);
+  activeTimers.push(scanTimer);
   invoke("scan", { scanners: def.scanners, onEvent: ch });
   scanView(id);
 }
-function stopScan(id) { invoke("cancel_scan"); const s = getSession(id); s.phase = s.items.length ? "review" : "idle"; scanView(id); }
+function stopScan(id) { invoke("cancel_scan"); clearScanTimer(); const s = getSession(id); s.phase = s.items.length ? "review" : "idle"; scanView(id); }
 function resetSession(id) { sessions[id] = { phase: "idle", items: [], selection: new Set(), summary: null }; }
 
 function tallies(items) {
@@ -242,52 +234,27 @@ function tallies(items) {
 const foundBytes = (s) => s.items.reduce((a, i) => a + Number(i.size_bytes), 0);
 const selectedBytes = (s) => s.items.reduce((a, i) => s.selection.has(i.path) ? a + Number(i.size_bytes) : a, 0);
 
-// Creative live-scan loader: an animated radar (built ONCE so its CSS animation
-// isn't restarted by the ~100ms streaming re-renders), a ticking total-found
-// counter, and a chip per category that lights up as items of that kind stream
-// in. Only the numbers/chips update on each tick — the radar is left alone.
+// Live-scan loader: the small circle spinner (same one used elsewhere) with a
+// verbose one-line status that updates as items stream — count, total found,
+// and the file currently being scanned.
 function scanningPanel(id) {
-  const radar = h("div", {
-    class: "scan-radar", "aria-hidden": "true", html:
-      `<svg viewBox="0 0 120 120">
-         <circle class="r-ring" cx="60" cy="60" r="14" />
-         <circle class="r-ring" cx="60" cy="60" r="14" />
-         <circle class="r-ring" cx="60" cy="60" r="14" />
-         <line class="r-sweep" x1="60" y1="60" x2="60" y2="12" />
-         <circle class="r-core" cx="60" cy="60" r="5" />
-       </svg>` });
-  const wrap = h("div", { class: "scan-stage" }, radar,
-    h("div", { class: "scan-amt mono", id: "scan-amt" }, "0 B"),
-    h("div", { class: "scan-sub dim", id: "scan-sub" }, "Starting scan…"),
-    h("div", { class: "scan-chips", id: "scan-chips" }),
-    h("div", { class: "row", style: "justify-content:center;margin-top:18px" },
-      h("button", { onClick: () => stopScan(id) }, "Stop")),
-    h("p", { class: "faint", style: "text-align:center;margin-top:10px;font-size:11px" },
+  const wrap = h("div", { class: "center" },
+    h("div", { class: "spinner" }),
+    h("p", { class: "scan-line", id: "scan-line" }, "Starting scan…"),
+    h("button", { style: "margin-top:8px", onClick: () => stopScan(id) }, "Stop"),
+    h("p", { class: "faint", style: "margin-top:10px;font-size:11px" },
       "Reviewing happens after the scan — nothing is removed yet."));
-  scanLiveUpdate(id, wrap);
   return wrap;
 }
-// Update only the dynamic parts (count, total, chips) — never the radar.
-function scanLiveUpdate(id, root) {
-  root = root || document.querySelector(".scan-stage");
-  if (!root) return;
-  const s = getSession(id), def = SCAN_DEFS[id];
-  const amt = root.querySelector("#scan-amt");
-  if (amt) amt.textContent = fmtBytes(foundBytes(s));
-  const sub = root.querySelector("#scan-sub");
-  if (sub) sub.textContent = `${s.items.length} item${s.items.length === 1 ? "" : "s"} found · scanning your Mac…`;
-  const chipsEl = root.querySelector("#scan-chips");
-  if (!chipsEl) return;
-  const ts = {};
-  for (const it of s.items) { const e = ts[it.category] || [0, 0]; ts[it.category] = [e[0] + 1, e[1] + Number(it.size_bytes)]; }
-  chipsEl.innerHTML = "";
-  for (const st of stagesFor(def)) {
-    const t = ts[st.cat], active = !!t;
-    chipsEl.append(h("div", { class: `scan-chip${active ? " on" : ""}` },
-      h("span", { class: "ci" }, icon(st.icon)),
-      h("span", { class: "cl" }, st.label),
-      h("span", { class: "cc mono" }, active ? `${t[0]} · ${fmtBytes(t[1])}` : "…")));
-  }
+// Update the one-line status in place (called on the ~100ms streaming tick).
+function scanLiveUpdate(id) {
+  const el = document.getElementById("scan-line");
+  if (!el) return;
+  const s = getSession(id);
+  const last = s.items.length ? s.items[s.items.length - 1] : null;
+  el.textContent = last && last.path
+    ? `${s.items.length} found · ${fmtBytes(foundBytes(s))} · ${displayPath(last.path)}`
+    : "Scanning your Mac…";
 }
 
 function reviewPanel(id) {
@@ -525,7 +492,7 @@ function duplicatesView() {
       ["Scans everything in your home", "Content-compared, not name-matched", "You pick exactly what to delete"],
       scanDupes));
   }
-  if (d.phase === "scanning") return setView(cancellableSpinner("Comparing files by content across your Mac… this can take a while."));
+  if (d.phase === "scanning") return setView(cancellableSpinner("Comparing files by content across your Mac — this can take a while."));
   if (d.phase === "reclaiming") return setView(centeredSpinner("Moving duplicates to the Trash…"));
   if (d.phase === "error") return setView(centered("circle-alert", "Something went wrong", d.error, "Try Again", () => { d.phase = "idle"; render(); }));
   if (d.phase === "done") return setView(dupeResult());

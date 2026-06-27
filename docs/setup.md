@@ -36,7 +36,7 @@ slow once, cached after.
 
 ```sh
 cd core
-cargo test --workspace                  # 89 tests
+cargo test --workspace                  # 110 tests
 cargo clippy --workspace --all-targets  # clippy::all denied
 cargo fmt --check
 cargo bench -p tabibu-walk -p tabibu-dupes   # criterion benches
@@ -45,10 +45,9 @@ scripts/bench-gate.sh --smoke           # runner-aware bench run
 
 ## App icon
 
-`scripts/make-icon.sh` generates `build/AppIcon.icns` + an iconset
-programmatically. Tauri reads its icons from `app/src-tauri/icons/`
-(`icon.icns`, `icon.png`, and sized PNGs) — regenerate and copy there if the
-brand mark changes, or run `npx tauri icon <1024.png>` to produce the full set.
+Run `npx tauri icon <1024.png>` (from `app/`) to regenerate the full icon set
+into `app/src-tauri/icons/` (`icon.icns`, `icon.png`, sized PNGs, Square/Store
+logos) whenever the brand mark changes.
 
 ## Gotchas
 

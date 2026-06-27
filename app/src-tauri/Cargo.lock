@@ -3047,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-app"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "plist",
@@ -3071,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-brew"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rayon",
  "serde",
@@ -3080,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-dupes"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "blake3",
  "rayon",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-engine"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-junk"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rayon",
  "tabibu-engine",
@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-malware"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "plist",
  "serde",
@@ -3120,7 +3120,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-monitor"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "serde",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-telemetry"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-uninstall"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "plist",
  "tabibu-engine",
@@ -3146,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-walk"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rayon",
  "serde",

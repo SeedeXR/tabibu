@@ -28,3 +28,6 @@ app/node_modules/
 docs/node_modules/
 docs/**/*.html
 !docs/index.html
+
+# Stale pre-Tauri output dir (FFI/Swift era) — real bundles live in app/src-tauri/target
+/build/

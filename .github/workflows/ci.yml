@@ -13,6 +13,15 @@ defaults:
     shell: zsh {0}
 
 jobs:
+  version:
+    name: version in sync with VERSION
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # Root VERSION is the single source of truth; fail if any manifest drifted
+      # (run ./scripts/sync-version.sh after bumping VERSION).
+      - run: ./scripts/sync-version.sh --check
+
   fmt:
     name: rustfmt
     runs-on: macos-14
