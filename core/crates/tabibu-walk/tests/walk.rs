@@ -1,15 +1,13 @@
 //! Integration tests for tabibu-walk against a sequential reference
 //! implementation and adversarial fixtures (symlink cycles, unreadable
-//! directories, mid-walk cancellation).
+//! directories, cancellation).
 
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::path::Path;
 
-use tabibu_walk::{dir_size, size_tree, walk_files, CancelToken, DirNode, WalkError};
+use tabibu_walk::{dir_size, size_tree, CancelToken, DirNode, WalkError};
 
 fn write_file(path: &Path, len: usize) {
     let mut file = File::create(path).unwrap();
@@ -30,26 +28,6 @@ fn ref_size(path: &Path) -> u64 {
         return 0;
     };
     rd.filter_map(Result::ok).map(|e| ref_size(&e.path())).sum()
-}
-
-/// Sequential reference: paths of every regular file under `path`.
-fn ref_files(path: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if meta.is_file() {
-        out.push(path.to_path_buf());
-        return;
-    }
-    if !meta.is_dir() {
-        return;
-    }
-    let Ok(rd) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in rd.filter_map(Result::ok) {
-        ref_files(&entry.path(), out);
-    }
 }
 
 /// Builds a moderately nested fixture: 3 levels, mixed file sizes, plus a
@@ -129,15 +107,6 @@ fn symlink_cycle_terminates_and_links_not_followed() {
     // far less than if either link were traversed.
     let sub_node = node.children.iter().find(|c| c.path == sub).unwrap();
     assert!(sub_node.size_bytes < 500 + 1024, "links were followed");
-
-    // walk_files must report exactly one regular file under sub.
-    let count = AtomicU64::new(0);
-    walk_files(&sub, &CancelToken::new(), &|_, meta| {
-        assert!(meta.is_file());
-        count.fetch_add(1, Ordering::Relaxed);
-    })
-    .unwrap();
-    assert_eq!(count.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -154,28 +123,6 @@ fn precancelled_token_stops_immediately() {
         dir_size(dir.path(), &cancel),
         Err(WalkError::Cancelled)
     ));
-    assert!(matches!(
-        walk_files(dir.path(), &cancel, &|_, _| {}),
-        Err(WalkError::Cancelled)
-    ));
-}
-
-#[test]
-fn midwalk_cancellation_stops_traversal() {
-    let dir = tempfile::tempdir().unwrap();
-    // Deep chain of directories so plenty of directory boundaries remain
-    // after the first file is visited.
-    let mut current = dir.path().to_path_buf();
-    for i in 0..150 {
-        write_file(&current.join("file.bin"), 8);
-        current = current.join(format!("d{i}"));
-        fs::create_dir(&current).unwrap();
-    }
-    write_file(&current.join("file.bin"), 8);
-
-    let cancel = CancelToken::new();
-    let result = walk_files(dir.path(), &cancel, &|_, _| cancel.cancel());
-    assert!(matches!(result, Err(WalkError::Cancelled)));
 }
 
 #[test]
@@ -231,66 +178,9 @@ fn unreadable_subdir_is_skipped_not_fatal() {
     assert_eq!(locked_node.size_bytes, 0);
     assert!(locked_node.children.is_empty());
 
-    // walk_files skips it too.
-    let count = AtomicU64::new(0);
-    walk_files(dir.path(), &CancelToken::new(), &|_, _| {
-        count.fetch_add(1, Ordering::Relaxed);
-    })
-    .unwrap();
-    assert_eq!(count.load(Ordering::Relaxed), 1);
-
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-
     // The *root* being unreadable is fatal, by contrast.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     let err = size_tree(&locked, &CancelToken::new(), None).unwrap_err();
     assert!(matches!(err, WalkError::Root { .. }));
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-#[test]
-fn walk_files_visits_every_regular_file_once() {
-    let dir = tempfile::tempdir().unwrap();
-    build_fixture(dir.path());
-
-    let mut expected = Vec::new();
-    ref_files(dir.path(), &mut expected);
-    expected.sort();
-
-    let seen: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-    let bytes = AtomicU64::new(0);
-    walk_files(dir.path(), &CancelToken::new(), &|path, meta: &Metadata| {
-        assert!(meta.is_file());
-        bytes.fetch_add(meta.len(), Ordering::Relaxed);
-        seen.lock().unwrap().push(path.to_path_buf());
-    })
-    .unwrap();
-
-    let mut seen = seen.into_inner().unwrap();
-    seen.sort();
-    assert_eq!(seen, expected);
-
-    // Total bytes over regular files excludes the symlink object itself.
-    let link_len = fs::symlink_metadata(dir.path().join("link-to-loose"))
-        .unwrap()
-        .len();
-    assert_eq!(
-        bytes.load(Ordering::Relaxed) + link_len,
-        ref_size(dir.path())
-    );
-}
-
-#[test]
-fn walk_files_on_file_root_visits_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("only.bin");
-    write_file(&file, 64);
-    let count = AtomicU64::new(0);
-    walk_files(&file, &CancelToken::new(), &|path, meta| {
-        assert_eq!(path, file);
-        assert_eq!(meta.len(), 64);
-        count.fetch_add(1, Ordering::Relaxed);
-    })
-    .unwrap();
-    assert_eq!(count.load(Ordering::Relaxed), 1);
 }

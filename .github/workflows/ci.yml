@@ -101,8 +101,4 @@ jobs:
       # notarization happens in release.yml, not on every CI run, to keep the
       # runner's CPU/time low.
       - name: Build Tabibu app (compile only)
-        if: ${{ hashFiles('app/src-tauri/Cargo.toml') != '' }}
         run: cargo build --manifest-path app/src-tauri/Cargo.toml
-      - name: No app yet
-        if: ${{ hashFiles('app/src-tauri/Cargo.toml') == '' }}
-        run: echo "app/src-tauri not present; app build skipped."

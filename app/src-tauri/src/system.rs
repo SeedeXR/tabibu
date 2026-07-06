@@ -263,7 +263,15 @@ fn parse_ioreg(info: &mut BatteryInfo) {
         int("DesignCapacity"),
         int("AppleRawMaxCapacity").or_else(|| int("MaxCapacity")),
     ) {
-        if design > 0 {
+        // On some Apple Silicon/OS combos `MaxCapacity` is already a 0–100
+        // percentage while DesignCapacity stays in mAh; dividing the two would
+        // report ~2% health on a new battery. Mixed units → percentage wins;
+        // implausible values → report nothing rather than a wrong number.
+        if full <= 100 && design > 100 {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let pct = full.clamp(0, 100) as u32;
+            info.health_percent = Some(pct);
+        } else if design > 0 && full >= 0 {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let pct = ((full as f64 / design as f64) * 100.0).round() as u32;
             info.health_percent = Some(pct);

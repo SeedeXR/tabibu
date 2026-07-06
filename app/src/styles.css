@@ -146,7 +146,6 @@ button.primary {
 }
 button.primary:hover { background: #0ea271; }
 button.danger { background: var(--tier-risky); border-color: transparent; color: #fff; font-weight: 600; }
-button.ghost { background: transparent; border-color: transparent; color: var(--accent); padding: 4px 8px; }
 button.lg { padding: 9px 20px; font-size: 14px; }
 
 /* ---------- Empty / centered states ---------- */
@@ -181,19 +180,12 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .badge.Risky { color: var(--tier-risky); background: color-mix(in srgb, var(--tier-risky) 16%, transparent); }
 
 /* ---------- Progress ---------- */
-.progress {
-  display: flex; align-items: center; gap: var(--space-m);
-  padding: var(--space-l); margin: var(--space-l) var(--space-xl);
-  background: var(--bar); border-radius: var(--radius);
-}
 .spinner {
   width: 18px; height: 18px; border: 2px solid var(--track);
   border-top-color: var(--accent); border-radius: 50%;
   animation: spin 0.8s linear infinite; flex: none;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.bar-track { height: 8px; background: var(--track); border-radius: 20px; overflow: hidden; flex: 1; }
-.bar-fill { height: 100%; background: var(--accent); border-radius: 20px; transition: width var(--dur); }
 
 /* ---------- Summary header ---------- */
 .summary { margin: var(--space-l) var(--space-xl); }

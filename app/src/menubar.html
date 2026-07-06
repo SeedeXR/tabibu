@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tabibu Health</title>
+<style>
+  /* Tray popover — same design system as the app (Space Grotesk, emerald
+     accent, system light/dark). Two floating panels: a component DETAIL panel
+     (left, appears when a card is selected; the window grows leftward) and the
+     health OVERVIEW panel (right, anchored under the tray icon). */
+  @font-face {
+    font-family: "Space Grotesk";
+    src: url("fonts/SpaceGrotesk.woff2") format("woff2");
+    font-weight: 300 700; font-style: normal; font-display: swap;
+  }
+  :root {
+    --accent: #10b981;
+    --tier-review: #d97706;
+    --tier-risky: #dc2626;
+    --font: "Space Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+    --bg-elev: #ffffff; --panel: #f4f5f7;
+    --text: #1c1c1e; --text-dim: #6b6b70; --text-faint: #9a9aa0;
+    --border: rgba(0,0,0,0.10); --hover: rgba(0,0,0,0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-elev: #25262b; --panel: #1a1b1e;
+      --text: #f2f2f5; --text-dim: #a3a3ab; --text-faint: #6e6e78;
+      --border: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.06);
+    }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; }
+  body {
+    font-family: var(--font); font-size: 13px; color: var(--text);
+    -webkit-font-smoothing: antialiased; user-select: none; cursor: default;
+  }
+  .wrap { display: flex; gap: 8px; margin: 6px; height: calc(100vh - 12px); }
+  .floating {
+    border-radius: 14px; overflow: hidden;
+    background: var(--panel); border: 1px solid var(--border);
+    box-shadow: 0 18px 50px -12px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column;
+  }
+  .panel { width: 348px; flex: none; margin-left: auto; }
+
+  /* ---- overview ---- */
+  header { display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
+  header .mark { width: 22px; height: 34px; color: var(--accent); flex: none; }
+  header .mark svg { width: 100%; height: 100%; display: block; }
+  header h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+  header p { font-size: 11px; color: var(--text-dim); }
+  .status-good b { color: var(--accent); }
+  .status-warn b { color: var(--tier-review); }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 4px 12px 8px; }
+  .card {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; transition: background 0.15s, border-color 0.15s;
+  }
+  .card:hover { background: var(--hover); }
+  .card.sel { border-color: var(--accent); }
+  .card .t { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; }
+  .card .t svg { width: 13px; height: 13px; color: var(--text-dim); flex: none; }
+  .card .v { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .card .v .unit { font-size: 11px; font-weight: 500; color: var(--text-dim); margin-left: 2px; }
+  .card .s { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; min-height: 13px; }
+  .card .warn { color: var(--tier-review); }
+  .card .bad { color: var(--tier-risky); }
+
+  .reco {
+    margin: 2px 12px 10px; padding: 10px 12px; border-radius: 10px;
+    background: var(--bg-elev); border: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .reco p { flex: 1; font-size: 11.5px; color: var(--text-dim); line-height: 1.35; }
+  .reco b { color: var(--text); display: block; font-size: 12px; }
+  button.primary {
+    font: 600 12px var(--font); color: #fff; background: var(--accent);
+    border: none; border-radius: 8px; padding: 7px 12px; cursor: pointer; flex: none;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+
+  footer {
+    margin-top: auto; display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-top: 1px solid var(--border);
+  }
+  footer .open {
+    flex: 1; text-align: center; font: 600 12.5px var(--font); color: var(--text);
+    background: var(--bg-elev); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 0; cursor: pointer;
+  }
+  footer .open:hover { background: var(--hover); }
+  footer .ic {
+    width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-elev); color: var(--text-dim); cursor: pointer;
+    display: grid; place-items: center;
+  }
+  footer .ic:hover { background: var(--hover); color: var(--text); }
+  footer .ic svg { width: 15px; height: 15px; }
+
+  /* ---- detail panel ---- */
+  .detail { width: 372px; flex: none; padding: 14px 14px 10px; overflow-y: auto; }
+  /* .floating's display:flex outranks the UA's [hidden] rule — restate it. */
+  .detail[hidden] { display: none; }
+  .detail h2 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 10px; }
+  .detail .graph {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px; margin-bottom: 8px;
+  }
+  .detail .graph canvas { display: block; width: 100%; height: 84px; }
+  .detail .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .mini {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 11px;
+  }
+  .mini .k { font-size: 10.5px; color: var(--text-faint); }
+  .mini .n { font-size: 15px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .mini .n.warn { color: var(--tier-review); }
+  .mini .n.bad { color: var(--tier-risky); }
+  .detail h3 { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin: 10px 2px 6px; }
+  .procs { display: flex; flex-direction: column; gap: 4px; }
+  .proc {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .proc .name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proc .val { font-family: var(--mono); font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .proc button {
+    font: 600 11px var(--font); color: var(--tier-risky); background: transparent;
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; cursor: pointer;
+  }
+  .proc button:hover { background: rgba(220,38,38,0.10); border-color: var(--tier-risky); }
+  .derr { font-size: 11px; color: var(--tier-risky); margin-top: 8px; padding: 7px 10px;
+    background: rgba(220,38,38,0.10); border: 1px solid var(--tier-risky); border-radius: 8px; }
+  .capacity { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 6px 0 4px; }
+  .capacity i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .drow { display: flex; gap: 8px; margin-top: 10px; }
+  .drow button { flex: 1; }
+  button.ghosted {
+    font: 600 12px var(--font); color: var(--text); background: var(--bg-elev);
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; cursor: pointer;
+  }
+  button.ghosted:hover { background: var(--hover); }
+  .empty { font-size: 11.5px; color: var(--text-faint); padding: 8px 2px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- component detail (left) — appears when a card is selected -->
+  <aside class="floating detail" id="detail" hidden>
+    <h2 id="d-title"></h2>
+    <div id="d-body"></div>
+  </aside>
+
+  <!-- health overview (right) -->
+  <div class="floating panel">
+    <header>
+      <span class="mark"><svg viewBox="0 0 551 888" fill="currentColor" id="mark"></svg></span>
+      <div>
+        <h1 id="health" class="status-good">Mac Health: <b>—</b></h1>
+        <p id="sub">Tabibu · menu bar monitor</p>
+      </div>
+    </header>
+
+    <div class="cards">
+      <div class="card" data-detail="disk">
+        <div class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 10 10h-10z"/></svg>Disk</div>
+        <div class="v" id="disk-v">—</div>
+        <div class="s" id="disk-s">available</div>
+      </div>
+      <div class="card" data-detail="memory">
+        <div class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="10" rx="1"/><path d="M8 7V4m8 3V4M8 20v-3m8 3v-3"/></svg>Memory</div>
+        <div class="v" id="mem-v">—</div>
+        <div class="s" id="mem-s">used</div>
+      </div>
+      <div class="card" data-detail="cpu">
+        <div class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="1"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>CPU</div>
+        <div class="v" id="cpu-v">—</div>
+        <div class="s" id="cpu-s">thermal —</div>
+      </div>
+      <div class="card" data-detail="battery">
+        <div class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="8" width="17" height="8" rx="2"/><path d="M22 11v2"/></svg>Battery</div>
+        <div class="v" id="bat-v">—</div>
+        <div class="s" id="bat-s">—</div>
+      </div>
+    </div>
+
+    <div class="reco">
+      <p><b>Keep this Mac in shape</b>One scan across caches, temp files, logs, and large old files.</p>
+      <button class="primary" id="smart">Smart Scan</button>
+    </div>
+
+    <footer>
+      <button class="ic" id="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+      </button>
+      <button class="open" id="open">Open Tabibu</button>
+      <button class="ic" id="quit" title="Quit Tabibu" aria-label="Quit Tabibu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v8"/></svg>
+      </button>
+    </footer>
+  </div>
+</div>
+
+<script type="module">
+  import { BRAND_PATH } from "./icons.js";
+  const invoke = window.__TAURI__.core.invoke;
+  const $ = (id) => document.getElementById(id);
+
+  $("mark").innerHTML = `<path d="${BRAND_PATH}" />`;
+
+  const GB = 1024 ** 3;
+  const gb = (b) => (b / GB).toFixed(b / GB >= 100 ? 0 : 1);
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+
+  // Latest readings + short history (for the detail graphs).
+  const last = { memPct: null, diskFrac: null, pressure: null, sample: null,
+                 disk: null, bat: null, therm: null, uptime: null };
+  let quitErr = null; // {msg, at} — transient inline error under the process list
+  const hist = { cpu: [], mem: [] };
+  const HIST_MAX = 60; // 60 × 3s = 3 minutes of graph
+
+  function verdict() {
+    const warn =
+      (last.memPct != null && last.memPct >= 85) ||
+      (last.diskFrac != null && last.diskFrac < 0.1) ||
+      (last.pressure && last.pressure !== "Nominal" && last.pressure !== "Unknown");
+    const h = $("health");
+    h.className = warn ? "status-warn" : "status-good";
+    h.innerHTML = `Mac Health: <b>${warn ? "Needs attention" : "Good"}</b>`;
+  }
+
+  // ---------------- detail panel ----------------
+  let detail = null; // "cpu" | "memory" | "battery" | "disk" | null
+
+  const DETAIL_TITLES = { cpu: "CPU", memory: "Memory", battery: "Battery", disk: "Disk" };
+
+  async function openDetail(mode) {
+    if (detail === mode) { closeDetail(); return; }
+    detail = mode;
+    document.querySelectorAll(".card").forEach((c) =>
+      c.classList.toggle("sel", c.dataset.detail === mode));
+    invoke("popover_detail", { open: true }).catch(() => {});
+    $("d-title").textContent = DETAIL_TITLES[mode];
+    $("detail").hidden = false;
+    renderDetail();
+    if (mode === "cpu") invoke("uptime_secs").then((s) => { last.uptime = s; renderDetail(); }).catch(() => {});
+    fastTick(); // fresh consumers immediately
+  }
+
+  function closeDetail(uiOnly = false) {
+    detail = null;
+    $("detail").hidden = true;
+    document.querySelectorAll(".card").forEach((c) => c.classList.remove("sel"));
+    if (!uiOnly) invoke("popover_detail", { open: false }).catch(() => {});
+  }
+
+  function drawGraph(canvas, values, max) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 320, h = canvas.clientHeight || 84;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    if (values.length < 2) return;
+    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#10b981";
+    const step = w / (HIST_MAX - 1);
+    const x0 = w - (values.length - 1) * step; // right-aligned: newest at right edge
+    ctx.beginPath();
+    values.forEach((v, i) => {
+      const x = x0 + i * step;
+      const y = h - 3 - (Math.min(v, max) / max) * (h - 8);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.lineTo(x0 + (values.length - 1) * step, h); ctx.lineTo(x0, h); ctx.closePath();
+    ctx.fillStyle = accent + "26"; // ~15% alpha
+    ctx.fill();
+  }
+
+  function mini(k, n, cls) {
+    const m = el("div", "mini");
+    m.append(el("div", "k", k), el("div", "n" + (cls ? " " + cls : ""), n));
+    return m;
+  }
+
+  function procRow(p, byCpu) {
+    const row = el("div", "proc");
+    const name = el("span", "name", p.name || `pid ${p.pid}`);
+    name.title = p.exe_path || "";
+    const val = el("span", "val",
+      byCpu ? `${p.cpu_percent.toFixed(1)}%` : `${gb(p.memory_bytes)} GB`);
+    const btn = el("button", null, "Quit");
+    btn.addEventListener("click", () => {
+      btn.disabled = true;
+      quitErr = null;
+      invoke("quit_process", { pid: p.pid, force: false })
+        .then(() => setTimeout(fastTick, 700))
+        // alert() is a no-op in the Tauri webview, so surface the failure
+        // inline (e.g. EPERM signalling another user's process).
+        .catch((e) => { quitErr = { msg: `Couldn't quit ${p.name}: ${e}`, at: Date.now() }; btn.disabled = false; renderDetail(); });
+    });
+    row.append(name, val, btn);
+    return row;
+  }
+
+  function fmtUptime(s) {
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+  }
+
+  // Rebuild the detail body from `last`/`hist`. DOM-built (no innerHTML for
+  // dynamic values — process names are attacker-adjacent strings).
+  function renderDetail() {
+    if (!detail) return;
+    const body = $("d-body");
+    body.textContent = "";
+
+    if (detail === "cpu" || detail === "memory") {
+      const isCpu = detail === "cpu";
+      const g = el("div", "graph");
+      const canvas = document.createElement("canvas");
+      g.append(canvas);
+      body.append(g);
+
+      const duo = el("div", "duo");
+      if (isCpu) {
+        const s = last.sample;
+        duo.append(mini("Load", s ? `${Math.round(s.cpu_percent)}%` : "—"));
+        const t = last.therm;
+        const cls = t && (t.pressure === "Serious" || t.pressure === "Critical") ? "bad"
+          : t && t.pressure === "Fair" ? "warn" : "";
+        duo.append(mini("Thermal", t ? t.pressure : "—", cls));
+        duo.append(mini("Speed limit", t && t.speed_limit != null ? `${t.speed_limit}%` : "none"));
+        duo.append(mini("Uptime", last.uptime != null ? fmtUptime(last.uptime) : "—"));
+      } else {
+        const s = last.sample;
+        duo.append(mini("Used", s ? `${gb(s.used_memory_bytes)} GB` : "—",
+          last.memPct >= 90 ? "bad" : last.memPct >= 85 ? "warn" : ""));
+        duo.append(mini("Total", s ? `${gb(s.total_memory_bytes)} GB` : "—"));
+        duo.append(mini("Swap used", s ? `${gb(s.used_swap_bytes)} GB` : "—"));
+        duo.append(mini("Pressure", last.memPct != null ? `${last.memPct}%` : "—"));
+      }
+      body.append(duo);
+
+      body.append(el("h3", null, "Top consumers"));
+      const list = el("div", "procs");
+      const procs = last.sample ? last.sample.top_processes : [];
+      if (procs.length === 0) list.append(el("div", "empty", "Sampling…"));
+      procs.forEach((p) => list.append(procRow(p, isCpu)));
+      body.append(list);
+      if (quitErr && Date.now() - quitErr.at < 6000) body.append(el("div", "derr", quitErr.msg));
+      else quitErr = null;
+      drawGraph(canvas, isCpu ? hist.cpu : hist.mem, 100);
+    }
+
+    if (detail === "battery") {
+      const b = last.bat;
+      const duo = el("div", "duo");
+      if (b && b.has_battery) {
+        duo.append(mini("Charge", b.charge_percent != null ? `${b.charge_percent}%` : "—"));
+        duo.append(mini("State", b.state || "—"));
+        duo.append(mini("Health", b.health_percent != null ? `${b.health_percent}%` : "—",
+          b.health_percent != null && b.health_percent < 80 ? "warn" : ""));
+        duo.append(mini("Cycles", b.cycle_count != null ? String(b.cycle_count) : "—"));
+        duo.append(mini("Condition", b.condition || "—", b.condition === "Service recommended" ? "warn" : ""));
+        if (b.time_remaining) duo.append(mini("Time remaining", b.time_remaining));
+      } else {
+        duo.append(mini("Battery", "none detected"));
+      }
+      body.append(duo);
+    }
+
+    if (detail === "disk") {
+      const d = last.disk;
+      if (d && d.total_bytes) {
+        const usedFrac = 1 - d.available_bytes / d.total_bytes;
+        const cap = el("div", "capacity");
+        const fill = el("i");
+        fill.style.width = `${Math.round(usedFrac * 100)}%`;
+        cap.append(fill);
+        body.append(cap);
+        const duo = el("div", "duo");
+        duo.append(mini("Available", `${gb(d.available_bytes)} GB`, last.diskFrac < 0.1 ? "warn" : ""));
+        duo.append(mini("Total", `${gb(d.total_bytes)} GB`));
+        body.append(duo);
+      } else {
+        body.append(el("div", "empty", "Reading disk…"));
+      }
+      const row = el("div", "drow");
+      const scan = el("button", "primary", "Smart Scan");
+      scan.addEventListener("click", () => openMain("smart"));
+      const map = el("button", "ghosted", "Open Disk map");
+      map.addEventListener("click", () => openMain("disk"));
+      row.append(scan, map);
+      body.append(row);
+    }
+  }
+
+  // ---------------- polling ----------------
+  async function fastTick() {
+    if (document.hidden) return;
+    try {
+      // One sample feeds both the overview and the open detail panel: top
+      // consumers only when a CPU/Memory panel is open (topN 0 otherwise).
+      const wantProcs = detail === "cpu" || detail === "memory";
+      // Dedicated popover sampler (see menubar_sample) — never shares the
+      // dashboard's System, so cross-window cadences can't corrupt CPU%.
+      const s = await invoke("menubar_sample", { topN: wantProcs ? 6 : 0, byCpu: detail !== "memory" });
+      last.sample = s;
+      const memPct = s.total_memory_bytes
+        ? Math.round((s.used_memory_bytes / s.total_memory_bytes) * 100) : 0;
+      last.memPct = memPct;
+      hist.cpu.push(Math.min(s.cpu_percent, 100));
+      hist.mem.push(memPct);
+      if (hist.cpu.length > HIST_MAX) hist.cpu.shift();
+      if (hist.mem.length > HIST_MAX) hist.mem.shift();
+      $("cpu-v").innerHTML = `${Math.round(s.cpu_percent)}<span class="unit">%</span>`;
+      $("mem-v").innerHTML = `${memPct}<span class="unit">%</span>`;
+      $("mem-s").textContent = `${gb(s.used_memory_bytes)} of ${gb(s.total_memory_bytes)} GB`;
+      verdict();
+      renderDetail();
+    } catch { /* popover stays on last values */ }
+  }
+
+  async function slowTick() {
+    if (document.hidden) return;
+    const [disk, bat, therm] = await Promise.all([
+      invoke("disk_space").catch(() => null),
+      invoke("battery_info").catch(() => null),
+      invoke("thermal_info").catch(() => null),
+    ]);
+    if (disk && disk.total_bytes) {
+      last.disk = disk;
+      last.diskFrac = disk.available_bytes / disk.total_bytes;
+      $("disk-v").innerHTML = `${gb(disk.available_bytes)}<span class="unit">GB</span>`;
+      $("disk-s").textContent = `of ${gb(disk.total_bytes)} GB available`;
+    }
+    if (bat) {
+      last.bat = bat;
+      if (bat.has_battery && bat.charge_percent != null) {
+        $("bat-v").innerHTML = `${bat.charge_percent}<span class="unit">%</span>`;
+        $("bat-s").textContent = [bat.state, bat.health_percent != null ? `health ${bat.health_percent}%` : null]
+          .filter(Boolean).join(" · ") || "—";
+      } else {
+        $("bat-v").textContent = "—";
+        $("bat-s").textContent = "no battery";
+      }
+    }
+    if (therm) {
+      last.therm = therm;
+      last.pressure = therm.pressure;
+      const elx = $("cpu-s");
+      elx.textContent = `thermal ${therm.pressure.toLowerCase()}`;
+      elx.className = therm.pressure === "Serious" || therm.pressure === "Critical" ? "s bad"
+        : therm.pressure === "Fair" ? "s warn" : "s";
+    }
+    verdict();
+    renderDetail();
+  }
+
+  function refresh() { fastTick(); slowTick(); }
+  refresh();
+  setInterval(fastTick, 3000);
+  setInterval(slowTick, 12000);
+  // Hidden → shown: refresh immediately. Hidden: reset to overview so the next
+  // open starts collapsed (Rust resets the window size on blur regardless).
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) closeDetail(true);
+    else refresh();
+  });
+
+  const openMain = (view) => invoke("show_main_window", view ? { view } : {}).catch(() => {});
+  document.querySelectorAll(".card").forEach((c) =>
+    c.addEventListener("click", () => openDetail(c.dataset.detail)));
+  $("smart").addEventListener("click", () => openMain("smart"));
+  $("open").addEventListener("click", () => openMain(null));
+  $("settings").addEventListener("click", () => openMain("settings"));
+  $("quit").addEventListener("click", () => invoke("quit_app"));
+</script>
+</body>
+</html>

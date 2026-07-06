@@ -1,6 +1,10 @@
-//! Undo manifest: written to disk *before* any mutation, fsynced, and
-//! updated per-item as the reclaim proceeds, so a crash mid-reclaim leaves a
-//! truthful record of exactly what was touched.
+//! Undo manifest: written to disk *before* any mutation, fsynced, then
+//! persisted once more after the reclaim with the completion flags. Flags are
+//! tracked in memory during the run — a crash mid-reclaim leaves entries
+//! marked incomplete, which errs in the safe direction (undo may attempt an
+//! item that was actually reclaimed and simply find it already in the Trash;
+//! it never assumes an untouched item was reclaimed). Rewriting + fsyncing
+//! the whole manifest per item was O(n²) bytes on multi-thousand-item runs.
 
 use crate::item::{Category, ReclaimAction, SafetyTier};
 use serde::{Deserialize, Serialize};
@@ -51,16 +55,12 @@ impl UndoManifest {
         Ok(manifest)
     }
 
-    /// Mark the entry at `index` completed and persist the change.
-    ///
-    /// # Errors
-    /// Any I/O failure rewriting the manifest file (the in-memory flag is
-    /// still set; callers may treat this as non-fatal).
-    pub fn mark_completed(&mut self, index: usize) -> std::io::Result<()> {
+    /// Mark the entry at `index` completed (in memory — call [`Self::persist`]
+    /// once after the reclaim loop to write the flags out).
+    pub fn mark_completed(&mut self, index: usize) {
         if let Some(e) = self.entries.get_mut(index) {
             e.completed = true;
         }
-        self.persist()
     }
 
     #[must_use]
@@ -68,7 +68,11 @@ impl UndoManifest {
         &self.file_path
     }
 
-    fn persist(&self) -> std::io::Result<()> {
+    /// Durably (re)write the manifest: tmp file, fsync, atomic rename.
+    ///
+    /// # Errors
+    /// Any I/O failure writing the manifest file.
+    pub fn persist(&self) -> std::io::Result<()> {
         let tmp = self.file_path.with_extension("json.tmp");
         let mut f = File::create(&tmp)?;
         serde_json::to_writer_pretty(&mut f, self)
@@ -110,7 +114,8 @@ mod tests {
         let mut m = UndoManifest::create(dir.path(), entries).unwrap();
         assert!(m.path().exists(), "manifest must exist before any mutation");
 
-        m.mark_completed(0).unwrap();
+        m.mark_completed(0);
+        m.persist().unwrap();
         let reloaded = UndoManifest::load(m.path()).unwrap();
         assert!(reloaded.entries[0].completed);
     }

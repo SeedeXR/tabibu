@@ -1,19 +1,11 @@
 //! Fixture-based tests: a tempdir home, real `Info.plist` files written via
-//! the plist crate, and planted remnants/orphans/symlinks. `mdls` is never
-//! invoked; its parser is unit-tested in-crate against literal strings.
+//! the plist crate, and planted remnants/orphans.
 
 use std::collections::HashSet;
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
-use tabibu_engine::{CancelToken, Category, CleanupItem, SafetyTier, ScanCtx, ScanError, Scanner};
-use tabibu_uninstall::{
-    bundle_id_of, find_remnants, installed_apps, scanners, OrphanScanner, StaleBinaryScanner,
-    UnusedAppScanner,
-};
-
-const DAY: Duration = Duration::from_secs(86_400);
+use tabibu_engine::{CancelToken, Category, CleanupItem, SafetyTier, ScanCtx, Scanner};
+use tabibu_uninstall::{bundle_id_of, find_remnants, installed_apps, OrphanScanner};
 
 fn make_app(dir: &Path, name: &str, bundle_id: &str) -> PathBuf {
     let app = dir.join(format!("{name}.app"));
@@ -244,99 +236,4 @@ fn orphan_scanner_flags_orphans_and_skips_installed_running_apple() {
         items[0].reason,
         "No installed app with bundle ID com.gone.app found"
     );
-}
-
-// ------------------------------------------------------------- unused apps
-
-#[test]
-fn unused_app_scanner_with_injected_dates() {
-    let tmp = tempfile::tempdir().unwrap();
-    let now = SystemTime::now();
-    let old = now - 200 * DAY;
-    let recent = now - 5 * DAY;
-
-    let stale = make_app(tmp.path(), "Stale", "com.acme.stale");
-    let fresh = make_app(tmp.path(), "Fresh", "com.acme.fresh");
-    let apple = make_app(tmp.path(), "Safari", "com.apple.Safari");
-    let tabibu = make_app(tmp.path(), "Tabibu", "xr.seede.tabibu");
-    let running = make_app(tmp.path(), "Daemonized", "com.acme.daemon");
-    // Never opened but created just now: creation gate keeps it out.
-    let newborn = make_app(tmp.path(), "Newborn", "com.acme.newborn");
-
-    let scanner = UnusedAppScanner::new(vec![
-        (stale.clone(), "com.acme.stale".to_owned(), Some(old)),
-        (fresh, "com.acme.fresh".to_owned(), Some(recent)),
-        (apple, "com.apple.Safari".to_owned(), Some(old)),
-        (tabibu, "xr.seede.tabibu".to_owned(), Some(old)),
-        (running, "com.acme.daemon".to_owned(), Some(old)),
-        (newborn, "com.acme.newborn".to_owned(), None),
-    ]);
-    let mut ctx = ctx_for(tmp.path());
-    ctx.running_bundle_ids.insert("com.acme.daemon".to_owned());
-
-    let items = run(&scanner, &ctx);
-    assert_eq!(items.len(), 1, "{items:#?}");
-    let item = &items[0];
-    assert_eq!(item.path, stale);
-    assert_eq!(item.category, Category::UnusedApp);
-    assert_eq!(item.tier, SafetyTier::Risky);
-    assert!(item.reason.contains("over 180 days"), "{}", item.reason);
-    assert!(item.size_bytes > 0, "app bundle sized recursively");
-}
-
-// ----------------------------------------------------------- stale binaries
-
-#[test]
-fn stale_binary_scanner_detects_only_broken_symlinks() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bin = tmp.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-
-    let real = tmp.path().join("real-tool");
-    fs::write(&real, b"#!/bin/sh\n").unwrap();
-    symlink(&real, bin.join("alive")).unwrap(); // valid symlink
-    symlink(tmp.path().join("vanished"), bin.join("dead")).unwrap(); // broken
-    fs::write(bin.join("plain"), b"binary").unwrap(); // regular file
-
-    let scanner = StaleBinaryScanner::with_roots(vec![bin.clone()]);
-    let items = run(&scanner, &ctx_for(tmp.path()));
-    assert_eq!(items.len(), 1, "{items:#?}");
-    let item = &items[0];
-    assert_eq!(item.path, bin.join("dead"));
-    assert_eq!(item.category, Category::StaleBinary);
-    assert_eq!(item.tier, SafetyTier::Review);
-    assert!(
-        item.reason.starts_with("Broken symlink → "),
-        "{}",
-        item.reason
-    );
-    assert!(item.reason.contains("vanished"), "{}", item.reason);
-}
-
-// ------------------------------------------------------------ housekeeping
-
-#[test]
-fn scanners_returns_all_three_with_stable_ids() {
-    let all = scanners(HashSet::new(), Vec::new());
-    let ids: Vec<&str> = all.iter().map(|s| s.id()).collect();
-    assert_eq!(ids, ["orphan", "unused_app", "stale_binary"]);
-}
-
-#[test]
-fn scanners_honor_cancellation() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ctx = ctx_for(tmp.path());
-    let cancel = CancelToken::new();
-    cancel.cancel();
-    for scanner in scanners(
-        HashSet::new(),
-        vec![(tmp.path().join("X.app"), "com.x.y".to_owned(), None)],
-    ) {
-        let result = scanner.scan(&ctx, &cancel, &mut |_| panic!("emitted after cancel"));
-        assert!(
-            matches!(result, Err(ScanError::Cancelled)),
-            "{}",
-            scanner.id()
-        );
-    }
 }

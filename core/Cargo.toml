@@ -10,11 +10,10 @@ members = [
     "crates/tabibu-malware",
     "crates/tabibu-monitor",
     "crates/tabibu-telemetry",
-    "crates/tabibu-bench",
 ]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"

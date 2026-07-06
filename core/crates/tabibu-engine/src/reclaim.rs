@@ -163,9 +163,7 @@ pub fn reclaim(
                     reclaimed_bytes: freed,
                     error: None,
                 });
-                // Manifest update failing must not abort a half-done reclaim;
-                // the entry simply stays marked incomplete, which is truthful.
-                let _ = manifest.mark_completed(idx);
+                manifest.mark_completed(idx);
             }
             Err(e) => {
                 report.failed += 1;
@@ -177,5 +175,9 @@ pub fn reclaim(
             }
         }
     }
+    // One durable write for all completion flags (per-item rewrites were
+    // O(n²) bytes + an fsync storm). Failure must not abort a done reclaim;
+    // entries staying incomplete on disk errs in the safe direction.
+    let _ = manifest.persist();
     Ok(report)
 }

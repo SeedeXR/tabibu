@@ -1,15 +1,12 @@
 //! Fast parallel filesystem traversal and size-tree construction for Tabibu.
 //!
-//! This crate provides three entry points:
+//! This crate provides two entry points:
 //!
 //! - [`size_tree`] — builds a [`DirNode`] tree rooted at a path, with every
 //!   directory's `size_bytes` equal to the sum of its descendants. Children
 //!   are sorted by size, largest first. An optional `max_depth` limits how
 //!   deep the *retained* tree is; sizes below the cutoff still aggregate
 //!   into their ancestors.
-//! - [`walk_files`] — streams every regular file under a root to a caller
-//!   supplied callback, in parallel. Used by the dedupe and old-files
-//!   scanners.
 //! - [`dir_size`] — convenience wrapper returning just the total size.
 //!
 //! # Concurrency model
@@ -112,45 +109,6 @@ pub fn size_tree(
     build_children(root.to_path_buf(), entries, 0, max_depth, cancel)
 }
 
-/// Visits every regular file under `root` in parallel, invoking `f` with
-/// the file's path and its [`symlink_metadata`](fs::symlink_metadata).
-///
-/// Symlinks are never followed and are not reported (a symlink is not a
-/// regular file). If `root` is itself a regular file, `f` is invoked once
-/// for it. The callback runs concurrently on rayon workers and must be
-/// `Sync`.
-///
-/// # Errors
-///
-/// Returns [`WalkError::Cancelled`] if `cancel` is triggered, or
-/// [`WalkError::Root`] if `root` itself cannot be read. Unreadable entries
-/// below the root are silently skipped.
-pub fn walk_files(
-    root: &Path,
-    cancel: &CancelToken,
-    f: &(dyn Fn(&Path, &Metadata) + Sync),
-) -> Result<(), WalkError> {
-    let meta = fs::symlink_metadata(root).map_err(|source| WalkError::Root {
-        path: root.to_path_buf(),
-        source,
-    })?;
-    if cancel.is_cancelled() {
-        return Err(WalkError::Cancelled);
-    }
-    if meta.is_file() {
-        f(root, &meta);
-        return Ok(());
-    }
-    if !meta.is_dir() {
-        return Ok(()); // symlink or special file at the root: nothing to do
-    }
-    let entries = read_entries(root).map_err(|source| WalkError::Root {
-        path: root.to_path_buf(),
-        source,
-    })?;
-    walk_entries(entries, cancel, f)
-}
-
 /// Returns the total size in bytes of everything under `root`.
 ///
 /// Equivalent to `size_tree(root, cancel, Some(0))?.size_bytes`.
@@ -229,30 +187,6 @@ fn build_dir(
     }
     let entries = read_entries(&path).unwrap_or_default();
     build_children(path, entries, depth, max_depth, cancel)
-}
-
-/// Recursive worker for [`walk_files`].
-fn walk_entries(
-    entries: Vec<(PathBuf, Metadata)>,
-    cancel: &CancelToken,
-    f: &(dyn Fn(&Path, &Metadata) + Sync),
-) -> Result<(), WalkError> {
-    entries.into_par_iter().try_for_each(|(path, meta)| {
-        if meta.is_dir() {
-            if cancel.is_cancelled() {
-                return Err(WalkError::Cancelled);
-            }
-            let Ok(children) = read_entries(&path) else {
-                return Ok(()); // unreadable subdirectory: skip
-            };
-            walk_entries(children, cancel, f)
-        } else {
-            if meta.is_file() {
-                f(&path, &meta);
-            }
-            Ok(())
-        }
-    })
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ use std::hash::Hash;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tabibu_engine::{CancelToken, Category, CleanupItem, SafetyTier};
+use tabibu_engine::CancelToken;
 
 /// Bytes sampled from each end of a file in stage 2.
 const SAMPLE_LEN: usize = 16 * 1024;
@@ -102,7 +102,10 @@ pub fn find_duplicates(
     cancel: &CancelToken,
     on_group: &(dyn Fn(&DuplicateGroup) + Sync),
 ) -> Result<Vec<DuplicateGroup>, DupeError> {
-    // Stage 1: group by exact size.
+    // Stage 1: group by exact size. Hardlinks to one inode are byte-identical
+    // by definition but unlinking one frees nothing — keep only the first
+    // sighting of each (device, inode) so they can't inflate the results.
+    let mut seen_inodes: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
     for path in files {
         if cancel.is_cancelled() {
@@ -114,6 +117,13 @@ pub fn find_duplicates(
         };
         if !meta.is_file() || meta.len() < cfg.min_size {
             continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.nlink() > 1 && !seen_inodes.insert((meta.dev(), meta.ino())) {
+                continue;
+            }
         }
         by_size.entry(meta.len()).or_default().push(Candidate {
             path: path.clone(),
@@ -231,29 +241,6 @@ pub fn collect_candidates(
     }
     out.sort();
     Ok(out)
-}
-
-/// Converts a confirmed group into reviewable cleanup items: every path
-/// *except* the newest copy (`paths[0]`) becomes a [`CleanupItem`] in
-/// [`Category::Duplicate`] at [`SafetyTier::Review`]. Duplicates are never
-/// auto-selected or hard-deleted; the reason text names the kept copy.
-#[must_use]
-pub fn to_cleanup_items(group: &DuplicateGroup) -> Vec<CleanupItem> {
-    let Some((kept, extras)) = group.paths.split_first() else {
-        return Vec::new();
-    };
-    extras
-        .iter()
-        .map(|path| {
-            CleanupItem::new(
-                path.clone(),
-                Category::Duplicate,
-                group.size_bytes,
-                SafetyTier::Review,
-                format!("Duplicate of {}", kept.display()),
-            )
-        })
-        .collect()
 }
 
 /// Buckets keyed candidates into a map.
@@ -422,25 +409,19 @@ mod tests {
     }
 
     #[test]
-    fn to_cleanup_items_spares_newest_and_is_review_tier() {
+    fn hardlinks_to_one_inode_are_not_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let payload = vec![4u8; 6000];
-        let oldest = write_file(&dir, "old_copy.bin", &payload);
-        let newest = write_file(&dir, "new_copy.bin", &payload);
-        set_mtime(&oldest, 1_000_000);
-        set_mtime(&newest, 2_000_000);
+        let original = write_file(&dir, "original.bin", &payload);
+        let link = dir.path().join("link.bin");
+        std::fs::hard_link(&original, &link).unwrap();
 
-        let groups = run(&[oldest.clone(), newest.clone()], 1);
-        let items = to_cleanup_items(&groups[0]);
-        assert_eq!(items.len(), 1);
-        let item = &items[0];
-        assert_eq!(item.path, oldest);
-        assert_eq!(item.category, Category::Duplicate);
-        assert_eq!(item.tier, SafetyTier::Review);
-        assert_eq!(item.size_bytes, 6000);
-        assert!(!item.selected, "duplicates must never be auto-selected");
-        assert!(item.reason.starts_with("Duplicate of "));
-        assert!(item.reason.contains(&newest.display().to_string()));
+        // Two links, one inode: unlinking either frees nothing, so no group.
+        let groups = run(&[original, link], 1);
+        assert!(
+            groups.is_empty(),
+            "hardlinks must not form a duplicate group"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "tabibu-app"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.85"
 publish = false
@@ -16,8 +16,9 @@ description = "Tabibu — macOS optimization tool (Tauri shell)"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 plist = "1"
@@ -35,6 +36,7 @@ tabibu-brew = { path = "../../core/crates/tabibu-brew" }
 tabibu-malware = { path = "../../core/crates/tabibu-malware" }
 tabibu-monitor = { path = "../../core/crates/tabibu-monitor" }
 tabibu-telemetry = { path = "../../core/crates/tabibu-telemetry" }
+tauri-plugin-notification = "2.3.3"
 
 [profile.release]
 codegen-units = 1

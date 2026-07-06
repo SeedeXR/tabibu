@@ -294,7 +294,7 @@ fn temp_skips_system_dir_outside_var_folders() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn log_groups_stale_files_per_subdirectory() {
+fn log_emits_individual_stale_files_never_directories() {
     let home = tempfile::tempdir().unwrap();
     let logs = home.path().join("Library/Logs");
 
@@ -316,23 +316,32 @@ fn log_groups_stale_files_per_subdirectory() {
     let ctx = make_ctx(home.path());
     let items = run(&LogScanner, &ctx);
 
-    assert_eq!(items.len(), 2, "fresh-only folders must not be reported");
-    assert_all_under(&items, home.path());
-
-    let grouped = items.iter().find(|i| i.path == myapp).unwrap();
+    // Every item is a stale FILE — a directory item would drag current logs
+    // (today.log) into an auto-selected Safe deletion.
     assert_eq!(
-        grouped.size_bytes, 10,
-        "stale bytes only, summed recursively"
+        items.len(),
+        3,
+        "each stale file is its own item; fresh files never appear"
     );
-    assert_eq!(grouped.tier, SafetyTier::Safe);
-    assert_eq!(grouped.action, ReclaimAction::Trash);
-    assert!(grouped.reason.contains("MyApp"));
+    assert_all_under(&items, home.path());
+    for item in &items {
+        assert!(
+            item.path.is_file(),
+            "never a directory: {}",
+            item.path.display()
+        );
+        assert_eq!(item.category, Category::Log);
+        assert_eq!(item.tier, SafetyTier::Safe);
+        assert_eq!(item.action, ReclaimAction::Trash);
+    }
 
+    let a = items.iter().find(|i| i.path == old_a).unwrap();
+    assert_eq!(a.size_bytes, 6);
+    assert!(a.reason.contains("MyApp"));
+    let b = items.iter().find(|i| i.path == old_b).unwrap();
+    assert_eq!(b.size_bytes, 4, "nested stale files are found recursively");
     let loose_item = items.iter().find(|i| i.path == loose).unwrap();
     assert_eq!(loose_item.size_bytes, 2);
-    for item in &items {
-        assert_eq!(item.category, Category::Log);
-    }
 }
 
 // ---------------------------------------------------------------------------

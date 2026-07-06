@@ -155,12 +155,16 @@ impl Telemetry {
         }
         fs::rename(&tmp, &final_path)?;
 
+        // Flip the in-memory flag BEFORE any fallible cleanup: once consent is
+        // withdrawn (and persisted above), record() must stop immediately even
+        // if deleting the old events file fails — never keep collecting after
+        // an opt-out.
+        self.enabled = on;
+
         if !on {
             // Honor withdrawal: drop everything we previously collected.
             self.clear()?;
         }
-
-        self.enabled = on;
         Ok(())
     }
 
@@ -202,7 +206,11 @@ impl Telemetry {
             if line.trim().is_empty() {
                 continue;
             }
-            events.push(serde_json::from_str(line)?);
+            // A torn final line (crash mid-append) must not make the whole
+            // transparency export unreadable; skip what can't be parsed.
+            if let Ok(event) = serde_json::from_str(line) {
+                events.push(event);
+            }
         }
         Ok(events)
     }

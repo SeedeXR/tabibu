@@ -24,19 +24,46 @@ static CURRENT_SCAN: LazyLock<Mutex<Option<CancelToken>>> = LazyLock::new(|| Mut
 /// Security starts). A single slot would orphan the earlier op's token and make
 /// it uncancellable; the registry keeps every in-flight op cancellable.
 static CURRENT_SYNC: LazyLock<Mutex<Vec<CancelToken>>> = LazyLock::new(|| Mutex::new(Vec::new()));
-/// Persistent monitor sampler (CPU deltas need a long-lived `System`).
+/// Persistent monitor samplers (CPU deltas need a long-lived `System`, and
+/// each polling surface needs its own — see `sample_with`). The tray tooltip
+/// keeps a third sampler of its own in `tray.rs`.
 static SAMPLER: LazyLock<Mutex<Option<Sampler>>> = LazyLock::new(|| Mutex::new(None));
+static POPOVER_SAMPLER: LazyLock<Mutex<Option<Sampler>>> = LazyLock::new(|| Mutex::new(None));
 
-/// Register a fresh synchronous-op cancel token and return a clone to drive the
-/// operation. Already-cancelled tokens are pruned so the registry stays bounded.
-fn begin_sync_op() -> CancelToken {
+/// Register a fresh synchronous-op cancel token. The returned guard drives the
+/// operation and deregisters the token when the op ends (any path — success,
+/// error, panic) so the registry stays bounded without relying on Stop.
+fn begin_sync_op() -> SyncOpGuard {
     let token = CancelToken::new();
     let mut reg = CURRENT_SYNC
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reg.retain(|t| !t.is_cancelled());
     reg.push(token.clone());
-    token
+    SyncOpGuard(token)
+}
+
+/// RAII handle for one synchronous op's cancel token.
+struct SyncOpGuard(CancelToken);
+
+impl std::ops::Deref for SyncOpGuard {
+    type Target = CancelToken;
+    fn deref(&self) -> &CancelToken {
+        &self.0
+    }
+}
+
+impl Drop for SyncOpGuard {
+    fn drop(&mut self) {
+        let mut reg = CURRENT_SYNC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Tokens have no identity beyond their shared flag; cancelling ours
+        // and pruning cancelled entries removes exactly the finished ops.
+        // (A token cancelled here has already served its purpose.)
+        self.0.cancel();
+        reg.retain(|t| !t.is_cancelled());
+    }
 }
 
 /// Cancel every in-flight synchronous op (duplicates / leftovers / security).
@@ -81,9 +108,16 @@ pub struct ScannerOutcomeDto {
 #[tauri::command(async)]
 pub fn scan(scanners: Vec<String>, on_event: Channel<ScanEvent>) {
     let cancel = CancelToken::new();
-    *CURRENT_SCAN
+    // One streaming scan at a time: starting a new one cancels any scan still
+    // running, otherwise the old token is orphaned and its thread keeps
+    // hammering the disk while streaming into a stale channel.
+    if let Some(prev) = CURRENT_SCAN
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cancel.clone());
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(cancel.clone())
+    {
+        prev.cancel();
+    }
 
     std::thread::spawn(move || {
         let ctx = system::default_scan_ctx(&[]);
@@ -157,7 +191,9 @@ pub fn reclaim(
 
 #[tauri::command(async)]
 pub fn size_tree(root: String, max_depth: Option<usize>) -> Result<DirNode, String> {
-    let cancel = CancelToken::new();
+    // Registered like the other long sync ops so Stop / navigating away
+    // (cancel_sync) can abort a huge walk instead of letting it run to the end.
+    let cancel = begin_sync_op();
     tabibu_walk::size_tree(std::path::Path::new(&root), &cancel, max_depth)
         .map_err(|e| e.to_string())
 }
@@ -230,16 +266,33 @@ pub fn installed_apps() -> Vec<InstalledApp> {
 // Monitor
 // ---------------------------------------------------------------------------
 
-#[tauri::command(async)]
-pub fn monitor_sample(top_n: usize, by_cpu: bool) -> SystemSample {
+/// Sample through the given long-lived sampler. sysinfo derives per-process
+/// (and global) CPU% from the elapsed time since that `System`'s previous
+/// refresh, so two consumers refreshing ONE sampler on different cadences
+/// compute deltas over the wrong interval and report garbage CPU%. Each
+/// surface therefore owns a sampler (dashboard, tray popover, tray tooltip).
+fn sample_with(cell: &LazyLock<Mutex<Option<Sampler>>>, top_n: usize, by_cpu: bool) -> SystemSample {
     // Poison-tolerant (matches system.rs): a panic in one sampler call must not
-    // permanently break every later monitor_sample (and the tray thread).
-    let mut guard = SAMPLER
+    // permanently break every later sample (and the tray thread).
+    let mut guard = cell
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let sampler = guard.get_or_insert_with(Sampler::new);
     let by = if by_cpu { TopBy::Cpu } else { TopBy::Memory };
     sampler.sample(top_n, by)
+}
+
+/// Dashboard sampler (the main window polls this).
+#[tauri::command(async)]
+pub fn monitor_sample(top_n: usize, by_cpu: bool) -> SystemSample {
+    sample_with(&SAMPLER, top_n, by_cpu)
+}
+
+/// Tray-popover sampler — separate `System` from the dashboard's, so the two
+/// windows polling on different cadences don't corrupt each other's CPU%.
+#[tauri::command(async)]
+pub fn menubar_sample(top_n: usize, by_cpu: bool) -> SystemSample {
+    sample_with(&POPOVER_SAMPLER, top_n, by_cpu)
 }
 
 #[derive(Serialize)]
@@ -291,15 +344,34 @@ pub fn reveal_in_finder(path: String) {
         .spawn();
 }
 
+/// Open a link. Scheme-allowlisted: an unvalidated string handed to `open`
+/// would upgrade "open a URL" into "launch any app or file" (`open` treats
+/// bare paths as documents and parses `-a`/flag-shaped strings as options).
 #[tauri::command(async)]
-pub fn open_url(url: String) {
-    let _ = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+pub fn open_url(url: String) -> Result<(), String> {
+    const ALLOWED: &[&str] = &["https://", "http://", "x-apple.systempreferences:"];
+    if !ALLOWED.iter().any(|scheme| url.starts_with(scheme)) {
+        return Err("URL scheme not allowed".into());
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(url)
+        .spawn()
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 /// Move a path to the Trash via the OS (used by the uninstaller's "also trash
-/// the app", which lives outside the engine's user roots).
+/// the app", which lives outside the engine's user roots). The engine denylist
+/// still applies: nothing under a protected root can be trashed through here.
 #[tauri::command(async)]
 pub fn trash_path(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_absolute() {
+        return Err("path must be absolute".into());
+    }
+    if let Some(reason) = tabibu_engine::denylist::denied(p, &system::home_dir()) {
+        return Err(format!("protected path ({reason:?}); refusing to trash"));
+    }
     trash::delete(&path).map_err(|e| e.to_string())
 }
 
@@ -432,7 +504,10 @@ pub fn thermal_info() -> ThermalInfo {
         }
     }
     let pressure = match speed_limit {
-        None => "Nominal",
+        // No CPU_Speed_Limit line (format varies across macOS releases): we
+        // have no evidence either way, so say Unknown — never claim health
+        // that wasn't measured.
+        None => "Unknown",
         Some(s) if s >= 100 => "Nominal",
         Some(s) if s >= 75 => "Fair",
         Some(s) if s >= 50 => "Serious",
@@ -565,24 +640,26 @@ pub fn record_free_space(ts_unix: u64, free_bytes: u64) -> Vec<(u64, u64)> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    // Throttle: if the newest sample is < 1h old, update it in place rather
-    // than appending (keeps ≤ 1 point/hour and avoids per-tick disk churn).
-    match history.last_mut() {
-        Some(last) if ts_unix.saturating_sub(last.0) < FREE_SPACE_MIN_SPACING => {
-            *last = (ts_unix, free_bytes);
+    // Throttle: append only once the newest sample is ≥ 1h old, and touch the
+    // disk only when appending. (Updating the last point's timestamp in place
+    // here would keep resetting the 1h anchor — with a 2s poll the gap would
+    // never elapse and the history would hold one forever-sliding point.)
+    let stale = history
+        .last()
+        .is_none_or(|last| ts_unix.saturating_sub(last.0) >= FREE_SPACE_MIN_SPACING);
+    if stale {
+        history.push((ts_unix, free_bytes));
+        // Keep the last 90 samples.
+        let len = history.len();
+        if len > 90 {
+            history.drain(0..len - 90);
         }
-        _ => history.push((ts_unix, free_bytes)),
-    }
-    // Keep the last 90 samples.
-    let len = history.len();
-    if len > 90 {
-        history.drain(0..len - 90);
-    }
-    // Atomic write: tmp + rename, so a concurrent reader never sees a torn file.
-    if let Ok(json) = serde_json::to_vec(&history) {
-        let tmp = file.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &file);
+        // Atomic write: tmp + rename, so a concurrent reader never sees a torn file.
+        if let Ok(json) = serde_json::to_vec(&history) {
+            let tmp = file.with_extension("json.tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &file);
+            }
         }
     }
     history
@@ -648,4 +725,47 @@ pub fn brew_autoremove() -> tabibu_brew::ActionOutcome {
 #[tauri::command(async)]
 pub fn brew_uninstall(name: String, cask: bool) -> tabibu_brew::ActionOutcome {
     with_brew(|b| b.uninstall(&name, cask))
+}
+
+// ---------------------------------------------------------------------
+// Menu bar app lifecycle (tray popover + Settings)
+// ---------------------------------------------------------------------
+
+/// Whether Tabibu starts at login (macOS Launch Agent, autostart plugin).
+#[tauri::command(async)]
+pub fn launch_at_login(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn set_launch_at_login(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let launcher = app.autolaunch();
+    if on { launcher.enable() } else { launcher.disable() }.map_err(|e| e.to_string())
+}
+
+/// Show + focus the dashboard (used by the tray popover's buttons),
+/// optionally navigating it to a view id like "settings" or "memory".
+#[tauri::command]
+pub fn show_main_window(app: tauri::AppHandle, view: Option<String>) {
+    crate::tray::show_main(&app, view.as_deref());
+}
+
+/// Full exit — the menu bar app otherwise survives window closes.
+#[tauri::command]
+pub fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// Expand/collapse the tray popover for a component detail panel.
+#[tauri::command]
+pub fn popover_detail(app: tauri::AppHandle, open: bool) {
+    crate::tray::set_popover_detail(&app, open);
+}
+
+/// Seconds since boot (the CPU detail panel's uptime card).
+#[tauri::command(async)]
+pub fn uptime_secs() -> u64 {
+    sysinfo::System::uptime()
 }

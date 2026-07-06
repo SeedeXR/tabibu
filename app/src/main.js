@@ -32,11 +32,14 @@ function icon(name, cls = "") {
 // ---------- formatting ----------
 function fmtBytes(n) {
   n = Number(n) || 0;
-  if (n < 1024) return `${n} B`;
+  const sign = n < 0 ? "-" : "";
+  n = Math.abs(n);
+  if (n < 1024) return `${sign}${n} B`;
   const u = ["KB", "MB", "GB", "TB"];
   let i = -1;
-  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
-  return `${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
+  // 1023.5 (not 1024): toFixed rounds 1023.6 up, which would print "1024 KB".
+  do { n /= 1024; i++; } while (n >= 1023.5 && i < u.length - 1);
+  return `${sign}${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
 }
 function displayPath(p) {
   return state.home && p.startsWith(state.home) ? "~" + p.slice(state.home.length) : p;
@@ -45,8 +48,7 @@ const CAT_NAMES = {
   Trash: "Trash", UserCache: "User Caches", DevCache: "Developer Caches",
   Temp: "Temporary Files", Log: "Logs", Duplicate: "Duplicates",
   LargeOldFile: "Large & Old Files", AppRemnant: "App Remnants",
-  OrphanedSupport: "Orphaned Support", UnusedApp: "Unused Apps",
-  StaleBinary: "Stale Binaries", Malware: "Security",
+  OrphanedSupport: "Orphaned Support", Malware: "Security",
 };
 const catName = (c) => CAT_NAMES[c] || c;
 
@@ -133,7 +135,6 @@ function navigate(id) {
   const accent = THEME[id] || "var(--accent)";
   document.getElementById("view").style.setProperty("--view-accent", accent);
   document.querySelector(".nav-item.active")?.style.setProperty("--view-accent", accent);
-  cancelTimers();
   // Leaving the Developer/CLI view drops its transient action toast + stale flag
   // so neither can reappear without context on return.
   if (id !== "brew") { brewState.outcome = null; brewState.stale = false; }
@@ -195,15 +196,23 @@ function scanView(id) {
   if (s.phase === "error") return setView(centered("circle-alert", "Something went wrong", s.error, "Try Again", () => { resetSession(id); startScan(id); }));
 }
 
+// Monotonic scan sequence: events/promises from a superseded scan (Rescan,
+// Scan Again) must not touch the state or timer the newer scan now owns.
+let scanSeq = 0;
 function startScan(id) {
   const def = SCAN_DEFS[id];
   const s = getSession(id);
   clearScanTimer(); // don't stack a tick on Rescan
+  const seq = ++scanSeq;
   s.phase = "scanning"; s.items = []; s.selection = new Set(); s.summary = null;
   let dirty = false;
   const ch = new Channel();
   ch.onmessage = (msg) => {
+    if (seq !== scanSeq) return; // stale scan — a newer one owns the UI/timer
     if (msg.kind === "item") {
+      // After Stop flipped phase to "review", late items must be dropped —
+      // otherwise they'd be added (and Safe-selected) invisibly and trashed unseen.
+      if (s.phase !== "scanning") return;
       s.items.push(msg.item);
       if (msg.item.tier === "Safe") s.selection.add(msg.item.path);
       dirty = true;
@@ -219,7 +228,12 @@ function startScan(id) {
     if (dirty && s.phase === "scanning" && id === state.current) { dirty = false; scanLiveUpdate(id); }
   }, 100);
   activeTimers.push(scanTimer);
-  invoke("scan", { scanners: def.scanners, onEvent: ch });
+  invoke("scan", { scanners: def.scanners, onEvent: ch }).catch((e) => {
+    if (seq !== scanSeq) return; // a newer scan owns the state now
+    clearScanTimer();
+    s.phase = "error"; s.error = String(e);
+    if (id === state.current) scanView(id);
+  });
   scanView(id);
 }
 function stopScan(id) { invoke("cancel_scan"); clearScanTimer(); const s = getSession(id); s.phase = s.items.length ? "review" : "idle"; scanView(id); }
@@ -262,7 +276,7 @@ function reviewPanel(id) {
   const wrap = h("div", { class: "review" });
   if (!state.fda) wrap.append(fdaNotice());
   // summary
-  wrap.append(summaryHeader(s));
+  wrap.append(summaryHeader(s, id));
   wrap.append(scannerFooter(s));
   // grouped list
   const list = h("div", { class: "list", id: `list-${id}` });
@@ -273,12 +287,14 @@ function reviewPanel(id) {
   return wrap;
 }
 
-function summaryHeader(s) {
+function summaryHeader(s, id) {
   const sb = selectedBytes(s);
   const head = h("div", { class: "summary card" });
+  const selStat = statBlock("Selected", fmtBytes(sb), `${s.selection.size} items`, sb > 0);
+  selStat.id = `sel-stat-${id}`; // updateReclaimBar refreshes this in place on toggle
   head.append(h("div", { class: "stats" },
     statBlock("Found", fmtBytes(foundBytes(s)), `${s.items.length} items`, false),
-    statBlock("Selected", fmtBytes(sb), `${s.selection.size} items`, sb > 0)));
+    selStat));
   const total = foundBytes(s) || 1;
   for (const t of tallies(s.items)) {
     head.append(h("div", { class: "tally" },
@@ -391,16 +407,40 @@ function reclaimBar(id) {
   renderReclaimBar(bar, id);
   return bar;
 }
-function updateReclaimBar(id) { const b = document.getElementById(`bar-${id}`); if (b) renderReclaimBar(b, id); }
-function renderReclaimBar(bar, id) {
-  const s = getSession(id);
+function updateReclaimBar(id) {
+  const b = document.getElementById(`bar-${id}`);
+  if (b) renderReclaimBar(b, id);
+  // keep the summary header's "Selected" stat in step with the bar
+  const st = document.getElementById(`sel-stat-${id}`);
+  if (st) {
+    const s = getSession(id), sb = selectedBytes(s);
+    const v = st.querySelector(".v");
+    v.textContent = fmtBytes(sb);
+    v.className = "v" + (sb > 0 ? " sel" : "");
+    st.querySelector(".sub").textContent = `${s.selection.size} items`;
+  }
+}
+// Shared select-all / clear / total / Move-to-Trash action bar (scan review +
+// duplicates render the same skeleton with different labels and handlers).
+function renderActionBar(bar, { selectLabel, onSelectAll, clearLabel, onClear, bytes, count, onTrash }) {
   bar.innerHTML = "";
   bar.append(
-    h("button", { onClick: () => { s.items.forEach((i) => { if (i.tier === "Safe") s.selection.add(i.path); }); rerenderReview(id); } }, "Select All Safe"),
-    h("button", { onClick: () => { s.selection.clear(); rerenderReview(id); }, disabled: s.selection.size === 0 ? "" : null }, "Deselect All"),
+    h("button", { onClick: onSelectAll }, selectLabel),
+    h("button", { onClick: onClear, disabled: count === 0 ? "" : null }, clearLabel),
     h("div", { class: "spacer" }),
-    h("div", { class: "tot" }, h("div", { class: "v" }, fmtBytes(selectedBytes(s))), h("div", { class: "k" }, `${s.selection.size} selected`)),
-    h("button", { class: "danger lg", disabled: s.selection.size === 0 ? "" : null, onClick: () => confirmReclaim(id) }, "Move to Trash"));
+    h("div", { class: "tot" }, h("div", { class: "v" }, fmtBytes(bytes)), h("div", { class: "k" }, `${count} selected`)),
+    h("button", { class: "danger lg", disabled: count === 0 ? "" : null, onClick: onTrash }, "Move to Trash"));
+}
+function renderReclaimBar(bar, id) {
+  const s = getSession(id);
+  renderActionBar(bar, {
+    selectLabel: "Select All Safe",
+    onSelectAll: () => { s.items.forEach((i) => { if (i.tier === "Safe") s.selection.add(i.path); }); rerenderReview(id); },
+    clearLabel: "Deselect All",
+    onClear: () => { s.selection.clear(); rerenderReview(id); },
+    bytes: selectedBytes(s), count: s.selection.size,
+    onTrash: () => confirmReclaim(id),
+  });
 }
 function rerenderReview(id) {
   const list = document.getElementById(`list-${id}`);
@@ -560,13 +600,14 @@ function syncDupeRows() {
 }
 function updateDupeBar() { if (dupeState.barEl && dupeState.barEl.isConnected) renderDupeBar(dupeState.barEl); }
 function renderDupeBar(bar) {
-  bar.innerHTML = "";
-  bar.append(
-    h("button", { onClick: () => { dupeState.groups.forEach((g) => g.paths.slice(1).forEach((p) => dupeState.selection.add(p))); syncDupeRows(); updateDupeBar(); } }, "Select all but newest"),
-    h("button", { onClick: () => { dupeState.selection.clear(); syncDupeRows(); updateDupeBar(); }, disabled: dupeState.selection.size === 0 ? "" : null }, "Clear"),
-    h("div", { class: "spacer" }),
-    h("div", { class: "tot" }, h("div", { class: "v" }, fmtBytes(dupeReclaimBytes())), h("div", { class: "k" }, `${dupeState.selection.size} selected`)),
-    h("button", { class: "danger lg", disabled: dupeState.selection.size === 0 ? "" : null, onClick: reclaimDupes }, "Move to Trash"));
+  renderActionBar(bar, {
+    selectLabel: "Select all but newest",
+    onSelectAll: () => { dupeState.groups.forEach((g) => g.paths.slice(1).forEach((p) => dupeState.selection.add(p))); syncDupeRows(); updateDupeBar(); },
+    clearLabel: "Clear",
+    onClear: () => { dupeState.selection.clear(); syncDupeRows(); updateDupeBar(); },
+    bytes: dupeReclaimBytes(), count: dupeState.selection.size,
+    onTrash: reclaimDupes,
+  });
 }
 function reclaimDupes() {
   const d = dupeState;
@@ -752,11 +793,13 @@ function renderMemory() {
 function quitProcess(p) {
   const ok = confirm(`Quit "${p.name}" (pid ${p.pid})?\n\nThis asks the process to quit. Save your work first — Tabibu can't recover unsaved changes.\n\nPress OK to Quit, or Cancel.`);
   if (!ok) return;
+  // delayed refresh only if the user is still on this view
+  const refresh = () => setTimeout(() => { if (state.current === "memory") renderMemory(); }, 600);
   invoke("quit_process", { pid: p.pid, force: false })
-    .then(() => setTimeout(() => renderMemory(), 600))
+    .then(refresh)
     .catch((e) => {
       if (confirm(`Couldn't quit gracefully (${e}).\n\nForce Quit "${p.name}"? This kills it immediately and may lose unsaved work.`)) {
-        invoke("quit_process", { pid: p.pid, force: true }).then(() => setTimeout(() => renderMemory(), 600)).catch((e2) => alert(String(e2)));
+        invoke("quit_process", { pid: p.pid, force: true }).then(refresh).catch((e2) => alert(String(e2)));
       }
     });
 }
@@ -776,7 +819,9 @@ function showPopover(e, text) {
 // =====================================================================
 async function batteryView() {
   setTitle("Battery", []);
-  const info = await invoke("battery_info");
+  let info;
+  try { info = await invoke("battery_info"); }
+  catch (e) { return setView(centered("circle-alert", "Something went wrong", String(e), "Try Again", render)); }
   if (!info.has_battery) return setView(centered("battery", "No battery on this Mac", "This appears to be a desktop Mac or has no internal battery, so there's nothing to report here."));
   const wrap = h("div", { class: "pad" });
   if (info.charge_percent != null) {
@@ -1124,7 +1169,9 @@ async function brewUninstall(p) {
 // =====================================================================
 async function startupView() {
   setTitle("Startup Items", []);
-  const rep = await invoke("startup_items");
+  let rep;
+  try { rep = await invoke("startup_items"); }
+  catch (e) { return setView(centered("circle-alert", "Something went wrong", String(e), "Try Again", render)); }
   const wrap = h("div", {});
   wrap.append(h("div", { class: "row", style: "padding:16px 24px" },
     h("span", { style: "font-weight:600" }, `${rep.items.length} startup item${rep.items.length === 1 ? "" : "s"}`),
@@ -1359,6 +1406,16 @@ async function settingsView() {
   });
   const sw = h("label", { class: "switch" }, cb, h("span", { class: "track" }));
 
+  // Launch at login (menu bar app — starts hidden in the menu bar).
+  const loginOn = await invoke("launch_at_login").catch(() => false);
+  const loginCb = h("input", { type: "checkbox" });
+  loginCb.checked = loginOn;
+  loginCb.addEventListener("change", () => {
+    invoke("set_launch_at_login", { on: loginCb.checked })
+      .catch((e) => { alert(String(e)); loginCb.checked = !loginCb.checked; });
+  });
+  const loginSw = h("label", { class: "switch" }, loginCb, h("span", { class: "track" }));
+
   // Full Disk Access lives here — the one place to grant whole-disk access.
   const on = state.fda;
   const fda = h("div", { class: "setting" },
@@ -1374,6 +1431,11 @@ async function settingsView() {
     fda,
     h("div", { class: "setting" },
       h("div", { class: "body" },
+        h("h3", {}, "Launch at login"),
+        h("p", {}, "Tabibu is a menu bar app: it starts in the menu bar (no Dock icon) and keeps the health readout a click away. Closing the dashboard hides it; quit from the menu bar icon.")),
+      loginSw),
+    h("div", { class: "setting" },
+      h("div", { class: "body" },
         h("h3", {}, "Share deselection feedback"),
         h("p", {}, "Off by default. When on, Tabibu records only which CATEGORY of suggestion you unchecked (e.g. \"developer caches\"), the safety tier, and a rough size range — never file names, paths, or contents. It helps us learn which suggestions to trust less. Stored locally; turning this off deletes what was collected.")),
       sw)));
@@ -1383,6 +1445,7 @@ async function settingsView() {
 // router
 // =====================================================================
 function render() {
+  cancelTimers(); // every full re-render reaps old intervals — no stacking
   const id = state.current;
   if (id === "dashboard") return dashboardView();
   if (["smart", "junk", "large"].includes(id)) return scanView(id);
@@ -1403,6 +1466,10 @@ async function boot() {
   try { const info = await invoke("system_info"); state.home = info.home; state.fda = info.full_disk_access; }
   catch (e) { console.error("system_info failed", e); }
   updateFooter();
+  // The tray menu and popover steer the dashboard through this event.
+  TAURI.event.listen("navigate", (e) => {
+    if (typeof e.payload === "string" && e.payload) navigate(e.payload);
+  });
   navigate("dashboard");
 }
 boot();

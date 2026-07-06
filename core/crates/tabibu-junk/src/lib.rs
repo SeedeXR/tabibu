@@ -563,38 +563,44 @@ impl Scanner for TempScanner {
 // LogScanner
 // ---------------------------------------------------------------------------
 
-/// Finds log files under `~/Library/Logs` older than 30 days, grouped per
-/// immediate subdirectory (one item per app's log folder, sized by its total
-/// stale bytes). Stale files lying directly in `Logs` are reported
-/// individually.
+/// Finds log FILES under `~/Library/Logs` older than 30 days — always
+/// individual files, never a directory, so nothing current can ride along
+/// with the stale bytes.
 pub struct LogScanner;
 
-/// Count and total size of files older than `max_age` anywhere under `dir`.
-fn stale_file_stats(
+/// Emit one Safe item per file older than `max_age` anywhere under `dir`.
+fn emit_stale_logs(
     dir: &Path,
     max_age: Duration,
     now: SystemTime,
     cancel: &CancelToken,
-) -> Result<(u64, u64), ScanError> {
+    sink: &mut dyn FnMut(CleanupItem),
+    app: &str,
+) -> Result<(), ScanError> {
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
     let Ok(entries) = fs::read_dir(dir) else {
-        return Ok((0, 0));
+        return Ok(());
     };
-    let (mut count, mut bytes) = (0u64, 0u64);
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
-            let (sub_count, sub_bytes) = stale_file_stats(&entry.path(), max_age, now, cancel)?;
-            count += sub_count;
-            bytes += sub_bytes;
+            emit_stale_logs(&entry.path(), max_age, now, cancel, sink, app)?;
         } else if meta.is_file() && is_older_than(&meta, max_age, now) {
-            count += 1;
-            bytes += meta.len();
+            // Each stale FILE is its own item. Never the directory: a dir mixes
+            // stale and current logs, so trashing it would delete live data the
+            // size/reason never mentioned.
+            sink(CleanupItem::new(
+                entry.path(),
+                Category::Log,
+                meta.len(),
+                SafetyTier::Safe,
+                format!("Log from {app} older than 30 days"),
+            ));
         }
     }
-    Ok((count, bytes))
+    Ok(())
 }
 
 impl Scanner for LogScanner {
@@ -623,17 +629,7 @@ impl Scanner for LogScanner {
             let Ok(meta) = entry.metadata() else { continue };
             let name = entry.file_name().to_string_lossy().into_owned();
             if meta.is_dir() {
-                let (count, bytes) = stale_file_stats(&entry.path(), THIRTY_DAYS, now, cancel)?;
-                if count == 0 {
-                    continue;
-                }
-                sink(CleanupItem::new(
-                    entry.path(),
-                    Category::Log,
-                    bytes,
-                    SafetyTier::Safe,
-                    format!("Logs from {name} older than 30 days"),
-                ));
+                emit_stale_logs(&entry.path(), THIRTY_DAYS, now, cancel, sink, &name)?;
             } else if meta.is_file() && is_older_than(&meta, THIRTY_DAYS, now) {
                 sink(CleanupItem::new(
                     entry.path(),

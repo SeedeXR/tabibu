@@ -32,6 +32,20 @@ impl OrphanScanner {
     pub fn new(installed: HashSet<String>) -> Self {
         Self { installed }
     }
+
+    /// `true` if a container/support dir named `id` belongs to an installed
+    /// app — exactly, or as an embedded helper/XPC/extension whose bundle ID
+    /// extends the parent app's (e.g. `com.getdropbox.dropbox.garcon` for an
+    /// installed `com.getdropbox.dropbox`). Deleting a live helper container
+    /// loses real app data, so prefixes count as owned.
+    fn owned_by_installed(&self, id: &str) -> bool {
+        if self.installed.contains(id) {
+            return true;
+        }
+        self.installed.iter().any(|app| {
+            id.len() > app.len() && id.starts_with(app) && id.as_bytes()[app.len()] == b'.'
+        })
+    }
 }
 
 impl Scanner for OrphanScanner {
@@ -62,7 +76,7 @@ impl Scanner for OrphanScanner {
                 let Some(name) = name.to_str() else { continue };
                 if !looks_like_bundle_id(name)
                     || name.starts_with("com.apple.")
-                    || self.installed.contains(name)
+                    || self.owned_by_installed(name)
                     || ctx.running_bundle_ids.contains(name)
                 {
                     continue;
