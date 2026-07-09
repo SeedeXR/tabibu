@@ -2,10 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Menu bar app (agent): no Dock icon, no app switcher entry. The runtime
-	     twin is ActivationPolicy::Accessory in main.rs (covers `tauri dev`);
-	     this covers the bundle from the very first frame after launch. -->
+	<!-- Tabibu launches as a normal desktop app (dashboard window + Dock icon)
+	     alongside its menu-bar tray, so LSUIElement is false: the Dock icon is
+	     present from the first frame of a manual launch. Closing the dashboard
+	     only hides the window; the app stays Regular (Dock icon persists as a
+	     reopen affordance) and keeps running for the tray. A login/autostart
+	     launch instead starts quietly (runtime Accessory, no window) until the
+	     user opens it. -->
 	<key>LSUIElement</key>
-	<true/>
+	<false/>
 </dict>
 </plist>

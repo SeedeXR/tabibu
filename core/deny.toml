@@ -1,9 +1,7 @@
 # cargo-deny configuration for the Tabibu Rust core.
 #
-# cargo-deny is NOT installed locally (`which cargo-deny` -> not found); this
-# file is validated syntactically here and executed in CI via
-# EmbarkStudios/cargo-deny-action@v2 (see .github/workflows/ci.yml and
-# docs/release.md).
+# Enforced in CI (the `cargo-deny` job in .github/workflows/ci.yml); developers
+# who want to run it locally install it with `cargo install cargo-deny`.
 
 [graph]
 all-features = false
@@ -19,9 +17,8 @@ yanked = "deny"
 
 [licenses]
 version = 2
-# Everything in the current tree resolves to one of these (verified against
-# `cargo metadata` license fields on 2026-06-13). GPL and other copyleft
-# licenses are NOT allowed.
+# Permissive allow-list: new dependencies under any of these pass; GPL and
+# other copyleft licenses are NOT allowed and will (correctly) fail CI.
 #
 # NOTE on tabibu-malware: a future `clamav` feature will link libclamav,
 # which is GPL-2.0. That dependency must stay behind an off-by-default

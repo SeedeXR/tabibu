@@ -32,3 +32,4 @@ docs/**/*.html
 # Stale pre-Tauri output dir (FFI/Swift era) — real bundles live in app/src-tauri/target
 /build/
 references/
+output/

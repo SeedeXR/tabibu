@@ -29,6 +29,41 @@ function icon(name, cls = "") {
   return h("span", { class: cls, html: svg });
 }
 
+// ---------- in-app dialogs ----------
+// The webview's window.confirm/alert are unreliable here: the Tauri dialog
+// plugin's overrides return a Promise (so `if (!confirm(x))` never blocks and
+// destructive actions ran UNconfirmed), and without the plugin the native wry
+// panels are a no-op. So we render our own modal/toast — deterministic, and
+// styled to match the app. uiConfirm resolves true/false; always `await` it.
+function uiConfirm(message, { danger = false, okLabel = "OK" } = {}) {
+  return new Promise((resolve) => {
+    const finish = (v) => {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+      else if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    };
+    const ok = h("button", { class: danger ? "danger" : "primary", onClick: () => finish(true) }, okLabel);
+    const card = h("div", { class: "modal-card", onClick: (e) => e.stopPropagation() },
+      h("p", { class: "modal-msg" }, message),
+      h("div", { class: "modal-actions" },
+        h("button", { onClick: () => finish(false) }, "Cancel"), ok));
+    const overlay = h("div", { class: "modal-overlay", onClick: () => finish(false) }, card);
+    document.body.append(overlay);
+    document.addEventListener("keydown", onKey, true);
+    ok.focus();
+  });
+}
+function uiToast(message, { danger = false } = {}) {
+  const t = h("div", { class: "toast" + (danger ? " danger" : "") }, message);
+  document.body.append(t);
+  requestAnimationFrame(() => t.classList.add("show"));
+  setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 3600);
+}
+
 // ---------- formatting ----------
 function fmtBytes(n) {
   n = Number(n) || 0;
@@ -203,6 +238,12 @@ function startScan(id) {
   const def = SCAN_DEFS[id];
   const s = getSession(id);
   clearScanTimer(); // don't stack a tick on Rescan
+  // The backend runs ONE streaming scan at a time (a new scan cancels the
+  // previous). Reset any other view left mid-scan so it doesn't spin forever
+  // on a channel that's now superseded.
+  for (const [sid, sess] of Object.entries(sessions)) {
+    if (sid !== id && sess.phase === "scanning") sess.phase = sess.items.length ? "review" : "idle";
+  }
   const seq = ++scanSeq;
   s.phase = "scanning"; s.items = []; s.selection = new Set(); s.summary = null;
   let dirty = false;
@@ -450,10 +491,11 @@ function rerenderReview(id) {
   if (id === state.current) scanView(id);
 }
 
-function confirmReclaim(id) {
+async function confirmReclaim(id) {
   const s = getSession(id);
   const n = s.selection.size, b = fmtBytes(selectedBytes(s));
-  if (!confirm(`Move ${n} item${n === 1 ? "" : "s"} (${b}) to the Trash?\n\nItems go to the Trash so you can restore them. Tabibu writes an undo record first.`)) return;
+  if (n === 0) return;
+  if (!(await uiConfirm(`Move ${n} item${n === 1 ? "" : "s"} (${b}) to the Trash?\n\nItems go to the Trash so you can restore them. Tabibu writes an undo record first.`, { danger: true, okLabel: "Move to Trash" }))) return;
   const items = s.items.filter((i) => s.selection.has(i.path));
   s.phase = "reclaiming"; scanView(id);
   invoke("reclaim", { items, extraRoots: [] })
@@ -546,7 +588,7 @@ async function scanDupes() {
   try {
     d.groups = await invoke("find_duplicates", { root: null, minSize: 4096 });
     d.phase = d.groups.length ? "review" : "idle";
-    if (!d.groups.length) setTimeout(() => alert("No duplicate files found."), 50);
+    if (!d.groups.length) uiToast("No duplicate files found.");
   } catch (e) {
     if (/cancel/i.test(String(e))) { d.phase = "idle"; } else { d.phase = "error"; d.error = String(e); }
   }
@@ -609,14 +651,15 @@ function renderDupeBar(bar) {
     onTrash: reclaimDupes,
   });
 }
-function reclaimDupes() {
+async function reclaimDupes() {
   const d = dupeState;
+  if (d.selection.size === 0) return;
   // Guard against deleting every copy of a file (data loss). Trash is
   // recoverable, but warn clearly.
   const wiped = d.groups.filter((g) => g.paths.every((p) => d.selection.has(p))).length;
   let msg = `Move ${d.selection.size} duplicate file(s) (${fmtBytes(dupeReclaimBytes())}) to the Trash?`;
   if (wiped > 0) msg += `\n\n⚠ ${wiped} set(s) have ALL copies selected — every copy will be trashed (recoverable from the Trash).`;
-  if (!confirm(msg)) return;
+  if (!(await uiConfirm(msg, { danger: true, okLabel: "Move to Trash" }))) return;
   const items = [];
   for (const g of d.groups) {
     const keeper = g.paths[0];
@@ -790,18 +833,18 @@ function renderMemory() {
   }
   setView(wrap);
 }
-function quitProcess(p) {
-  const ok = confirm(`Quit "${p.name}" (pid ${p.pid})?\n\nThis asks the process to quit. Save your work first — Tabibu can't recover unsaved changes.\n\nPress OK to Quit, or Cancel.`);
-  if (!ok) return;
+async function quitProcess(p) {
+  if (!(await uiConfirm(`Quit "${p.name}" (pid ${p.pid})?\n\nThis asks the process to quit. Save your work first — Tabibu can't recover unsaved changes.`, { danger: true, okLabel: "Quit" }))) return;
   // delayed refresh only if the user is still on this view
   const refresh = () => setTimeout(() => { if (state.current === "memory") renderMemory(); }, 600);
-  invoke("quit_process", { pid: p.pid, force: false })
-    .then(refresh)
-    .catch((e) => {
-      if (confirm(`Couldn't quit gracefully (${e}).\n\nForce Quit "${p.name}"? This kills it immediately and may lose unsaved work.`)) {
-        invoke("quit_process", { pid: p.pid, force: true }).then(refresh).catch((e2) => alert(String(e2)));
-      }
-    });
+  try {
+    await invoke("quit_process", { pid: p.pid, force: false });
+    refresh();
+  } catch (e) {
+    if (await uiConfirm(`Couldn't quit gracefully (${e}).\n\nForce Quit "${p.name}"? This kills it immediately and may lose unsaved work.`, { danger: true, okLabel: "Force Quit" })) {
+      invoke("quit_process", { pid: p.pid, force: true }).then(refresh).catch((e2) => uiToast(String(e2), { danger: true }));
+    }
+  }
 }
 function kv(k, v) { return h("div", { class: "kv" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v)); }
 let popoverEl = null;
@@ -822,6 +865,7 @@ async function batteryView() {
   let info;
   try { info = await invoke("battery_info"); }
   catch (e) { return setView(centered("circle-alert", "Something went wrong", String(e), "Try Again", render)); }
+  if (state.current !== "battery") return; // user navigated away mid-call
   if (!info.has_battery) return setView(centered("battery", "No battery on this Mac", "This appears to be a desktop Mac or has no internal battery, so there's nothing to report here."));
   const wrap = h("div", { class: "pad" });
   if (info.charge_percent != null) {
@@ -847,6 +891,7 @@ async function uninstallerView() {
   const u = uninstallState;
   if (u.phase === "browsing") {
     if (!u.apps.length) { try { u.apps = await invoke("installed_apps"); } catch (e) { /* ignore */ } }
+    if (state.current !== "uninstall") return; // navigated away during the /Applications walk
     return renderAppBrowser();
   }
   if (u.phase === "hunting") return setView(u.leftovers ? cancellableSpinner("Scanning for leftover files…") : centeredSpinner("Finding leftover files…"));
@@ -863,7 +908,9 @@ async function uninstallerView() {
     // And surface a failure to trash the app bundle itself (no longer swallowed).
     if (u.trashAppError) c.append(h("div", { class: "toast-fail" },
       h("div", { class: "ln" }, `• Could not move the app to the Trash — ${u.trashAppError}`)));
-    c.append(h("button", { class: "primary", onClick: () => { u.phase = "browsing"; u.selected = null; u.trashAppError = null; render(); } }, "Done"));
+    // Clear the cached app list so the just-uninstalled app is refetched and
+    // no longer shows (with a dead Uninstall button) in the browser.
+    c.append(h("button", { class: "primary", onClick: () => { u.phase = "browsing"; u.selected = null; u.trashAppError = null; u.apps = []; render(); } }, "Done"));
     return setView(c);
   }
   if (u.phase === "error") return setView(centered("circle-alert", "Something went wrong", u.error, "Back", () => { u.phase = "browsing"; render(); }));
@@ -1144,7 +1191,7 @@ function brewPkgRow(p) {
 }
 
 async function runBrewAction(cmd, label, confirmMsg) {
-  if (!confirm(confirmMsg)) return;
+  if (!(await uiConfirm(confirmMsg, { danger: true, okLabel: label }))) return;
   const b = brewState;
   b.phase = "working"; b.working = `Running ${label}…`; render();
   try { b.outcome = await invoke(cmd); }
@@ -1156,7 +1203,7 @@ async function brewUninstall(p) {
   const note = (p.as_dependency && !p.on_request)
     ? `\n\nNote: ${p.name} was installed as a dependency. If anything still needs it, brew will refuse (use “Remove unused” instead).`
     : "";
-  if (!confirm(`Uninstall ${p.name} (${p.kind})?\n\nRuns “brew uninstall ${p.name}”. Homebrew refuses if another package depends on it — nothing is forced.${note}`)) return;
+  if (!(await uiConfirm(`Uninstall ${p.name} (${p.kind})?\n\nRuns “brew uninstall ${p.name}”. Homebrew refuses if another package depends on it — nothing is forced.${note}`, { danger: true, okLabel: "Uninstall" }))) return;
   const b = brewState;
   b.phase = "working"; b.working = `Uninstalling ${p.name}…`; render();
   try { b.outcome = await invoke("brew_uninstall", { name: p.name, cask: p.kind === "cask" }); }
@@ -1172,6 +1219,7 @@ async function startupView() {
   let rep;
   try { rep = await invoke("startup_items"); }
   catch (e) { return setView(centered("circle-alert", "Something went wrong", String(e), "Try Again", render)); }
+  if (state.current !== "startup") return; // navigated away mid-call
   const wrap = h("div", {});
   wrap.append(h("div", { class: "row", style: "padding:16px 24px" },
     h("span", { style: "font-weight:600" }, `${rep.items.length} startup item${rep.items.length === 1 ? "" : "s"}`),
@@ -1210,7 +1258,9 @@ function securityView() {
 async function runSecurityScan() {
   secState.phase = "scanning"; render();
   try { secState.items = await invoke("scan_malware"); secState.phase = "done"; }
-  catch (e) { secState.items = []; secState.phase = "done"; setTimeout(() => alert(String(e)), 50); }
+  // On failure, return to the hero (not the "no threats" all-clear, which
+  // would be a false clean bill of health) and surface the error.
+  catch (e) { secState.items = []; secState.phase = "idle"; uiToast(`Security scan failed: ${e}`, { danger: true }); }
   render();
 }
 function securityReview() {
@@ -1231,11 +1281,11 @@ function securityReview() {
   wrap.append(list);
   return wrap;
 }
-function quarantineItem(it) {
-  if (!confirm(`Move this to the quarantine vault?\n\n${it.path}\n\nIt will be locked (not deleted) and can be restored.`)) return;
+async function quarantineItem(it) {
+  if (!(await uiConfirm(`Move this to the quarantine vault?\n\n${it.path}\n\nIt will be locked (not deleted) and can be restored.`, { danger: true, okLabel: "Quarantine" }))) return;
   invoke("quarantine", { path: it.path })
     .then(() => { secState.items = secState.items.filter((x) => x.path !== it.path); render(); })
-    .catch((e) => alert(String(e)));
+    .catch((e) => uiToast(String(e), { danger: true }));
 }
 
 // =====================================================================
@@ -1248,7 +1298,12 @@ function pushDashHist(sample) {
   dashHist.mem.push(sample.used_memory_bytes / Math.max(sample.total_memory_bytes, 1) * 100);
   for (const k of ["cpu", "mem"]) if (dashHist[k].length > 40) dashHist[k].shift();
 }
+let dashSeq = 0;
 async function dashboardView() {
+  // Supersede any dashboardView still awaiting: without this, re-entering the
+  // Dashboard while the first entry's awaits are pending lets both register a
+  // 2s interval (double polling), since cancelTimers() already ran for both.
+  const mySeq = ++dashSeq;
   setTitle("Dashboard", []);
   setView(centeredSpinner("Reading system health…"));
   // Slow-moving metrics fetched ONCE on entry — battery/thermal/disk each shell
@@ -1261,7 +1316,7 @@ async function dashboardView() {
     invoke("battery_info").catch(() => null),
     invoke("thermal_info").catch(() => null),
   ]);
-  if (state.current !== "dashboard") return;
+  if (state.current !== "dashboard" || mySeq !== dashSeq) return;
   if (sample) pushDashHist(sample);
   let trend = [];
   if (disk) {
@@ -1269,7 +1324,7 @@ async function dashboardView() {
       tsUnix: Math.floor(Date.now() / 1000), freeBytes: disk.available_bytes,
     }).catch(() => []);
   }
-  if (state.current !== "dashboard") return;
+  if (state.current !== "dashboard" || mySeq !== dashSeq) return;
   setView(buildDashboard({ disk, sample, battery, thermal, trend }));
 
   // Live updater: ONLY monitor_sample (cheap, in-process), updating the two
@@ -1285,6 +1340,7 @@ async function dashboardView() {
     replaceNode("dash-cpu-graph", graphCard("CPU", "cpu", "#f97316", "%", "dash-cpu-graph"));
     replaceNode("dash-mem-graph", graphCard("Memory", "mem", "#3b82f6", "%", "dash-mem-graph"));
   }, 2000);
+  if (mySeq !== dashSeq) { clearInterval(t); return; } // superseded before we registered
   activeTimers.push(t);
 }
 function replaceNode(id, node) {
@@ -1402,17 +1458,18 @@ async function settingsView() {
   const cb = h("input", { type: "checkbox" });
   cb.checked = enabled;
   cb.addEventListener("change", () => {
-    invoke("set_telemetry_enabled", { on: cb.checked }).catch((e) => { alert(String(e)); cb.checked = !cb.checked; });
+    invoke("set_telemetry_enabled", { on: cb.checked }).catch((e) => { uiToast(String(e), { danger: true }); cb.checked = !cb.checked; });
   });
   const sw = h("label", { class: "switch" }, cb, h("span", { class: "track" }));
 
   // Launch at login (menu bar app — starts hidden in the menu bar).
   const loginOn = await invoke("launch_at_login").catch(() => false);
+  if (state.current !== "settings") return; // navigated away mid-call
   const loginCb = h("input", { type: "checkbox" });
   loginCb.checked = loginOn;
   loginCb.addEventListener("change", () => {
     invoke("set_launch_at_login", { on: loginCb.checked })
-      .catch((e) => { alert(String(e)); loginCb.checked = !loginCb.checked; });
+      .catch((e) => { uiToast(String(e), { danger: true }); loginCb.checked = !loginCb.checked; });
   });
   const loginSw = h("label", { class: "switch" }, loginCb, h("span", { class: "track" }));
 

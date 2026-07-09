@@ -1,10 +1,13 @@
 // Tabibu — Tauri desktop shell. The Rust core is called directly through the
 // commands in `commands.rs` (no FFI bridge). See ADR-0003.
 //
-// Tabibu runs as a macOS MENU BAR app (agent): the tray icon is the primary
-// surface, the dashboard window is summoned from it, and closing the dashboard
-// hides it instead of quitting. Only the tray's Quit (or an explicit exit)
-// ends the process.
+// Tabibu is BOTH a normal desktop app and a menu-bar app: a manual launch
+// shows the dashboard (Regular — Dock icon + window) alongside a persistent
+// menu-bar tray. Closing the dashboard only HIDES it; the app stays Regular so
+// the Dock icon remains a live reopen affordance (Dock click → RunEvent::Reopen)
+// and the tray's Open Dashboard reopens it too. The process keeps running
+// either way. A login (autostart) launch starts quietly in the menu bar
+// (Accessory, no window) until first opened. Only Quit (tray / Cmd-Q) exits.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
@@ -15,22 +18,43 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            // Marker arg so a login (LaunchAgent) start can be told apart from a
+            // manual open: at login we start quietly in the menu bar; a manual
+            // open shows the dashboard too. See setup().
+            Some(vec!["--from-autostart"]),
         ))
         .setup(|app| {
-            // No Dock icon / app switcher entry. LSUIElement in Info.plist
-            // covers the bundle from launch; this covers `tauri dev`.
+            // A login (LaunchAgent) start passes `--from-autostart`; start
+            // quietly in the menu bar then (Accessory, dashboard hidden) so we
+            // don't pop a 1120x740 window on every login. A manual open has no
+            // such arg: show the dashboard (Regular, Dock icon) alongside the
+            // tray. After launch the app stays Regular; CloseRequested only
+            // hides the window (Dock icon persists), and RunEvent::Reopen /
+            // tray::show_main bring it back.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            {
+                let from_autostart = std::env::args().any(|a| a == "--from-autostart");
+                if from_autostart {
+                    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                } else {
+                    app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                }
+            }
             tray::setup(app)?;
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
-            // Closing the dashboard hides it; the app lives in the menu bar.
+            // Closing the dashboard only HIDES it — the process keeps running
+            // for the tray. The app stays Regular so its Dock icon remains a
+            // working reopen affordance (clicking it fires RunEvent::Reopen,
+            // handled below); the tray's Open Dashboard reopens it too. Only
+            // Quit (tray / Cmd-Q) actually exits.
             ("main", tauri::WindowEvent::CloseRequested { api, .. }) => {
                 api.prevent_close();
                 let _ = window.hide();
@@ -65,7 +89,6 @@ fn main() {
             commands::reveal_in_finder,
             commands::open_url,
             commands::trash_path,
-            commands::pick_folder,
             commands::telemetry_enabled,
             commands::set_telemetry_enabled,
             commands::record_deselection,
@@ -89,13 +112,20 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tabibu")
-        .run(|_app, event| {
-            // Keep running with zero visible windows (menu bar app). `code` is
-            // Some(_) only for explicit exit()/restart — let those through.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                if code.is_none() {
-                    api.prevent_exit();
-                }
+        .run(|_app, event| match event {
+            // Keep running with zero visible windows (menu bar app). `code:None`
+            // is a user-initiated close/last-window; Some(_) is an explicit
+            // exit()/restart, which we let through.
+            tauri::RunEvent::ExitRequested { api, code: None, .. } => {
+                api.prevent_exit();
             }
+            // Clicking the Dock icon (applicationShouldHandleReopen) with no
+            // visible window: bring the dashboard back. Without this the Dock
+            // icon is a dead affordance — the window never reappears.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+                tray::show_main(_app, None);
+            }
+            _ => {}
         });
 }

@@ -1,5 +1,6 @@
-//! Menu-bar tray — Tabibu's primary surface (macOS agent app). A status item
-//! with a live tooltip (CPU% + memory%), a right-click menu (Open Dashboard /
+//! Menu-bar tray — a co-equal surface alongside the dashboard window (the app
+//! runs as both a normal desktop app and a menu-bar app). A status item with a
+//! live tooltip (CPU% + memory%), a right-click menu (Open Dashboard /
 //! Settings / Pause Monitoring / Quit), and a left-click health popover (the
 //! `menubar` window). Sampling runs on a 5s cadence to stay light (within the
 //! monitor resource budget).
@@ -30,6 +31,15 @@ static PAUSED: AtomicBool = AtomicBool::new(false);
 /// the tray menu and the popover's buttons (via `commands::show_main_window`).
 pub fn show_main(app: &AppHandle, view: Option<&str>) {
     if let Some(win) = app.get_webview_window("main") {
+        // Become a Regular, activatable app so the window reliably takes focus
+        // and stays frontmost. This matters when reopening after a quiet
+        // (Accessory) autostart launch: as a pure Accessory app the window
+        // shows but never truly activates — it drops behind the still-active
+        // app the moment focus shifts (first click, scan starting), which reads
+        // as the window "closing". Once Regular the app stays Regular (close
+        // only hides the window), so a manual launch is already Regular here.
+        #[cfg(target_os = "macos")]
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
@@ -71,10 +81,16 @@ pub fn set_popover_detail(app: &AppHandle, open: bool) {
         let ms = mon.scale_factor();
         let left = f64::from(mon.position().x) / ms;
         let right = left + mon.size().width as f64 / ms;
-        x = x.min(right - w - 8.0).max(left + 8.0);
+        x = clamp_x(x, w, left, right);
     }
     let _ = pop.set_size(LogicalSize::new(w, h));
     let _ = pop.set_position(LogicalPosition::new(x, y));
+}
+
+/// Keep a `w`-wide window's left edge `x` inside `[left, right]` (logical px)
+/// with an 8px margin — so the popover never spills off the clicked display.
+fn clamp_x(x: f64, w: f64, left: f64, right: f64) -> f64 {
+    x.min(right - w - 8.0).max(left + 8.0)
 }
 
 /// Called from the `Focused(false)` auto-hide in `main.rs`.
@@ -125,7 +141,7 @@ fn toggle_popover(app: &AppHandle, click: PhysicalPosition<f64>) {
     if let Some(m) = &mon {
         let left = f64::from(m.position().x) / scale;
         let right = left + m.size().width as f64 / scale;
-        x = x.min(right - POPOVER_W - 8.0).max(left + 8.0);
+        x = clamp_x(x, POPOVER_W, left, right);
     }
     let _ = pop.set_position(LogicalPosition::new(x, y));
     let _ = pop.show();

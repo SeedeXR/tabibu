@@ -375,17 +375,6 @@ pub fn trash_path(path: String) -> Result<(), String> {
     trash::delete(&path).map_err(|e| e.to_string())
 }
 
-/// Native folder picker, done entirely in Rust (no reliance on the JS dialog
-/// global). Returns the chosen path, or null if cancelled.
-#[tauri::command(async)]
-pub fn pick_folder(app: tauri::AppHandle) -> Option<String> {
-    use tauri_plugin_dialog::DialogExt;
-    app.dialog()
-        .file()
-        .blocking_pick_folder()
-        .map(|p| p.to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Deselection telemetry — opt-in, privacy-respecting (no paths/contents).
 // ---------------------------------------------------------------------------
@@ -769,3 +758,4 @@ pub fn popover_detail(app: tauri::AppHandle, open: bool) {
 pub fn uptime_secs() -> u64 {
     sysinfo::System::uptime()
 }
+
