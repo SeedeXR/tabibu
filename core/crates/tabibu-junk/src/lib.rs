@@ -67,6 +67,18 @@ const DEV_CACHE_TARGETS: &[(&str, SafetyTier, &str)] = &[
         SafetyTier::Safe,
         "Homebrew download cache — formulae are re-downloaded on demand",
     ),
+    // Hidden dot-directory caches (Finder hides these; users reach them via
+    // Cmd+Shift+G). Review tier — broad, so surfaced but never auto-selected.
+    (
+        ".cache",
+        SafetyTier::Review,
+        "Hidden XDG cache (~/.cache) — disposable caches for tools like pip, uv, Playwright, Hugging Face",
+    ),
+    (
+        ".gradle/caches",
+        SafetyTier::Review,
+        "Gradle build & dependency cache — rebuilt/re-downloaded on next build",
+    ),
 ];
 
 pub mod large_old;

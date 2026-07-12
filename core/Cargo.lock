@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-brew"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "rayon",
  "serde",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-dupes"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "blake3",
  "criterion",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-engine"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "proptest",
  "serde",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-junk"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "rayon",
  "tabibu-engine",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-malware"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "plist",
  "serde",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-monitor"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "libc",
  "serde",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-telemetry"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "serde",
  "serde_json",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "tabibu-uninstall"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "plist",
  "tabibu-engine",
@@ -1037,8 +1037,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabibu-universal"
+version = "0.1.51"
+dependencies = [
+ "libc",
+ "serde",
+ "tabibu-engine",
+ "tempfile",
+]
+
+[[package]]
 name = "tabibu-walk"
-version = "0.1.5"
+version = "0.1.51"
 dependencies = [
  "criterion",
  "rayon",

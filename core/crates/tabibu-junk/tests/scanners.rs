@@ -191,14 +191,19 @@ fn dev_cache_reports_only_existing_locations() {
     write_file(&npm.join("content-v2/blob"), b"12"); // 2 B
     let brew = home.path().join("Library/Caches/Homebrew");
     fs::create_dir_all(&brew).unwrap(); // empty dir still reported, size 0
+                                        // Hidden dot-directory caches (surfaced via Cmd+Shift+G in Finder).
+    let xdg = home.path().join(".cache");
+    write_file(&xdg.join("uv/blob"), b"1234"); // 4 B
+    let gradle = home.path().join(".gradle/caches");
+    write_file(&gradle.join("modules-2/x.jar"), b"123"); // 3 B
 
     let ctx = make_ctx(home.path());
     let items = run(&DevCacheScanner, &ctx);
 
     assert_eq!(
         items.len(),
-        3,
-        "non-existent dev caches must be skipped silently"
+        5,
+        "non-existent dev caches must be skipped silently; hidden caches included"
     );
     assert_all_under(&items, home.path());
 
@@ -217,6 +222,14 @@ fn dev_cache_reports_only_existing_locations() {
     let brew_item = items.iter().find(|i| i.path == brew).unwrap();
     assert_eq!(brew_item.tier, SafetyTier::Safe);
     assert_eq!(brew_item.size_bytes, 0);
+
+    // Hidden caches: found, Review tier (broad → never auto-selected).
+    let xdg_item = items.iter().find(|i| i.path == xdg).unwrap();
+    assert_eq!(xdg_item.tier, SafetyTier::Review);
+    assert_eq!(xdg_item.size_bytes, 4);
+    let gradle_item = items.iter().find(|i| i.path == gradle).unwrap();
+    assert_eq!(gradle_item.tier, SafetyTier::Review);
+    assert_eq!(gradle_item.size_bytes, 3);
     for item in &items {
         assert_eq!(item.category, Category::DevCache);
     }

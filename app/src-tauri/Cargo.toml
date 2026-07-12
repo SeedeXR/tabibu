@@ -1,6 +1,6 @@
 [package]
 name = "tabibu-app"
-version = "0.1.5"
+version = "0.1.51"
 edition = "2021"
 rust-version = "1.85"
 publish = false
@@ -35,6 +35,7 @@ tabibu-brew = { path = "../../core/crates/tabibu-brew" }
 tabibu-malware = { path = "../../core/crates/tabibu-malware" }
 tabibu-monitor = { path = "../../core/crates/tabibu-monitor" }
 tabibu-telemetry = { path = "../../core/crates/tabibu-telemetry" }
+tabibu-universal = { path = "../../core/crates/tabibu-universal" }
 tauri-plugin-notification = "2.3.3"
 
 [profile.release]

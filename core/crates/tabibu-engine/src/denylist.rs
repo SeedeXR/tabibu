@@ -24,6 +24,8 @@ const HOME_DENY: &[&str] = &[
     "Documents",
     "Desktop",
     "Pictures",
+    "Movies", // media libraries — sensitive, non-disposable user data
+    "Music",
     "Library/Mail",
     "Library/Messages",
     "Library/Mobile Documents", // iCloud Drive
@@ -125,6 +127,8 @@ mod tests {
     fn user_data_denied() {
         for p in [
             "/Users/test/Documents/thesis.pages",
+            "/Users/test/Movies/wedding.mov",
+            "/Users/test/Music/album/track.flac",
             "/Users/test/Library/Mail/V10/x",
             "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/a",
         ] {

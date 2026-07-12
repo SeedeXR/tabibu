@@ -182,7 +182,9 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 /* ---------- Progress ---------- */
 .spinner {
   width: 18px; height: 18px; border: 2px solid var(--track);
-  border-top-color: var(--accent); border-radius: 50%;
+  /* Match the active section's accent (set on .view by navigate()); falls
+     back to the app accent outside a themed view. */
+  border-top-color: var(--view-accent, var(--accent)); border-radius: 50%;
   animation: spin 0.8s linear infinite; flex: none;
 }
 @keyframes spin { to { transform: rotate(360deg); } }

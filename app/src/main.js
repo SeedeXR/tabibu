@@ -104,6 +104,7 @@ const NAV = [
   { section: "Applications", items: [
     { id: "uninstall", title: "Uninstaller", icon: "rocket" },
     { id: "brew", title: "Developer / CLI", icon: "terminal" },
+    { id: "universal", title: "Universal Binaries", icon: "layers" },
     { id: "startup", title: "Startup Items", icon: "activity" },
   ]},
   { section: "Health", items: [
@@ -118,7 +119,7 @@ const NAV = [
 // Per-view accent (honest theming, inspired by CleanMyMac's section colors).
 const THEME = {
   dashboard: "#14b8a6", smart: "#8b5cf6", junk: "#16a34a", dupes: "#3b82f6",
-  large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", startup: "#f59e0b", disk: "#a855f7",
+  large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", universal: "#0891b2", startup: "#f59e0b", disk: "#a855f7",
   memory: "#f97316", battery: "#22c55e", security: "#ec4899", settings: "#64748b",
 };
 // Hero copy + sub-features per scan view.
@@ -1499,6 +1500,72 @@ async function settingsView() {
 }
 
 // =====================================================================
+// Universal Binaries — READ-ONLY report (detect + report; user decides)
+// =====================================================================
+const uniState = { phase: "idle", report: null, error: null };
+async function universalView() {
+  setTitle("Universal Binaries", []);
+  const u = uniState;
+  if (u.phase === "scanning") return setView(cancellableSpinner("Scanning apps for Intel + Apple Silicon binaries…"));
+  if (u.phase === "error") return setView(centered("circle-alert", "Something went wrong", u.error, "Try Again", () => { u.phase = "idle"; render(); }));
+  if (u.phase === "done") return setView(universalReport(u.report));
+  const hero = heroLanding("layers", "Universal Binaries",
+    "Find apps shipping both Intel (x86_64) and Apple Silicon (arm64) code. Your Mac runs only one slice — the other is reclaimable weight. Read-only: Tabibu measures and reports; you decide whether to strip.",
+    ["Scans /Applications & ~/Applications", "Measures the reclaimable (non-native) slice per app", "Shows signing status — stripping can break signed apps"],
+    runUniversalScan);
+  return setView(hero);
+}
+async function runUniversalScan() {
+  const u = uniState;
+  u.phase = "scanning"; render();
+  try {
+    u.report = await invoke("scan_universal");
+    u.phase = "done";
+  } catch (e) {
+    u.phase = "error"; u.error = String(e);
+  }
+  if (state.current === "universal") render();
+}
+function signingBadge(sig) {
+  // Only ad-hoc / unsigned binaries re-sign cleanly after a strip; anything
+  // signed or notarized is likely to break, so flag it Review-colored.
+  const strippable = sig === "ad-hoc" || sig === "unsigned";
+  return h("span", {
+    class: "btag " + (strippable ? "safe" : "review"),
+    title: strippable
+      ? "Ad-hoc/unsigned — thinning + re-sign is reliable."
+      : "Modifying this binary invalidates its signature; the app may refuse to launch.",
+  }, strippable ? `${sig} · strippable` : `${sig} · strip may break`);
+}
+function universalReport(rep) {
+  const wrap = h("div", { class: "review" });
+  wrap.append(h("div", { class: "notice", style: "margin:16px 24px" },
+    icon("info"),
+    h("div", { class: "body" },
+      h("h3", {}, `${fmtBytes(rep.total_reclaimable_bytes)} reclaimable across ${rep.apps.length} app${rep.apps.length === 1 ? "" : "s"}`),
+      h("p", {}, `This Mac runs ${rep.native_arch}. The apps below also carry other-architecture code it never executes. Reclaiming it means lipo-thinning the binary, which invalidates the app's code signature — signed & notarized apps may stop launching. Tabibu reports only and never modifies anything here; strip manually (e.g. \`lipo -thin ${rep.native_arch}\`) if you accept the risk.`),
+      h("button", { style: "margin-top:8px", onClick: () => { uniState.phase = "idle"; render(); } }, "Rescan"))));
+  if (!rep.apps.length) {
+    wrap.append(centered("layers", "No universal binaries found",
+      `Every app scanned already ships ${rep.native_arch}-only, or none were found in /Applications.`));
+    return wrap;
+  }
+  const list = h("div", { class: "list" });
+  for (const a of rep.apps) {
+    const chips = a.arches.map((x) => h("span", { class: "btag" + (x === rep.native_arch ? " safe" : "") }, x));
+    list.append(h("div", { class: "item" },
+      h("div", { class: "path" },
+        h("div", { class: "p", title: a.path }, a.name),
+        h("div", { class: "reason" }, `${a.fat_file_count} universal file${a.fat_file_count === 1 ? "" : "s"} · ${displayPath(a.path)}`)),
+      h("div", { class: "btags" }, ...chips, signingBadge(a.signing)),
+      h("span", { class: "isize" }, fmtBytes(a.reclaimable_bytes)),
+      h("button", { onClick: () => invoke("reveal_in_finder", { path: a.path }) }, "Reveal")));
+  }
+  wrap.append(list);
+  return wrap;
+}
+
+// =====================================================================
 // router
 // =====================================================================
 function render() {
@@ -1512,6 +1579,7 @@ function render() {
   if (id === "battery") return batteryView();
   if (id === "uninstall") return uninstallerView();
   if (id === "brew") return brewView();
+  if (id === "universal") return universalView();
   if (id === "startup") return startupView();
   if (id === "security") return securityView();
   if (id === "settings") return settingsView();

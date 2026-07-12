@@ -125,6 +125,12 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
         "Library/Developer/CoreSimulator/Caches",
         ".npm",
         ".cargo/registry/cache",
+        // Hidden dot-directory caches surfaced by DevCacheScanner (must be
+        // allowed roots or the GuardedSink drops their items). Scoped to the
+        // exact cache subdir — NOT all of ~/.gradle, which also holds
+        // gradle.properties (signing keys) and init scripts.
+        ".cache",
+        ".gradle/caches",
         "Downloads",
     ]
     .iter()

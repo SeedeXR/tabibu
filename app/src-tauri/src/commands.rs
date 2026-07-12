@@ -177,12 +177,47 @@ pub fn reclaim(
     mut items: Vec<CleanupItem>,
     extra_roots: Vec<String>,
 ) -> Result<ReclaimReport, String> {
+    let home = system::home_dir();
+    // Defense in depth against a compromised/injected webview (the CSP is the
+    // first barrier; this is the second):
+    //   1. Force every action to Trash. The scanners only ever emit Trash, so
+    //      a Delete (permanent `remove_dir_all`) or Truncate could only come
+    //      from abuse — coercing to Trash keeps reclaim always reversible.
+    //   2. Only honor extra_roots inside the user's home. Every real caller
+    //      passes [], [home] or [home/Library]; dropping anything outside home
+    //      stops the allowed-root set being widened to other volumes or "/".
+    // (The engine denylist still rejects protected/`..`/system paths on top.)
     for item in &mut items {
         item.selected = true;
+        item.action = tabibu_engine::ReclaimAction::Trash;
     }
-    let ctx = system::default_scan_ctx(&extra_roots);
+    let safe_roots: Vec<String> = extra_roots
+        .into_iter()
+        .filter(|r| std::path::Path::new(r).starts_with(&home))
+        .collect();
+    let ctx = system::default_scan_ctx(&safe_roots);
     engine_reclaim(&ctx, &items, std::path::Path::new(&system::undo_dir()))
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Universal ("fat") binaries — READ-ONLY report (never modifies files).
+// ---------------------------------------------------------------------------
+
+/// Scan `/Applications`, `~/Applications` and `/Applications/Utilities` for
+/// universal binaries and report the reclaimable (non-native) slice bytes per
+/// app. Read-only: nothing is stripped or trashed — the user decides whether
+/// to `lipo`-thin manually (it can break signed apps). Registered in
+/// CURRENT_SYNC so Stop / navigating away cancels the walk.
+#[tauri::command(async)]
+pub fn scan_universal() -> tabibu_universal::UniversalReport {
+    let cancel = begin_sync_op();
+    let home = system::home_dir();
+    let roots = vec![
+        std::path::PathBuf::from("/Applications"),
+        home.join("Applications"),
+    ];
+    tabibu_universal::scan(&roots, &cancel)
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +373,13 @@ pub fn startup_items() -> system::StartupReport {
 
 #[tauri::command(async)]
 pub fn reveal_in_finder(path: String) {
+    // Absolute paths only: `open` uses getopt, so an argument beginning with
+    // '-' would be parsed as a flag (arg injection — e.g. launch an app),
+    // exactly what open_url/trash_path guard against. An absolute path starts
+    // with '/', so it can never be mistaken for an option.
+    if !std::path::Path::new(&path).is_absolute() {
+        return;
+    }
     let _ = std::process::Command::new("/usr/bin/open")
         .arg("-R")
         .arg(path)

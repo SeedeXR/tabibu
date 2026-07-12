@@ -1,0 +1,18 @@
+[package]
+name = "tabibu-universal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false               # internal workspace crate, never published
+
+[dependencies]
+tabibu-engine.workspace = true # CancelToken
+serde.workspace = true
+libc.workspace = true          # sysctl: detect Apple Silicon hardware
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

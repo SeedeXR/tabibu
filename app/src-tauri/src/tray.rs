@@ -31,13 +31,13 @@ static PAUSED: AtomicBool = AtomicBool::new(false);
 /// the tray menu and the popover's buttons (via `commands::show_main_window`).
 pub fn show_main(app: &AppHandle, view: Option<&str>) {
     if let Some(win) = app.get_webview_window("main") {
-        // Become a Regular, activatable app so the window reliably takes focus
-        // and stays frontmost. This matters when reopening after a quiet
-        // (Accessory) autostart launch: as a pure Accessory app the window
-        // shows but never truly activates — it drops behind the still-active
-        // app the moment focus shifts (first click, scan starting), which reads
-        // as the window "closing". Once Regular the app stays Regular (close
-        // only hides the window), so a manual launch is already Regular here.
+        // Become a Regular, activatable app (Dock icon + a window that reliably
+        // takes focus and stays frontmost). This is the promotion path back
+        // from Accessory — after a close (which hides the window and drops to
+        // Accessory) or a quiet autostart launch. As a pure Accessory app the
+        // window shows but never truly activates: it drops behind the
+        // still-active app the moment focus shifts, which reads as the window
+        // "closing".
         #[cfg(target_os = "macos")]
         let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         let _ = win.show();

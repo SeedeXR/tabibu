@@ -3,11 +3,11 @@
 //
 // Tabibu is BOTH a normal desktop app and a menu-bar app: a manual launch
 // shows the dashboard (Regular — Dock icon + window) alongside a persistent
-// menu-bar tray. Closing the dashboard only HIDES it; the app stays Regular so
-// the Dock icon remains a live reopen affordance (Dock click → RunEvent::Reopen)
-// and the tray's Open Dashboard reopens it too. The process keeps running
-// either way. A login (autostart) launch starts quietly in the menu bar
-// (Accessory, no window) until first opened. Only Quit (tray / Cmd-Q) exits.
+// menu-bar tray. Closing the dashboard hides the window AND drops to Accessory,
+// so the Dock icon goes away and only the tray remains; the process keeps
+// running and you reopen from the tray (→ Regular + Dock icon again). A login
+// (autostart) launch starts quietly in the menu bar (Accessory, no window)
+// until first opened. Only Quit (tray / Cmd-Q) exits.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
@@ -31,9 +31,9 @@ fn main() {
             // quietly in the menu bar then (Accessory, dashboard hidden) so we
             // don't pop a 1120x740 window on every login. A manual open has no
             // such arg: show the dashboard (Regular, Dock icon) alongside the
-            // tray. After launch the app stays Regular; CloseRequested only
-            // hides the window (Dock icon persists), and RunEvent::Reopen /
-            // tray::show_main bring it back.
+            // tray. CloseRequested then hides the window and drops to Accessory
+            // (Dock icon gone, tray only); tray::show_main promotes back to
+            // Regular on reopen.
             #[cfg(target_os = "macos")]
             {
                 let from_autostart = std::env::args().any(|a| a == "--from-autostart");
@@ -50,14 +50,19 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
-            // Closing the dashboard only HIDES it — the process keeps running
-            // for the tray. The app stays Regular so its Dock icon remains a
-            // working reopen affordance (clicking it fires RunEvent::Reopen,
-            // handled below); the tray's Open Dashboard reopens it too. Only
-            // Quit (tray / Cmd-Q) actually exits.
+            // Closing the dashboard (red traffic-light) hides the window AND
+            // drops the app to Accessory, so the Dock icon disappears and only
+            // the menu-bar tray remains. The process keeps running; reopen from
+            // the tray (Open Dashboard / the popover), which calls
+            // tray::show_main → back to Regular + Dock icon. Only Quit
+            // (tray / Cmd-Q) actually exits.
             ("main", tauri::WindowEvent::CloseRequested { api, .. }) => {
                 api.prevent_close();
                 let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                let _ = window
+                    .app_handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             // The tray popover dismisses itself when it loses focus. The
             // timestamp lets the tray Click handler tell "dismiss click"
@@ -97,6 +102,7 @@ fn main() {
             commands::smart_status,
             commands::scan_orphans,
             commands::scan_malware,
+            commands::scan_universal,
             commands::quarantine,
             commands::record_free_space,
             commands::brew_analyze,
@@ -112,20 +118,19 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tabibu")
-        .run(|_app, event| match event {
-            // Keep running with zero visible windows (menu bar app). `code:None`
-            // is a user-initiated close/last-window; Some(_) is an explicit
-            // exit()/restart, which we let through.
-            tauri::RunEvent::ExitRequested { api, code: None, .. } => {
-                api.prevent_exit();
-            }
+        .run(|_app, event| {
+            // NOTE: we do NOT prevent ExitRequested. Staying alive when the
+            // dashboard is closed is already handled by prevent_close in the
+            // CloseRequested handler (the window is hidden, never destroyed, so
+            // no last-window exit fires). The only remaining ExitRequested
+            // sources are genuine quits — the tray's Quit (app.exit), the app
+            // menu / Cmd-Q, and logout/shutdown — all of which SHOULD exit.
             // Clicking the Dock icon (applicationShouldHandleReopen) with no
-            // visible window: bring the dashboard back. Without this the Dock
-            // icon is a dead affordance — the window never reappears.
+            // visible window brings the dashboard back; without this the Dock
+            // icon would be a dead affordance.
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
                 tray::show_main(_app, None);
             }
-            _ => {}
         });
 }
