@@ -3452,7 +3452,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-notification",
- "trash",
 ]
 
 [[package]]

@@ -57,9 +57,33 @@ fn size_on_disk(path: &Path) -> u64 {
     walk(path)
 }
 
+/// Move `path` to the Trash quietly. macOS's default trash mechanism (the
+/// `trash` crate's `Finder`/AppleScript backend) plays the Finder trash sound
+/// on EVERY call and spawns `osascript` each time — so reclaiming hundreds of
+/// cache items machine-guns that sound and is slow. `NsFileManager`
+/// (`trashItemAtURL`) trashes the same items — still recoverable from the
+/// Trash — with no sound and no per-item process spawn. Centralized here so
+/// every reclaim flow (junk, duplicates, uninstaller) is quiet and fast.
+///
+/// # Errors
+/// Any failure moving `path` to the Trash.
+pub fn move_to_trash(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut ctx = trash::TrashContext::default();
+        ctx.set_delete_method(DeleteMethod::NsFileManager);
+        ctx.delete(path).map_err(std::io::Error::other)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        trash::delete(path).map_err(std::io::Error::other)
+    }
+}
+
 fn perform(item: &CleanupItem) -> std::io::Result<()> {
     match item.action {
-        ReclaimAction::Trash => trash::delete(&item.path).map_err(std::io::Error::other),
+        ReclaimAction::Trash => move_to_trash(&item.path),
         ReclaimAction::Delete => {
             let meta = fs::symlink_metadata(&item.path)?;
             if meta.is_dir() {

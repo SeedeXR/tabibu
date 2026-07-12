@@ -19,5 +19,5 @@ pub mod undo;
 pub use cancel::CancelToken;
 pub use item::{Category, CleanupItem, ReclaimAction, SafetyTier};
 pub use orchestrate::{smart_scan, ScannerOutcome, SmartScanReport};
-pub use reclaim::{reclaim, ReclaimError, ReclaimReport};
+pub use reclaim::{move_to_trash, reclaim, ReclaimError, ReclaimReport};
 pub use scanner::{ScanCtx, ScanError, Scanner};

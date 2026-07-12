@@ -414,7 +414,8 @@ pub fn trash_path(path: String) -> Result<(), String> {
     if let Some(reason) = tabibu_engine::denylist::denied(p, &system::home_dir()) {
         return Err(format!("protected path ({reason:?}); refusing to trash"));
     }
-    trash::delete(&path).map_err(|e| e.to_string())
+    // Same silent (no Finder sound), spawn-free trash path as reclaim uses.
+    tabibu_engine::move_to_trash(p).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
