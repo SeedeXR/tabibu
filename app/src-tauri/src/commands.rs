@@ -760,6 +760,65 @@ pub fn brew_uninstall(name: String, cask: bool) -> tabibu_brew::ActionOutcome {
 }
 
 // ---------------------------------------------------------------------
+// Docker: read-only analysis + prune (all removal delegated to `docker`).
+// ---------------------------------------------------------------------
+
+fn docker_not_found_outcome() -> tabibu_docker::ActionOutcome {
+    tabibu_docker::ActionOutcome {
+        ok: false,
+        freed_bytes: 0,
+        message: "The docker CLI was not found.".to_string(),
+    }
+}
+
+fn with_docker<F>(f: F) -> tabibu_docker::ActionOutcome
+where
+    F: FnOnce(&tabibu_docker::Docker) -> tabibu_docker::ActionOutcome,
+{
+    tabibu_docker::Docker::detect().map_or_else(docker_not_found_outcome, |d| f(&d))
+}
+
+/// Read-only Docker disk-usage analysis (`docker system df`). Returns
+/// `status.installed = false` if the CLI is absent, or `running = false` if the
+/// daemon isn't up.
+#[tauri::command(async)]
+pub fn docker_analyze() -> tabibu_docker::Report {
+    tabibu_docker::Docker::detect().map_or_else(
+        || tabibu_docker::Report {
+            status: tabibu_docker::Status { installed: false, running: false, version: None },
+            artifacts: Vec::new(),
+            total_reclaimable_bytes: 0,
+        },
+        |d| d.analyze(),
+    )
+}
+
+/// `docker builder prune` (unused build cache).
+#[tauri::command(async)]
+pub fn docker_prune_build_cache() -> tabibu_docker::ActionOutcome {
+    with_docker(tabibu_docker::Docker::prune_build_cache)
+}
+
+/// `docker image prune -a` (every image not used by a container).
+#[tauri::command(async)]
+pub fn docker_prune_images() -> tabibu_docker::ActionOutcome {
+    with_docker(tabibu_docker::Docker::prune_images)
+}
+
+/// `docker container prune` (all stopped containers).
+#[tauri::command(async)]
+pub fn docker_prune_containers() -> tabibu_docker::ActionOutcome {
+    with_docker(tabibu_docker::Docker::prune_containers)
+}
+
+/// `docker volume prune` (unused anonymous volumes only). ⚠ Volumes may hold
+/// persistent data — the UI confirms this hard before calling.
+#[tauri::command(async)]
+pub fn docker_prune_volumes() -> tabibu_docker::ActionOutcome {
+    with_docker(tabibu_docker::Docker::prune_volumes)
+}
+
+// ---------------------------------------------------------------------
 // Menu bar app lifecycle (tray popover + Settings)
 // ---------------------------------------------------------------------
 

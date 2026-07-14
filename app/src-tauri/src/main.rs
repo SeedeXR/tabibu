@@ -46,7 +46,9 @@ fn main() {
                     app.set_activation_policy(tauri::ActivationPolicy::Regular);
                 }
             }
-            tray::setup(app)?;
+            // The tray is created on RunEvent::Ready (see run() below), NOT here:
+            // an NSStatusItem added during setup() — before NSApplication has
+            // finished launching — silently fails to attach to the menu bar.
             Ok(())
         })
         .on_window_event(|window, event| match (window.label(), event) {
@@ -109,6 +111,11 @@ fn main() {
             commands::brew_cleanup,
             commands::brew_autoremove,
             commands::brew_uninstall,
+            commands::docker_analyze,
+            commands::docker_prune_build_cache,
+            commands::docker_prune_images,
+            commands::docker_prune_containers,
+            commands::docker_prune_volumes,
             commands::launch_at_login,
             commands::set_launch_at_login,
             commands::show_main_window,
@@ -118,7 +125,15 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tabibu")
-        .run(|_app, event| {
+        .run(|app, event| match event {
+            // Create the menu-bar tray only once NSApplication has finished
+            // launching. Building the NSStatusItem earlier (in setup()) returns
+            // Ok but the item never appears in the menu bar.
+            tauri::RunEvent::Ready => {
+                if let Err(e) = tray::setup(app) {
+                    eprintln!("tray setup failed: {e}");
+                }
+            }
             // NOTE: we do NOT prevent ExitRequested. Staying alive when the
             // dashboard is closed is already handled by prevent_close in the
             // CloseRequested handler (the window is hidden, never destroyed, so
@@ -129,8 +144,9 @@ fn main() {
             // visible window brings the dashboard back; without this the Dock
             // icon would be a dead affordance.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
-                tray::show_main(_app, None);
+            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+                tray::show_main(app, None);
             }
+            _ => {}
         });
 }

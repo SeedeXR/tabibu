@@ -104,6 +104,7 @@ const NAV = [
   { section: "Applications", items: [
     { id: "uninstall", title: "Uninstaller", icon: "rocket" },
     { id: "brew", title: "Developer / CLI", icon: "terminal" },
+    { id: "docker", title: "Docker", icon: "container" },
     { id: "universal", title: "Universal Binaries", icon: "layers" },
     { id: "startup", title: "Startup Items", icon: "activity" },
   ]},
@@ -119,7 +120,7 @@ const NAV = [
 // Per-view accent (honest theming, inspired by CleanMyMac's section colors).
 const THEME = {
   dashboard: "#14b8a6", smart: "#8b5cf6", junk: "#16a34a", dupes: "#3b82f6",
-  large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", universal: "#0891b2", startup: "#f59e0b", disk: "#a855f7",
+  large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", docker: "#2496ed", universal: "#0891b2", startup: "#f59e0b", disk: "#a855f7",
   memory: "#f97316", battery: "#22c55e", security: "#ec4899", settings: "#64748b",
 };
 // Hero copy + sub-features per scan view.
@@ -174,6 +175,7 @@ function navigate(id) {
   // Leaving the Developer/CLI view drops its transient action toast + stale flag
   // so neither can reappear without context on return.
   if (id !== "brew") { brewState.outcome = null; brewState.stale = false; }
+  if (id !== "docker") { dockerState.outcome = null; dockerState.stale = false; }
   render();
 }
 function setTitle(t, actions = []) {
@@ -1213,6 +1215,120 @@ async function brewUninstall(p) {
 }
 
 // =====================================================================
+// Docker (delegates every prune to the docker CLI)
+// =====================================================================
+const dockerState = { phase: "idle", report: null, error: null, working: null, outcome: null, stale: false };
+
+// What each artifact category means + the exact command it prunes to. `danger`
+// tiers volumes (they hold persistent data). One card per category.
+const DOCKER_CARDS = {
+  build_cache: { icon: "layers", title: "Build cache",
+    desc: "Layers cached from `docker build`. Rebuilt automatically next build.",
+    cmd: "docker_prune_build_cache", label: "Prune build cache",
+    confirm: "Prune unused Docker build cache?\n\nRuns “docker builder prune”. Cache is rebuilt on your next build — nothing you're running is affected." },
+  images: { icon: "copy", title: "Images",
+    desc: "Images not used by any container (they re-download / rebuild when next needed).",
+    cmd: "docker_prune_images", label: "Remove unused",
+    confirm: "Remove all images not used by a container?\n\nRuns “docker image prune -a”. Images in use by any container (even stopped) are kept; removed ones are re-pulled or rebuilt when next needed." },
+  containers: { icon: "trash-2", title: "Stopped containers",
+    desc: "Containers that have exited. Running containers are never touched.",
+    cmd: "docker_prune_containers", label: "Remove stopped",
+    confirm: "Remove all stopped containers?\n\nRuns “docker container prune”. Running containers are not affected." },
+  volumes: { icon: "package", title: "Volumes", danger: true,
+    desc: "⚠ Anonymous volumes not attached to a container. Volumes can hold databases and other persistent data.",
+    cmd: "docker_prune_volumes", label: "Remove anonymous",
+    confirm: "Remove UNUSED ANONYMOUS Docker volumes?\n\n⚠ Volumes hold persistent data (databases, etc.). This runs “docker volume prune”, which removes only anonymous volumes not attached to any container — NAMED volumes are kept. This is NOT reversible. Continue only if you're sure you don't need that data." },
+};
+
+async function dockerView() {
+  setTitle("Docker", []);
+  const d = dockerState;
+  if (d.phase === "idle") return setView(heroLanding("container", "Docker cleanup",
+    "Reclaim space from Docker: build cache, images and containers you no longer use, and unused volumes. Every removal is delegated to Docker's own `prune` commands — read-only analysis first.",
+    ["Safe: every removal is a `docker … prune` you confirm", "Build cache, unused images & stopped containers", "Unused volumes flagged as risky (they hold data)"],
+    analyzeDocker));
+  if (d.phase === "analyzing") return setView(centeredSpinner("Reading Docker disk usage…"));
+  if (d.phase === "working") return setView(centeredSpinner(d.working || "Working…"));
+  if (d.phase === "error") return setView(centered("circle-alert", "Docker error", d.error, "Back", () => { d.phase = "idle"; render(); }));
+  return setView(renderDockerReport());
+}
+
+async function analyzeDocker() {
+  const d = dockerState;
+  d.outcome = null;
+  d.phase = "analyzing"; render();
+  try { d.report = await invoke("docker_analyze"); d.stale = false; d.phase = "ready"; }
+  catch (e) { d.phase = "error"; d.error = String(e); }
+  render();
+}
+
+async function refreshDockerAfterAction() {
+  const d = dockerState;
+  try { d.report = await invoke("docker_analyze"); d.stale = false; }
+  catch { d.stale = true; }
+  d.phase = "ready"; render();
+}
+
+async function runDockerAction(card) {
+  const d = dockerState;
+  if (!(await uiConfirm(card.confirm, { danger: !!card.danger, okLabel: card.label }))) return;
+  d.phase = "working"; d.working = `Running ${card.label}…`; render();
+  try { d.outcome = await invoke(card.cmd); }
+  catch (e) { d.outcome = { ok: false, freed_bytes: 0, message: String(e) }; }
+  await refreshDockerAfterAction();
+}
+
+function renderDockerReport() {
+  const d = dockerState, r = d.report;
+  if (!r.status.installed) {
+    return centered("container", "Docker not found",
+      "The docker CLI wasn't found. This screen reclaims space from Docker (build cache, images, containers, volumes). Install Docker Desktop to use it here.",
+      "Re-check", analyzeDocker);
+  }
+  if (!r.status.running) {
+    return centered("container", "Docker isn't running",
+      "The docker CLI is installed but its daemon isn't responding. Start Docker Desktop, then re-check.",
+      "Re-check", analyzeDocker);
+  }
+  const wrap = h("div", { class: "review" });
+  wrap.append(h("div", { class: "row", style: "padding:16px 24px;align-items:center" },
+    h("div", {},
+      h("div", { style: "font-weight:600" }, r.total_reclaimable_bytes > 0 ? `${fmtBytes(r.total_reclaimable_bytes)} reclaimable` : "Nothing to reclaim"),
+      h("div", { class: "dim", style: "font-size:11px" }, r.status.version || "Docker")),
+    h("div", { class: "spacer" }),
+    h("button", { onClick: analyzeDocker }, "Re-analyze")));
+  if (d.outcome) {
+    const o = d.outcome;
+    wrap.append(h("div", { class: o.ok ? "toast" : "toast-fail", style: "margin:0 24px 10px" },
+      h("div", { style: "font-weight:600;margin-bottom:4px" }, o.ok ? (o.freed_bytes ? `Done — about ${fmtBytes(o.freed_bytes)} freed` : "Done") : "Could not complete"),
+      h("pre", { class: "brew-out" }, o.message)));
+  }
+  if (d.stale) wrap.append(h("div", { class: "toast-fail", style: "margin:0 24px 10px" },
+    h("div", { class: "ln" }, "The prune completed, but Docker's disk usage couldn't be re-read — figures may be stale. Click “Re-analyze”.")));
+  // One card per artifact category Docker reported (order: cache, images,
+  // containers, volumes — volumes last since it's the risky one).
+  const order = ["build_cache", "images", "containers", "volumes"];
+  const byKind = Object.fromEntries(r.artifacts.map((a) => [a.kind, a]));
+  for (const kind of order) {
+    const a = byKind[kind], card = DOCKER_CARDS[kind];
+    if (!a || !card) continue;
+    wrap.append(dockerCard(a, card));
+  }
+  return wrap;
+}
+
+function dockerCard(a, card) {
+  const reclaimable = Number(a.reclaimable_bytes);
+  const has = reclaimable > 0;
+  return h("div", { class: "brew-card" },
+    h("div", { class: "bc-icon" }, icon(card.icon)),
+    h("div", { style: "flex:1;min-width:0" },
+      h("div", { style: "font-weight:600" }, `${card.title} — ${has ? `${fmtBytes(reclaimable)} reclaimable` : "nothing to reclaim"}`),
+      h("div", { class: "dim", style: "font-size:11px" }, `${a.total_count} total · ${a.active_count} active · ${card.desc}`)),
+    has ? h("button", { class: card.danger ? "danger" : "primary", onClick: () => runDockerAction(card) }, card.label) : null);
+}
+
+// =====================================================================
 // Startup
 // =====================================================================
 async function startupView() {
@@ -1579,6 +1695,7 @@ function render() {
   if (id === "battery") return batteryView();
   if (id === "uninstall") return uninstallerView();
   if (id === "brew") return brewView();
+  if (id === "docker") return dockerView();
   if (id === "universal") return universalView();
   if (id === "startup") return startupView();
   if (id === "security") return securityView();

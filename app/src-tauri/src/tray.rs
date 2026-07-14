@@ -11,10 +11,14 @@ use std::time::{Duration, Instant};
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition};
+use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition};
 use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "tabibu-tray";
+/// The menu-bar status-item icon: a monochrome gourd silhouette (tilted 45°),
+/// used as a macOS template image. Kept as a const so the regression test
+/// exercises the exact bytes production ships.
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-template.png");
 /// Popover width in logical px — must match the `menubar` window in
 /// tauri.conf.json.
 const POPOVER_W: f64 = 360.0;
@@ -148,7 +152,7 @@ fn toggle_popover(app: &AppHandle, click: PhysicalPosition<f64>) {
     let _ = pop.set_focus();
 }
 
-pub fn setup(app: &App) -> tauri::Result<()> {
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItemBuilder::with_id("open", "Open Dashboard").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;
     let pause = MenuItemBuilder::with_id("pause", "Pause Monitoring").build(app)?;
@@ -161,8 +165,16 @@ pub fn setup(app: &App) -> tauri::Result<()> {
         .items(&[&quit])
         .build()?;
 
+    // A monochrome gourd SILHOUETTE marked as a template image — macOS then
+    // tints it to match the menu bar (white on dark, black on light), the
+    // standard for status items. The full-colour app icon (used before) is a
+    // dark navy squircle that vanishes into a dark menu bar; a template icon
+    // stays visible in both appearances.
+    let icon = tauri::image::Image::from_bytes(TRAY_ICON_BYTES)
+        .expect("bundled tray template icon");
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().expect("bundled icon").clone())
+        .icon(icon)
+        .icon_as_template(true)
         .tooltip("Tabibu")
         .menu(&menu)
         // Left click toggles the popover; the menu stays on right click.
@@ -197,7 +209,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
     // `System`, so a shared sampler refreshed on two cadences (UI ~2s + tray 5s)
     // computes deltas over the wrong interval and reports garbage CPU% to both.
     // A dedicated, lightly-refreshed sampler keeps each consumer's deltas sane.
-    let handle = app.handle().clone();
+    let handle = app.clone();
     let mut sampler = tabibu_monitor::Sampler::new();
     std::thread::spawn(move || {
         let mut was_paused = false;
@@ -289,4 +301,42 @@ pub fn setup(app: &App) -> tauri::Result<()> {
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TRAY_ICON_BYTES;
+
+    /// Regression guard for the menu-bar icon. The tray went invisible twice:
+    /// once because the status item was built before the app finished launching
+    /// (fixed by building on RunEvent::Ready), and the class of failure this
+    /// test locks down is the OTHER way the icon disappears — a broken asset.
+    ///
+    /// The icon is a macOS *template* image, so only the alpha channel matters
+    /// (macOS discards the RGB and tints the shape). This decodes the exact
+    /// bytes production ships, through the exact decoder production uses, and
+    /// asserts the alpha forms a real silhouette: right size, and neither blank
+    /// (invisible) nor a solid block (a filled square in the menu bar).
+    #[test]
+    fn tray_icon_is_a_valid_silhouette() {
+        let img = tauri::image::Image::from_bytes(TRAY_ICON_BYTES)
+            .expect("tray-template.png must decode");
+        assert_eq!(img.width(), 44, "tray icon width");
+        assert_eq!(img.height(), 44, "tray icon height");
+
+        let rgba = img.rgba();
+        assert_eq!(rgba.len(), 44 * 44 * 4, "RGBA buffer size");
+
+        let opaque = rgba.chunks_exact(4).filter(|px| px[3] > 0).count();
+        let total = 44 * 44;
+        let coverage = opaque as f64 / total as f64;
+        // A blank icon (coverage ~0) is an invisible tray; a fully-opaque icon
+        // (coverage ~1) renders as a solid rectangle. A real gourd silhouette
+        // sits comfortably between.
+        assert!(
+            (0.05..=0.90).contains(&coverage),
+            "tray icon alpha coverage {coverage:.3} outside sane silhouette band \
+             (blank or solid?)"
+        );
+    }
 }

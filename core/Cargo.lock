@@ -960,6 +960,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabibu-docker"
+version = "0.1.51"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tabibu-dupes"
 version = "0.1.51"
 dependencies = [
