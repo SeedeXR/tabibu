@@ -64,7 +64,9 @@ static POPOVER_HIDDEN_AT: Mutex<Option<Instant>> = Mutex::new(None);
 /// the tray icon. Reads the current width instead of tracking state, so a
 /// double invoke is a no-op.
 pub fn set_popover_detail(app: &AppHandle, open: bool) {
-    let Some(pop) = app.get_webview_window("menubar") else { return };
+    let Some(pop) = app.get_webview_window("menubar") else {
+        return;
+    };
     let scale = pop.scale_factor().unwrap_or(2.0);
     let Ok(size) = pop.inner_size() else { return };
     let cur_w = f64::from(size.width) / scale;
@@ -73,7 +75,9 @@ pub fn set_popover_detail(app: &AppHandle, open: bool) {
         return;
     }
     let delta = POPOVER_DETAIL_W - POPOVER_W;
-    let Ok(pos) = pop.outer_position() else { return };
+    let Ok(pos) = pop.outer_position() else {
+        return;
+    };
     let mut x = f64::from(pos.x) / scale + if open { -delta } else { delta };
     let y = f64::from(pos.y) / scale;
     let h = f64::from(size.height) / scale;
@@ -110,7 +114,9 @@ pub fn note_popover_hidden() {
 /// native global space — so the window's own (possibly different) scale
 /// factor never distorts the result on mixed-DPI setups.
 fn toggle_popover(app: &AppHandle, click: PhysicalPosition<f64>) {
-    let Some(pop) = app.get_webview_window("menubar") else { return };
+    let Some(pop) = app.get_webview_window("menubar") else {
+        return;
+    };
     if pop.is_visible().unwrap_or(false) {
         let _ = pop.hide();
         return;
@@ -157,7 +163,9 @@ fn toggle_popover(app: &AppHandle, click: PhysicalPosition<f64>) {
 /// whole reason for existing is that the tray icon can be hidden behind the
 /// notch on a crowded menu bar. Always opens collapsed to the overview width.
 pub fn show_popover_default(app: &AppHandle) {
-    let Some(pop) = app.get_webview_window("menubar") else { return };
+    let Some(pop) = app.get_webview_window("menubar") else {
+        return;
+    };
     if pop.is_visible().unwrap_or(false) {
         let _ = pop.hide();
         return;
@@ -200,8 +208,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     // standard for status items. The full-colour app icon (used before) is a
     // dark navy squircle that vanishes into a dark menu bar; a template icon
     // stays visible in both appearances.
-    let icon = tauri::image::Image::from_bytes(TRAY_ICON_BYTES)
-        .expect("bundled tray template icon");
+    let icon =
+        tauri::image::Image::from_bytes(TRAY_ICON_BYTES).expect("bundled tray template icon");
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(true)
@@ -215,7 +223,11 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             "pause" => {
                 let paused = !PAUSED.load(Ordering::Relaxed);
                 PAUSED.store(paused, Ordering::Relaxed);
-                let _ = pause.set_text(if paused { "Resume Monitoring" } else { "Pause Monitoring" });
+                let _ = pause.set_text(if paused {
+                    "Resume Monitoring"
+                } else {
+                    "Pause Monitoring"
+                });
             }
             "quit" => app.exit(0),
             _ => {}
@@ -261,8 +273,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 was_paused = false;
                 let snap = sampler.sample(1, tabibu_monitor::TopBy::Cpu);
                 let mem_pct = if snap.total_memory_bytes > 0 {
-                    (snap.used_memory_bytes as f64 / snap.total_memory_bytes as f64 * 100.0)
-                        .round() as u32
+                    (snap.used_memory_bytes as f64 / snap.total_memory_bytes as f64 * 100.0).round()
+                        as u32
                 } else {
                     0
                 };

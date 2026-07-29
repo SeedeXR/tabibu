@@ -306,7 +306,11 @@ pub fn installed_apps() -> Vec<InstalledApp> {
 /// refresh, so two consumers refreshing ONE sampler on different cadences
 /// compute deltas over the wrong interval and report garbage CPU%. Each
 /// surface therefore owns a sampler (dashboard, tray popover, tray tooltip).
-fn sample_with(cell: &LazyLock<Mutex<Option<Sampler>>>, top_n: usize, by_cpu: bool) -> SystemSample {
+fn sample_with(
+    cell: &LazyLock<Mutex<Option<Sampler>>>,
+    top_n: usize,
+    by_cpu: bool,
+) -> SystemSample {
     // Poison-tolerant (matches system.rs): a panic in one sampler call must not
     // permanently break every later sample (and the tray thread).
     let mut guard = cell
@@ -785,7 +789,11 @@ where
 pub fn docker_analyze() -> tabibu_docker::Report {
     tabibu_docker::Docker::detect().map_or_else(
         || tabibu_docker::Report {
-            status: tabibu_docker::Status { installed: false, running: false, version: None },
+            status: tabibu_docker::Status {
+                installed: false,
+                running: false,
+                version: None,
+            },
             artifacts: Vec::new(),
             total_reclaimable_bytes: 0,
         },
@@ -871,7 +879,12 @@ pub fn launch_at_login(app: tauri::AppHandle) -> Result<bool, String> {
 pub fn set_launch_at_login(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let launcher = app.autolaunch();
-    if on { launcher.enable() } else { launcher.disable() }.map_err(|e| e.to_string())
+    if on {
+        launcher.enable()
+    } else {
+        launcher.disable()
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Show + focus the dashboard (used by the tray popover's buttons),
@@ -898,4 +911,3 @@ pub fn popover_detail(app: tauri::AppHandle, open: bool) {
 pub fn uptime_secs() -> u64 {
     sysinfo::System::uptime()
 }
-

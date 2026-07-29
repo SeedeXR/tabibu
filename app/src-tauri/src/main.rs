@@ -166,7 +166,10 @@ fn main() {
             // visible window brings the dashboard back; without this the Dock
             // icon would be a dead affordance.
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => {
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
                 tray::show_main(app, None);
             }
             _ => {}

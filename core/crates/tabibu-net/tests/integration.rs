@@ -23,7 +23,11 @@ fn sampler_seeds_zero_then_reports_monotonic_totals() {
 fn ping_returns_wellformed_stats() {
     // Loopback: exercises the real /sbin/ping path + parser.
     let p = ping_test("127.0.0.1");
-    assert!((0.0..=100.0).contains(&p.loss_pct), "loss out of range: {}", p.loss_pct);
+    assert!(
+        (0.0..=100.0).contains(&p.loss_pct),
+        "loss out of range: {}",
+        p.loss_pct
+    );
     assert!(p.received <= p.transmitted, "received > transmitted");
     // If any packet came back, loss is < 100 and there's an average RTT.
     if p.received > 0 {

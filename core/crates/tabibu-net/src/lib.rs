@@ -311,7 +311,13 @@ mod tests {
         assert_eq!(seed.up_bps, 0);
         assert_eq!(seed.total_down_bytes, 1000);
         // 2 MB down / 0.5 MB up over 2s → 1 MB/s down, 0.25 MB/s up.
-        let t = compute_throughput(2_000_000, 500_000, 9_000_000, 3_000_000, Some(Duration::from_secs(2)));
+        let t = compute_throughput(
+            2_000_000,
+            500_000,
+            9_000_000,
+            3_000_000,
+            Some(Duration::from_secs(2)),
+        );
         assert_eq!(t.down_bps, 1_000_000);
         assert_eq!(t.up_bps, 250_000);
         assert_eq!(t.total_down_bytes, 9_000_000);
