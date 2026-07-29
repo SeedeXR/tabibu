@@ -18,6 +18,7 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -44,6 +45,25 @@ fn main() {
                     }
                 } else {
                     app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                }
+            }
+            // Global shortcut (Ctrl+Cmd+N) to toggle the health popover — a
+            // reliable way in when the tray icon is hidden behind the notch on a
+            // crowded menu bar. Registered at runtime (NOT via the builder's
+            // with_shortcut, whose registration error would propagate out of
+            // plugin setup and abort launch): if another app already owns the
+            // combo we just log and carry on, dashboard → Network still works.
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                if let Err(e) = app.global_shortcut().on_shortcut(
+                    "Control+Command+N",
+                    |app, _shortcut, event| {
+                        if event.state == ShortcutState::Pressed {
+                            tray::show_popover_default(app);
+                        }
+                    },
+                ) {
+                    eprintln!("global shortcut Ctrl+Cmd+N unavailable (already in use?): {e}");
                 }
             }
             // The tray is created on RunEvent::Ready (see run() below), NOT here:
@@ -116,6 +136,8 @@ fn main() {
             commands::docker_prune_images,
             commands::docker_prune_containers,
             commands::docker_prune_volumes,
+            commands::network_sample,
+            commands::connection_test,
             commands::launch_at_login,
             commands::set_launch_at_login,
             commands::show_main_window,

@@ -112,6 +112,7 @@ const NAV = [
     { id: "disk", title: "Disk", icon: "hard-drive" },
     { id: "memory", title: "Memory & CPU", icon: "cpu" },
     { id: "battery", title: "Battery", icon: "battery" },
+    { id: "network", title: "Network", icon: "wifi" },
   ]},
   { section: "Security", items: [{ id: "security", title: "Security", icon: "shield" }] },
   { section: "", items: [{ id: "settings", title: "Settings", icon: "rotate_ccw" }] },
@@ -121,7 +122,7 @@ const NAV = [
 const THEME = {
   dashboard: "#14b8a6", smart: "#8b5cf6", junk: "#16a34a", dupes: "#3b82f6",
   large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", docker: "#2496ed", universal: "#0891b2", startup: "#f59e0b", disk: "#a855f7",
-  memory: "#f97316", battery: "#22c55e", security: "#ec4899", settings: "#64748b",
+  memory: "#f97316", battery: "#22c55e", network: "#0284c7", security: "#ec4899", settings: "#64748b",
 };
 // Hero copy + sub-features per scan view.
 const HERO = {
@@ -176,6 +177,9 @@ function navigate(id) {
   // so neither can reappear without context on return.
   if (id !== "brew") { brewState.outcome = null; brewState.stale = false; }
   if (id !== "docker") { dockerState.outcome = null; dockerState.stale = false; }
+  // A connection test is point-in-time; drop it on leave so it can't reappear
+  // as "current" on return.
+  if (id !== "network") netView.conn = { phase: "idle", data: null, err: null };
   render();
 }
 function setTitle(t, actions = []) {
@@ -213,7 +217,7 @@ const SCAN_DEFS = {
 
 const sessions = {}; // id -> session
 function getSession(id) {
-  if (!sessions[id]) sessions[id] = { phase: "idle", items: [], selection: new Set(), summary: null };
+  if (!sessions[id]) sessions[id] = { phase: "idle", items: [], selection: new Set(), summary: null, sizeFilter: 0 };
   return sessions[id];
 }
 
@@ -248,7 +252,7 @@ function startScan(id) {
     if (sid !== id && sess.phase === "scanning") sess.phase = sess.items.length ? "review" : "idle";
   }
   const seq = ++scanSeq;
-  s.phase = "scanning"; s.items = []; s.selection = new Set(); s.summary = null;
+  s.phase = "scanning"; s.items = []; s.selection = new Set(); s.summary = null; s.sizeFilter = 0;
   let dirty = false;
   const ch = new Channel();
   ch.onmessage = (msg) => {
@@ -281,7 +285,7 @@ function startScan(id) {
   scanView(id);
 }
 function stopScan(id) { invoke("cancel_scan"); clearScanTimer(); const s = getSession(id); s.phase = s.items.length ? "review" : "idle"; scanView(id); }
-function resetSession(id) { sessions[id] = { phase: "idle", items: [], selection: new Set(), summary: null }; }
+function resetSession(id) { sessions[id] = { phase: "idle", items: [], selection: new Set(), summary: null, sizeFilter: 0 }; }
 
 function tallies(items) {
   const acc = {};
@@ -291,6 +295,29 @@ function tallies(items) {
 }
 const foundBytes = (s) => s.items.reduce((a, i) => a + Number(i.size_bytes), 0);
 const selectedBytes = (s) => s.items.reduce((a, i) => s.selection.has(i.path) ? a + Number(i.size_bytes) : a, 0);
+
+// Size-threshold filter shared by the scan-review and duplicates screens. The
+// active threshold (bytes; 0 = All) hides rows below it — a VIEW filter only:
+// selection is untouched, so the "Selected" stat and the reclaim confirmation
+// stay the source of truth about what will actually be removed. Bulk
+// "Select All" respects the active threshold (see the reclaim bars).
+const SIZE_FILTERS = [
+  { label: "All", bytes: 0 },
+  { label: "≥1 MB", bytes: 1024 ** 2 },
+  { label: "≥10 MB", bytes: 10 * 1024 ** 2 },
+  { label: "≥100 MB", bytes: 100 * 1024 ** 2 },
+  { label: "≥1 GB", bytes: 1024 ** 3 },
+];
+// A `.seg` segmented control + optional "Showing N of M" counter. `onPick(bytes)`
+// receives the chosen threshold.
+function sizeFilterBar(current, onPick, showing) {
+  const seg = h("div", { class: "seg" });
+  for (const f of SIZE_FILTERS)
+    seg.append(h("button", { class: (current || 0) === f.bytes ? "on" : "", onClick: () => onPick(f.bytes) }, f.label));
+  return h("div", { class: "filter-row" },
+    h("span", { class: "flabel" }, "Size"), seg,
+    showing ? h("span", { class: "showing dim" }, showing) : null);
+}
 
 // Live-scan loader: the small circle spinner (same one used elsewhere) with a
 // verbose one-line status that updates as items stream — count, total found,
@@ -322,6 +349,11 @@ function reviewPanel(id) {
   // summary
   wrap.append(summaryHeader(s, id));
   wrap.append(scannerFooter(s));
+  // size filter (smart / junk / large & old all render through here)
+  const min = s.sizeFilter || 0;
+  const shown = s.items.filter((i) => Number(i.size_bytes) >= min).length;
+  wrap.append(sizeFilterBar(min, (b) => { s.sizeFilter = b; scanView(id); },
+    min ? `Showing ${shown} of ${s.items.length}` : null));
   // grouped list
   const list = h("div", { class: "list", id: `list-${id}` });
   renderReviewList(list, id);
@@ -367,8 +399,15 @@ function scannerFooter(s) {
 function renderReviewList(list, id) {
   const s = getSession(id);
   list.innerHTML = "";
+  const min = s.sizeFilter || 0;
+  const items = min ? s.items.filter((i) => Number(i.size_bytes) >= min) : s.items;
+  if (!items.length) {
+    list.append(h("div", { class: "dim", style: "padding:20px 24px;font-size:12px" },
+      min ? "No items at or above this size. Lower the size filter to see more." : "Nothing to review."));
+    return;
+  }
   const groups = {};
-  for (const it of s.items) (groups[it.category] ||= []).push(it);
+  for (const it of items) (groups[it.category] ||= []).push(it);
   const ordered = Object.entries(groups).sort((a, b) =>
     b[1].reduce((x, i) => x + Number(i.size_bytes), 0) - a[1].reduce((x, i) => x + Number(i.size_bytes), 0));
   for (const [cat, items] of ordered) {
@@ -479,7 +518,8 @@ function renderReclaimBar(bar, id) {
   const s = getSession(id);
   renderActionBar(bar, {
     selectLabel: "Select All Safe",
-    onSelectAll: () => { s.items.forEach((i) => { if (i.tier === "Safe") s.selection.add(i.path); }); rerenderReview(id); },
+    // Respect the active size filter: only select Safe items currently shown.
+    onSelectAll: () => { const min = s.sizeFilter || 0; s.items.forEach((i) => { if (i.tier === "Safe" && Number(i.size_bytes) >= min) s.selection.add(i.path); }); rerenderReview(id); },
     clearLabel: "Deselect All",
     onClear: () => { s.selection.clear(); rerenderReview(id); },
     bytes: selectedBytes(s), count: s.selection.size,
@@ -567,7 +607,7 @@ async function recheckFDA() {
 // =====================================================================
 // Duplicates
 // =====================================================================
-const dupeState = { phase: "idle", groups: [], selection: new Set() };
+const dupeState = { phase: "idle", groups: [], selection: new Set(), sizeFilter: 0 };
 function duplicatesView() {
   setTitle("Duplicates", []);
   const d = dupeState;
@@ -586,7 +626,7 @@ function duplicatesView() {
 // Always scans the whole Mac (the home tree) — no folder choice.
 async function scanDupes() {
   const d = dupeState;
-  d.phase = "scanning"; d.groups = []; d.selection = new Set();
+  d.phase = "scanning"; d.groups = []; d.selection = new Set(); d.sizeFilter = 0;
   render();
   try {
     d.groups = await invoke("find_duplicates", { root: null, minSize: 4096 });
@@ -609,8 +649,13 @@ function dupeReview() {
   wrap.append(h("div", { class: "row", style: "padding:16px 24px" },
     h("div", {}, h("div", { style: "font-weight:600" }, `${d.groups.length} duplicate sets · up to ${fmtBytes(totDup)} reclaimable`),
       h("div", { class: "dim", style: "font-size:11px" }, "Tick the copies to delete. The newest in each set is marked — but you can remove any copy you choose."))));
+  const min = d.sizeFilter || 0;
+  const groups = min ? d.groups.filter((g) => Number(g.size_bytes) >= min) : d.groups;
+  wrap.append(sizeFilterBar(min, (b) => { d.sizeFilter = b; render(); },
+    min ? `Showing ${groups.length} of ${d.groups.length} sets` : null));
   const list = h("div", { class: "list" });
-  for (const g of d.groups) {
+  if (!groups.length) list.append(h("div", { class: "dim", style: "padding:20px 24px;font-size:12px" }, "No duplicate sets at or above this size. Lower the size filter to see more."));
+  for (const g of groups) {
     const box = h("div", { class: "dupe-group" }, h("div", { class: "gh" }, `${fmtBytes(g.size_bytes)} each · ${g.paths.length} copies`));
     g.paths.forEach((p, idx) => box.append(dupePathRow(g, p, idx)));
     list.append(box);
@@ -647,7 +692,8 @@ function updateDupeBar() { if (dupeState.barEl && dupeState.barEl.isConnected) r
 function renderDupeBar(bar) {
   renderActionBar(bar, {
     selectLabel: "Select all but newest",
-    onSelectAll: () => { dupeState.groups.forEach((g) => g.paths.slice(1).forEach((p) => dupeState.selection.add(p))); syncDupeRows(); updateDupeBar(); },
+    // Respect the active size filter: only groups currently shown.
+    onSelectAll: () => { const min = dupeState.sizeFilter || 0; dupeState.groups.forEach((g) => { if (Number(g.size_bytes) >= min) g.paths.slice(1).forEach((p) => dupeState.selection.add(p)); }); syncDupeRows(); updateDupeBar(); },
     clearLabel: "Clear",
     onClear: () => { dupeState.selection.clear(); syncDupeRows(); updateDupeBar(); },
     bytes: dupeReclaimBytes(), count: dupeState.selection.size,
@@ -883,6 +929,62 @@ async function batteryView() {
   if (info.health_percent == null && info.cycle_count == null) health.append(h("p", { class: "dim" }, "Detailed health metrics weren't available from this Mac's battery controller."));
   wrap.append(health);
   setView(wrap);
+}
+
+// =====================================================================
+// Network (also in the tray popover; here so it's reachable when the
+// menu-bar icon is hidden behind the notch)
+// =====================================================================
+const netView = { sample: null, conn: { phase: "idle", data: null, err: null } };
+const fmtRate = (bps) => `${fmtBytes(bps)}/s`;
+function networkView() {
+  setTitle("Network", []);
+  const tick = async () => {
+    try { netView.sample = await invoke("network_sample"); }
+    catch { return; }
+    if (state.current === "network") renderNetwork();
+  };
+  tick();
+  activeTimers.push(setInterval(tick, 2000));
+  renderNetwork();
+}
+function netStat(label, arrow, rate, sub) {
+  return h("div", { class: "card net-stat" },
+    h("div", { class: "net-stat-h" }, h("span", { class: "arrow" }, arrow), label),
+    h("div", { class: "net-stat-v" }, rate),
+    h("div", { class: "dim", style: "font-size:12px;margin-top:2px" }, sub));
+}
+function renderNetwork() {
+  const n = netView.sample;
+  const wrap = h("div", { class: "pad" });
+  wrap.append(h("div", { class: "net-cards" },
+    netStat("Download", "↓", n ? fmtRate(n.down_bps) : "—", n ? `${fmtBytes(n.total_down_bytes)} total` : ""),
+    netStat("Upload", "↑", n ? fmtRate(n.up_bps) : "—", n ? `${fmtBytes(n.total_up_bytes)} total` : "")));
+
+  const c = netView.conn;
+  const test = h("div", { class: "card", style: "margin-top:16px;max-width:520px" },
+    h("h3", { style: "margin-bottom:10px" }, "Test your connection"));
+  if (c.phase === "testing") test.append(h("p", { class: "dim" }, "Testing — pinging and checking Wi-Fi…"));
+  else test.append(h("button", { class: "primary", onClick: runNetTest }, c.phase === "done" ? "Test Again" : "Test Connection"));
+  if (c.phase === "error") test.append(h("p", { style: "color:var(--tier-risky);margin-top:8px" }, `Test failed: ${c.err}`));
+  if (c.phase === "done" && c.data) {
+    const w = c.data.wifi, p = c.data.ping;
+    const rows = h("div", { style: "margin-top:12px" });
+    rows.append(kv("Wi-Fi signal", w.connected ? `${w.quality_pct}% · ${w.rssi_dbm} dBm` : "not connected"));
+    if (w.connected && w.phy_mode) rows.append(kv("Mode", `${w.phy_mode}${w.tx_rate_mbps ? ` · ${w.tx_rate_mbps} Mbps` : ""}`));
+    rows.append(kv("Packet loss", `${p.loss_pct}%`));
+    rows.append(kv("Latency", p.avg_ms != null ? `${Math.round(p.avg_ms)} ms` : "—"));
+    test.append(rows);
+  }
+  wrap.append(test);
+  setView(wrap);
+}
+async function runNetTest() {
+  netView.conn = { phase: "testing", data: null, err: null };
+  if (state.current === "network") renderNetwork();
+  try { netView.conn = { phase: "done", data: await invoke("connection_test"), err: null }; }
+  catch (e) { netView.conn = { phase: "error", data: null, err: String(e) }; }
+  if (state.current === "network") renderNetwork();
 }
 
 // =====================================================================
@@ -1693,6 +1795,7 @@ function render() {
   if (id === "disk") return diskView();
   if (id === "memory") return memoryView();
   if (id === "battery") return batteryView();
+  if (id === "network") return networkView();
   if (id === "uninstall") return uninstallerView();
   if (id === "brew") return brewView();
   if (id === "docker") return dockerView();

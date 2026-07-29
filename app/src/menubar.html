@@ -69,6 +69,13 @@
   .card .s { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; min-height: 13px; }
   .card .warn { color: var(--tier-review); }
   .card .bad { color: var(--tier-risky); }
+  /* Network card spans the full width below the 2×2 tiles. */
+  .card.net { grid-column: 1 / -1; }
+  .card.net .netrates { display: flex; align-items: center; gap: 16px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  .card.net .nr { display: flex; align-items: baseline; gap: 5px; font-size: 14px; font-weight: 700; letter-spacing: -0.02em; }
+  .card.net .nr .ar { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+  .card.net .net-test { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--accent); cursor: pointer; }
+  .card.net .net-test:hover { text-decoration: underline; }
 
   .reco {
     margin: 2px 12px 10px; padding: 10px 12px; border-radius: 10px;
@@ -186,6 +193,14 @@
         <div class="v" id="bat-v">—</div>
         <div class="s" id="bat-s">—</div>
       </div>
+      <div class="card net" data-detail="network">
+        <div class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>Network</div>
+        <div class="netrates">
+          <span class="nr"><span class="ar">↓</span><b id="net-down">—</b></span>
+          <span class="nr"><span class="ar">↑</span><b id="net-up">—</b></span>
+          <span class="net-test" id="net-test">Test Connection</span>
+        </div>
+      </div>
     </div>
 
     <div class="reco">
@@ -214,6 +229,13 @@
 
   const GB = 1024 ** 3;
   const gb = (b) => (b / GB).toFixed(b / GB >= 100 ? 0 : 1);
+  // Human byte-rate (binary units, labelled /s) for the Network card.
+  const fmtRate = (bps) => {
+    if (!bps || bps < 1) return "0 B/s";
+    const u = ["B", "KB", "MB", "GB"]; let i = 0, v = bps;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${u[i]}/s`;
+  };
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -223,8 +245,11 @@
 
   // Latest readings + short history (for the detail graphs).
   const last = { memPct: null, diskFrac: null, pressure: null, sample: null,
-                 disk: null, bat: null, therm: null, uptime: null };
+                 disk: null, bat: null, therm: null, uptime: null, net: null };
   let quitErr = null; // {msg, at} — transient inline error under the process list
+  // On-demand connection test (Wi-Fi signal + packet loss); idle until the user
+  // clicks "Test Connection" — never auto-run (it does an outward ping).
+  let connTest = { phase: "idle", data: null, err: null };
   const hist = { cpu: [], mem: [] };
   const HIST_MAX = 60; // 60 × 3s = 3 minutes of graph
 
@@ -241,7 +266,7 @@
   // ---------------- detail panel ----------------
   let detail = null; // "cpu" | "memory" | "battery" | "disk" | null
 
-  const DETAIL_TITLES = { cpu: "CPU", memory: "Memory", battery: "Battery", disk: "Disk" };
+  const DETAIL_TITLES = { cpu: "CPU", memory: "Memory", battery: "Battery", disk: "Disk", network: "Network" };
 
   async function openDetail(mode) {
     if (detail === mode) { closeDetail(); return; }
@@ -254,6 +279,7 @@
     renderDetail();
     if (mode === "cpu") invoke("uptime_secs").then((s) => { last.uptime = s; renderDetail(); }).catch(() => {});
     fastTick(); // fresh consumers immediately
+    if (mode === "network") netTick();
   }
 
   function closeDetail(uiOnly = false) {
@@ -403,6 +429,44 @@
       row.append(scan, map);
       body.append(row);
     }
+
+    if (detail === "network") {
+      const n = last.net;
+      const duo = el("div", "duo");
+      duo.append(mini("↓ Download", n ? fmtRate(n.down_bps) : "—"));
+      duo.append(mini("↑ Upload", n ? fmtRate(n.up_bps) : "—"));
+      duo.append(mini("Total down", n ? `${gb(n.total_down_bytes)} GB` : "—"));
+      duo.append(mini("Total up", n ? `${gb(n.total_up_bytes)} GB` : "—"));
+      body.append(duo);
+
+      body.append(el("h3", null, "Connection test"));
+      const c = connTest;
+      if (c.phase === "testing") {
+        body.append(el("div", "empty", "Testing connection — pinging and checking Wi-Fi…"));
+      } else {
+        const btn = el("button", "primary", c.phase === "done" ? "Test Again" : "Test Connection");
+        btn.addEventListener("click", runConnTest);
+        body.append(btn);
+      }
+      if (c.phase === "error") body.append(el("div", "derr", `Test failed: ${c.err}`));
+      if (c.phase === "done" && c.data) {
+        const w = c.data.wifi, p = c.data.ping;
+        const duo2 = el("div", "duo");
+        duo2.style.marginTop = "8px";
+        if (w.connected) {
+          const wcls = w.quality_pct >= 60 ? "" : w.quality_pct >= 30 ? "warn" : "bad";
+          duo2.append(mini("Wi-Fi signal", `${w.quality_pct}%`, wcls));
+          duo2.append(mini("RSSI", w.rssi_dbm != null ? `${w.rssi_dbm} dBm` : "—"));
+        } else {
+          duo2.append(mini("Wi-Fi", "not connected"));
+          duo2.append(mini("RSSI", "—"));
+        }
+        const lcls = p.loss_pct === 0 ? "" : p.loss_pct < 20 ? "warn" : "bad";
+        duo2.append(mini("Packet loss", `${p.loss_pct}%`, lcls));
+        duo2.append(mini("Latency", p.avg_ms != null ? `${Math.round(p.avg_ms)} ms` : "—"));
+        body.append(duo2);
+      }
+    }
   }
 
   // ---------------- polling ----------------
@@ -467,20 +531,55 @@
     renderDetail();
   }
 
-  function refresh() { fastTick(); slowTick(); }
+  // Network throughput — cheap (sysinfo counters), polled on the fast cadence.
+  async function netTick() {
+    if (document.hidden) return;
+    try {
+      const n = await invoke("network_sample");
+      last.net = n;
+      $("net-down").textContent = fmtRate(n.down_bps);
+      $("net-up").textContent = fmtRate(n.up_bps);
+      if (detail === "network") renderDetail();
+    } catch { /* keep last rates */ }
+  }
+  // On-demand: Wi-Fi signal + packet loss + latency (outward ping — user click only).
+  async function runConnTest() {
+    connTest = { phase: "testing", data: null, err: null };
+    if (detail === "network") renderDetail();
+    try {
+      connTest = { phase: "done", data: await invoke("connection_test"), err: null };
+    } catch (e) {
+      connTest = { phase: "error", data: null, err: String(e) };
+    }
+    if (detail === "network") renderDetail();
+  }
+
+  function refresh() { fastTick(); slowTick(); netTick(); }
   refresh();
   setInterval(fastTick, 3000);
+  setInterval(netTick, 3000);
   setInterval(slowTick, 12000);
   // Hidden → shown: refresh immediately. Hidden: reset to overview so the next
   // open starts collapsed (Rust resets the window size on blur regardless).
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) closeDetail(true);
-    else refresh();
+    if (document.hidden) {
+      closeDetail(true);
+      // Drop the last connection test: it's a point-in-time measurement, so the
+      // next open must start fresh rather than show a stale result as current.
+      connTest = { phase: "idle", data: null, err: null };
+    } else refresh();
   });
 
   const openMain = (view) => invoke("show_main_window", view ? { view } : {}).catch(() => {});
   document.querySelectorAll(".card").forEach((c) =>
     c.addEventListener("click", () => openDetail(c.dataset.detail)));
+  // The Test link on the Network card opens the detail and runs the test in one
+  // click (stop propagation so it doesn't just toggle the card's detail).
+  $("net-test").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (detail !== "network") openDetail("network");
+    runConnTest();
+  });
   $("smart").addEventListener("click", () => openMain("smart"));
   $("open").addEventListener("click", () => openMain(null));
   $("settings").addEventListener("click", () => openMain("settings"));

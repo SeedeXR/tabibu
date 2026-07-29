@@ -295,6 +295,19 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .seg button { border: none; border-radius: 0; background: var(--bg-elev); }
 .seg button.on { background: var(--accent); color: #fff; }
 
+/* Network view throughput cards. */
+.net-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 520px; }
+.net-stat { padding: 14px 16px; }
+.net-stat .net-stat-h { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--text-dim); font-size: 13px; }
+.net-stat .net-stat-h .arrow { color: var(--view-accent); font-weight: 700; }
+.net-stat .net-stat-v { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+/* Size-threshold filter above a results list (scan review + duplicates). */
+.filter-row { display: flex; align-items: center; gap: 10px; padding: 6px 24px 4px; flex-wrap: wrap; }
+.filter-row .flabel { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+.filter-row .seg button { font-size: 12px; padding: 4px 10px; }
+.filter-row .showing { margin-left: auto; font-size: 11px; }
+
 .toast-fail { margin-top: var(--space-m); padding: var(--space-m); background: var(--bar); border-radius: var(--radius-s); max-width: 560px; text-align: left; }
 .toast-fail .ln { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
 .popover-note { position: fixed; z-index: 50; max-width: 320px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-s); padding: var(--space-m); box-shadow: 0 8px 28px rgba(0,0,0,0.25); font-size: 12px; line-height: 1.45; }

@@ -12,6 +12,7 @@ members = [
     "crates/tabibu-telemetry",
     "crates/tabibu-universal",
     "crates/tabibu-docker",
+    "crates/tabibu-net",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ tabibu-monitor = { path = "crates/tabibu-monitor" }
 tabibu-telemetry = { path = "crates/tabibu-telemetry" }
 tabibu-universal = { path = "crates/tabibu-universal" }
 tabibu-docker = { path = "crates/tabibu-docker" }
+tabibu-net = { path = "crates/tabibu-net" }
 
 rayon = "1.10"
 blake3 = { version = "1.5", features = ["rayon"] }

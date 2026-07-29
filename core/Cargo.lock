@@ -1026,6 +1026,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabibu-net"
+version = "0.1.51"
+dependencies = [
+ "serde",
+ "sysinfo",
+]
+
+[[package]]
 name = "tabibu-telemetry"
 version = "0.1.51"
 dependencies = [

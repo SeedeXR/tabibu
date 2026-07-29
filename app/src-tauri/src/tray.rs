@@ -152,6 +152,36 @@ fn toggle_popover(app: &AppHandle, click: PhysicalPosition<f64>) {
     let _ = pop.set_focus();
 }
 
+/// Toggle the popover at the top-right of the primary display. Used by the
+/// global shortcut, which has no tray-click position to anchor to — and whose
+/// whole reason for existing is that the tray icon can be hidden behind the
+/// notch on a crowded menu bar. Always opens collapsed to the overview width.
+pub fn show_popover_default(app: &AppHandle) {
+    let Some(pop) = app.get_webview_window("menubar") else { return };
+    if pop.is_visible().unwrap_or(false) {
+        let _ = pop.hide();
+        return;
+    }
+    let scale = pop.scale_factor().unwrap_or(2.0);
+    let h = pop
+        .inner_size()
+        .map_or(496.0, |s| f64::from(s.height) / scale);
+    let (x, y) = match pop.primary_monitor() {
+        Ok(Some(mon)) => {
+            let ms = mon.scale_factor();
+            let left = f64::from(mon.position().x) / ms;
+            let top = f64::from(mon.position().y) / ms;
+            let right = left + f64::from(mon.size().width) / ms;
+            (right - POPOVER_W - 8.0, top + 32.0) // just under the menu bar
+        }
+        _ => (8.0, 32.0),
+    };
+    let _ = pop.set_size(LogicalSize::new(POPOVER_W, h));
+    let _ = pop.set_position(LogicalPosition::new(x, y));
+    let _ = pop.show();
+    let _ = pop.set_focus();
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItemBuilder::with_id("open", "Open Dashboard").build(app)?;
     let settings = MenuItemBuilder::with_id("settings", "Settings…").build(app)?;

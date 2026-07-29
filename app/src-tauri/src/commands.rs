@@ -819,6 +819,44 @@ pub fn docker_prune_volumes() -> tabibu_docker::ActionOutcome {
 }
 
 // ---------------------------------------------------------------------
+// Network (tray popover): live throughput + on-demand connection test
+// ---------------------------------------------------------------------
+
+/// Persistent throughput sampler. Rates are a delta between calls, so the state
+/// must survive across the popover's polls (same pattern as the CPU samplers).
+static NET_SAMPLER: LazyLock<Mutex<tabibu_net::NetSampler>> =
+    LazyLock::new(|| Mutex::new(tabibu_net::NetSampler::new()));
+
+/// Live download/upload rate + cumulative totals for the popover's Network card.
+/// Cheap and local (sysinfo counters) — safe to poll on the popover cadence.
+#[tauri::command(async)]
+pub fn network_sample() -> tabibu_net::Throughput {
+    NET_SAMPLER
+        .lock()
+        .map_or_else(|_| poisoned_throughput(), |mut s| s.sample())
+}
+
+/// On-demand connection test: Wi-Fi signal strength + packet loss + latency.
+/// Runs `system_profiler` and an outward `ping` — only invoked when the user
+/// clicks "Test Connection", never on a timer. `1.1.1.1` is a public resolver
+/// (IP literal, so no name-lookup dependency skews the result).
+#[tauri::command(async)]
+pub fn connection_test() -> tabibu_net::ConnectionTest {
+    tabibu_net::connection_test("1.1.1.1")
+}
+
+/// A poisoned throughput lock is not worth crashing the popover over — report
+/// zeros (the card just shows "—" that tick).
+fn poisoned_throughput() -> tabibu_net::Throughput {
+    tabibu_net::Throughput {
+        down_bps: 0,
+        up_bps: 0,
+        total_down_bytes: 0,
+        total_up_bytes: 0,
+    }
+}
+
+// ---------------------------------------------------------------------
 // Menu bar app lifecycle (tray popover + Settings)
 // ---------------------------------------------------------------------
 

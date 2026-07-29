@@ -36,7 +36,9 @@ tabibu-monitor = { path = "../../core/crates/tabibu-monitor" }
 tabibu-telemetry = { path = "../../core/crates/tabibu-telemetry" }
 tabibu-universal = { path = "../../core/crates/tabibu-universal" }
 tabibu-docker = { path = "../../core/crates/tabibu-docker" }
+tabibu-net = { path = "../../core/crates/tabibu-net" }
 tauri-plugin-notification = "2.3.3"
+tauri-plugin-global-shortcut = "2.3.2"
 
 [profile.release]
 codegen-units = 1
