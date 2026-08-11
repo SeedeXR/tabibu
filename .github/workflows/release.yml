@@ -31,11 +31,20 @@ jobs:
       # adds the universal targets, installs the Tauri CLI, and bundles.
       #
       # No Apple Developer account → the bundle is UNSIGNED (installable via
-      # right-click → Open). No signing/notarization env is set, so the bundler
-      # never attempts (and never fails on) code signing. To sign later, add an
-      # `env:` block here with the APPLE_* secrets and Tauri picks them up.
+      # right-click → Open). The Tauri bundler attempts Developer-ID signing
+      # ONLY when APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD are *present* —
+      # and an EMPTY value counts as present, so it runs `security import` on
+      # nothing and the whole bundle fails ("failed to import keychain
+      # certificate"). We therefore UNSET every Apple signing/notarization var
+      # before building, so the bundler skips signing entirely — exactly like a
+      # plain local build. To sign later, remove the matching `unset` names and
+      # add the real APPLE_* secrets via an `env:` block.
       - name: Build universal app + DMG (version from VERSION)
-        run: ./scripts/build-app.sh
+        run: |
+          unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                APPLE_PROVIDER_SHORT_NAME APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
+          ./scripts/build-app.sh
 
       # Also keep a workflow artifact (handy for non-tag debugging runs).
       - name: Upload DMG artifact
