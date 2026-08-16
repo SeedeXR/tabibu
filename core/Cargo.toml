@@ -13,6 +13,10 @@ members = [
     "crates/tabibu-universal",
     "crates/tabibu-docker",
     "crates/tabibu-net",
+    "crates/tabibu-vpnproto",
+    "crates/tabibu-route",
+    "crates/tabibu-salama",
+    "crates/tabibu-dohd",
 ]
 
 [workspace.package]
@@ -34,6 +38,9 @@ tabibu-telemetry = { path = "crates/tabibu-telemetry" }
 tabibu-universal = { path = "crates/tabibu-universal" }
 tabibu-docker = { path = "crates/tabibu-docker" }
 tabibu-net = { path = "crates/tabibu-net" }
+tabibu-vpnproto = { path = "crates/tabibu-vpnproto" }
+tabibu-route = { path = "crates/tabibu-route" }
+tabibu-salama = { path = "crates/tabibu-salama" }
 
 rayon = "1.10"
 blake3 = { version = "1.5", features = ["rayon"] }

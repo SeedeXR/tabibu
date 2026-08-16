@@ -101,6 +101,35 @@ fn clamp_x(x: f64, w: f64, left: f64, right: f64) -> f64 {
     x.min(right - w - 8.0).max(left + 8.0)
 }
 
+/// Set the popover's HEIGHT to fit its content (measured in the webview and
+/// sent from JS), keeping the current width. This is the anti-clipping
+/// mechanism: the real WKWebView's font metrics differ from any headless
+/// measurement, so the window sizes itself to whatever the content actually
+/// renders as. Clamped so a bogus value can't make an off-screen window.
+pub fn set_popover_height(app: &AppHandle, height: f64) {
+    let Some(pop) = app.get_webview_window("menubar") else {
+        return;
+    };
+    let scale = pop.scale_factor().unwrap_or(2.0);
+    let Ok(size) = pop.inner_size() else { return };
+    let w = f64::from(size.width) / scale; // keep current width (overview or detail)
+                                           // Never taller than the display it sits on (leave room for the menu bar).
+    let mut max_h = 1200.0;
+    if let Ok(Some(mon)) = pop.current_monitor() {
+        max_h = (f64::from(mon.size().height) / mon.scale_factor() - 48.0).max(200.0);
+    }
+    let h = clamp_height(height, max_h);
+    if (h - f64::from(size.height) / scale).abs() > 0.5 {
+        let _ = pop.set_size(LogicalSize::new(w, h));
+    }
+}
+
+/// Clamp a requested popover height to a sane range (never absurdly small, never
+/// past the display). Pure, so it's unit-tested.
+fn clamp_height(height: f64, max_h: f64) -> f64 {
+    height.clamp(200.0, max_h)
+}
+
 /// Called from the `Focused(false)` auto-hide in `main.rs`.
 pub fn note_popover_hidden() {
     *POPOVER_HIDDEN_AT
@@ -173,7 +202,7 @@ pub fn show_popover_default(app: &AppHandle) {
     let scale = pop.scale_factor().unwrap_or(2.0);
     let h = pop
         .inner_size()
-        .map_or(496.0, |s| f64::from(s.height) / scale);
+        .map_or(536.0, |s| f64::from(s.height) / scale); // matches menubar window height in tauri.conf.json
     let (x, y) = match pop.primary_monitor() {
         Ok(Some(mon)) => {
             let ms = mon.scale_factor();
@@ -347,7 +376,54 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::TRAY_ICON_BYTES;
+    use super::{clamp_height, clamp_x, TRAY_ICON_BYTES};
+
+    // Popover auto-fit height: a content measurement is clamped so a bogus or
+    // huge value can't produce an off-screen / degenerate window.
+    #[test]
+    fn clamp_height_stays_sane() {
+        assert_eq!(
+            clamp_height(528.0, 900.0),
+            528.0,
+            "normal fit passes through"
+        );
+        assert_eq!(
+            clamp_height(5.0, 900.0),
+            200.0,
+            "too-small clamps up to a floor"
+        );
+        assert_eq!(
+            clamp_height(9999.0, 900.0),
+            900.0,
+            "taller than display clamps to display"
+        );
+    }
+
+    // Popover positioning: clamp_x keeps a w-wide window inside [left, right]
+    // with an 8px margin, so the popover is never clipped off the clicked
+    // display (the "items clipped because the window ran off the edge" class).
+    #[test]
+    fn clamp_x_keeps_popover_on_screen() {
+        // Primary display 0..1440, popover 360 wide.
+        let (left, right, w) = (0.0, 1440.0, 360.0);
+        // Comfortably inside → unchanged.
+        assert_eq!(clamp_x(500.0, w, left, right), 500.0);
+        // Off the right edge → pulled in to right - w - 8.
+        assert_eq!(clamp_x(1400.0, w, left, right), 1440.0 - 360.0 - 8.0);
+        // Off the left edge → pushed to left + 8.
+        assert_eq!(clamp_x(-50.0, w, left, right), 8.0);
+    }
+
+    #[test]
+    fn clamp_x_respects_a_display_left_of_primary() {
+        // A monitor arranged to the LEFT of primary has negative global X.
+        // The popover must stay on THAT display, not teleport to x=8 (primary).
+        let (left, right, w) = (-1920.0, 0.0, 360.0);
+        let x = clamp_x(-100.0, w, left, right);
+        assert!(x <= right - w - 8.0, "must sit within the left display");
+        assert!(x >= left + 8.0, "must not spill off the left display");
+        assert_eq!(x, 0.0 - 360.0 - 8.0);
+    }
 
     /// Regression guard for the menu-bar icon. The tray went invisible twice:
     /// once because the status item was built before the app finished launching

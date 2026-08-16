@@ -62,6 +62,30 @@ for plist in "$HOME/Library/LaunchAgents"/xr.seede.tabibu*.plist(N); do
   remove_path "$plist"
 done
 
+# --- Salama encrypted-DNS resolver (root LaunchDaemon) ------------------------
+# Restores system DNS FIRST, then unloads + deletes the daemon. Needs root.
+DOHD_PLIST="/Library/LaunchDaemons/xr.seede.tabibu.dohd.plist"
+DOHD_BIN="/usr/local/libexec/tabibu-dohd"
+if [[ -e "$DOHD_PLIST" || -e "$DOHD_BIN" ]]; then
+  FOUND=1
+  if [[ "$MODE" == "delete" ]]; then
+    echo "Removing the Salama resolver and restoring DNS (needs your password)…"
+    sudo /bin/sh -c '
+      P=/Library/LaunchDaemons/xr.seede.tabibu.dohd.plist
+      B=/usr/local/libexec/tabibu-dohd
+      /usr/sbin/networksetup -listallnetworkservices | while IFS= read -r svc; do
+        case "$svc" in ""|\**|"An asterisk"*) continue;; esac
+        /usr/sbin/networksetup -setdnsservers "$svc" empty 2>/dev/null || true
+      done
+      /bin/launchctl bootout system "$P" 2>/dev/null || true
+      /bin/rm -f "$P" "$B"
+    '
+    echo "removed:      Salama resolver + restored system DNS"
+  else
+    echo "would remove: Salama resolver ($DOHD_PLIST + $DOHD_BIN) + restore system DNS"
+  fi
+fi
+
 # --- files --------------------------------------------------------------------
 remove_path "/Applications/Tabibu.app"
 remove_path "$HOME/Library/Application Support/Tabibu"

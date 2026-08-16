@@ -34,3 +34,10 @@ docs/**/*.html
 references/
 output/
 tabibu-vpn-notes/
+
+# Personal working notes / action items (not part of the repo)
+notes.md
+
+# Staged Salama daemon binary (built by scripts/build-dohd.sh)
+app/src-tauri/bin/
+app/tests/.chrome-profile/

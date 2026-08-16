@@ -1,0 +1,204 @@
+name: Salama Web
+
+# CI/CD for salama-web (the Coolify WireGuard VPN deployment).
+#   CI  — validate the compose, lint YAML, enforce a pinned image + UDP port,
+#         and keep .env.example/.env honest. Runs on every touch of salama-web/.
+#   CD  — trigger a Coolify deploy on push to main, but ONLY if the deploy
+#         webhook secret is configured (otherwise it skips cleanly, so forks and
+#         PRs never fail on a missing secret).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "salama-web/**"
+      - ".github/workflows/salama-web.yml"
+  pull_request:
+    paths:
+      - "salama-web/**"
+      - ".github/workflows/salama-web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: salama-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate compose
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: salama-web
+    # Dummy values so `docker compose config` passes its `:?`-required-var gates.
+    # PASSWORD_HASH is quoted so YAML/shell never touch the literal `$`.
+    env:
+      WG_HOST: ci.example.com
+      PASSWORD_HASH: "$2a$12$0123456789012345678901ABCDEFGHIJKLMNOPQRSTUVWXYZabcd"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose config (schema + interpolation)
+        run: docker compose config
+
+      - name: WireGuard port must be UDP
+        run: |
+          docker compose config | grep -q 'protocol: udp' \
+            || { echo "::error file=salama-web/docker-compose.yml::WireGuard port must be published as udp"; exit 1; }
+
+      - name: image must be pinned (no :latest, no untagged)
+        run: |
+          if grep -qiE 'image:.*:latest' docker-compose.yml; then
+            echo "::error file=salama-web/docker-compose.yml::do not use :latest — pin a version"; exit 1
+          fi
+          if grep -qE '^\s*image:\s*[^:[:space:]]+\s*$' docker-compose.yml; then
+            echo "::error file=salama-web/docker-compose.yml::image is untagged — pin a version"; exit 1
+          fi
+          grep -qE 'image:\s*ghcr\.io/wg-easy/wg-easy:[0-9]+' docker-compose.yml \
+            && echo "image pinned OK"
+
+      - name: .env.example documents every variable the compose reads
+        run: |
+          missing=0
+          for v in WG_HOST PASSWORD_HASH WG_PORT WG_DEFAULT_DNS LANG; do
+            grep -qE "^${v}=" .env.example || { echo "::error file=salama-web/.env.example::missing ${v}"; missing=1; }
+          done
+          test "$missing" = 0 && echo ".env.example complete"
+
+      - name: no real .env committed
+        run: |
+          test ! -f .env || { echo "::error::salama-web/.env must never be committed"; exit 1; }
+          echo "no committed .env"
+
+  yamllint:
+    name: yaml lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: yamllint
+        run: |
+          pipx run yamllint \
+            -d "{extends: relaxed, rules: {line-length: disable, comments: disable, document-start: disable}}" \
+            salama-web/docker-compose.yml salama-web/docker-compose.ci.yml
+
+  e2e:
+    name: e2e (health, web UI, real WireGuard handshake)
+    runs-on: ubuntu-latest
+    needs: [validate]
+    defaults:
+      run:
+        working-directory: salama-web
+    # A test UDP port that won't collide; the web port is published by the CI
+    # overlay so the runner can reach the admin API. ADMIN_PW is a throwaway
+    # test credential (not a secret) — used both to hash and to log in.
+    env:
+      WG_HOST: ci.example.com
+      WG_PORT: "51899"
+      ADMIN_PW: ci-smoke-pass-123
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: generate the admin hash from ADMIN_PW
+        # wgpw prints  PASSWORD_HASH='<raw single-$ bcrypt>'  — strip the wrapper
+        # and store the raw hash (GitHub does not interpolate $ in env files).
+        run: |
+          hash=$(docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw "$ADMIN_PW" \
+                   | sed -E "s/^PASSWORD_HASH='(.*)'\$/\1/")
+          echo "PASSWORD_HASH=${hash}" >> "$GITHUB_ENV"
+
+      - name: bring the stack up
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+
+      - name: wait for the container to report healthy
+        run: |
+          for i in $(seq 1 30); do
+            st=$(docker inspect --format '{{.State.Health.Status}}' salama-vpn 2>/dev/null || echo none)
+            echo "t=$((i*2))s health=$st"
+            [ "$st" = healthy ] && exit 0
+            sleep 2
+          done
+          echo "::error::salama-vpn never became healthy"; docker logs salama-vpn; exit 1
+
+      - name: WireGuard interface must be up
+        run: |
+          docker exec salama-vpn wg show interfaces | grep -qw wg0 \
+            || { echo "::error::wg0 interface not up"; docker exec salama-vpn wg show; exit 1; }
+          docker exec salama-vpn wg show | grep -q "listening port: ${WG_PORT}" \
+            || { echo "::error::wg0 not listening on ${WG_PORT}/udp"; exit 1; }
+
+      - name: admin web UI must serve
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:51821/)
+          echo "web UI http_code=${code}"
+          [ "$code" = 200 ] || { echo "::error::web UI did not return 200"; exit 1; }
+
+      - name: create a client via the admin API and download its config
+        run: |
+          B=http://127.0.0.1:51821; J=$(mktemp)
+          curl -fsS -c "$J" -X POST -H 'Content-Type: application/json' \
+            -d "{\"password\":\"${ADMIN_PW}\"}" "$B/api/session" >/dev/null
+          curl -fsS -b "$J" -X POST -H 'Content-Type: application/json' \
+            -d '{"name":"e2e"}' "$B/api/wireguard/client" >/dev/null
+          cid=$(curl -fsS -b "$J" "$B/api/wireguard/client" \
+                  | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])")
+          curl -fsS -b "$J" "$B/api/wireguard/client/$cid/configuration" -o /tmp/e2e-client.conf
+          grep -q '\[Interface\]' /tmp/e2e-client.conf \
+            || { echo "::error::downloaded client config looks empty"; cat /tmp/e2e-client.conf; exit 1; }
+
+      - name: client container must complete a real handshake through the tunnel
+        run: |
+          priv=$(awk '/^PrivateKey/{print $3}'   /tmp/e2e-client.conf)
+          spub=$(awk '/^PublicKey/{print $3}'    /tmp/e2e-client.conf)
+          psk=$(awk  '/^PresharedKey/{print $3}' /tmp/e2e-client.conf)
+          net=$(docker inspect salama-vpn \
+                  --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+          out=$(docker run --rm --network "$net" --cap-add NET_ADMIN \
+            -e P="$priv" -e S="$spub" -e K="$psk" alpine:3.20 sh -c '
+              set -e
+              apk add --no-cache wireguard-tools iproute2 >/dev/null 2>&1
+              printf "%s" "$P" > /tmp/p; printf "%s" "$K" > /tmp/k
+              ip link add dev wg1 type wireguard
+              ip addr add 10.8.0.2/24 dev wg1
+              wg set wg1 private-key /tmp/p peer "$S" preshared-key /tmp/k \
+                endpoint salama-vpn:'"${WG_PORT}"' allowed-ips 10.8.0.0/24 persistent-keepalive 25
+              ip link set wg1 up
+              ping -c 3 -W 3 10.8.0.1
+              wg show wg1
+            ')
+          echo "$out"
+          echo "$out" | grep -q 'latest handshake:' \
+            || { echo "::error::no WireGuard handshake completed"; exit 1; }
+          echo "$out" | grep -q '3 packets received' \
+            || { echo "::error::tunnel did not carry ICMP to the server"; exit 1; }
+          echo "handshake + tunnel traffic OK"
+
+      - name: tear down (no leftovers)
+        if: always()
+        # `down` also hits the :? gate, so keep the env populated here.
+        env:
+          PASSWORD_HASH: x
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
+
+  deploy:
+    name: deploy to Coolify
+    needs: [validate, yamllint, e2e]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: trigger Coolify deploy (skips if not configured)
+        env:
+          WEBHOOK: ${{ secrets.SALAMA_COOLIFY_WEBHOOK }}
+          TOKEN: ${{ secrets.SALAMA_COOLIFY_TOKEN }}
+        run: |
+          if [ -z "${WEBHOOK}" ]; then
+            echo "SALAMA_COOLIFY_WEBHOOK not set — validation passed, skipping deploy."
+            echo "To enable: add your Coolify deploy webhook URL as the repo secret"
+            echo "SALAMA_COOLIFY_WEBHOOK (and SALAMA_COOLIFY_TOKEN if it needs a bearer token)."
+            exit 0
+          fi
+          echo "Triggering Coolify deploy…"
+          curl -fsSL --retry 3 --max-time 30 "${WEBHOOK}" \
+            ${TOKEN:+-H "Authorization: Bearer ${TOKEN}"}
+          echo "Coolify deploy triggered."

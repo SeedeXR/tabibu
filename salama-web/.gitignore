@@ -1,0 +1,2 @@
+# Never commit real secrets/config — only .env.example is tracked.
+.env

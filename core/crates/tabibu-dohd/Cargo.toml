@@ -1,0 +1,21 @@
+[package]
+name = "tabibu-dohd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false               # internal helper binary, never published
+
+# Salama's local encrypted-DNS resolver — a tiny LaunchDaemon that listens on
+# 127.0.0.1:53 and forwards each DNS query to a DoH (DNS-over-HTTPS) server, so
+# the whole system's lookups are encrypted with NO System Settings profile. This
+# is the privileged piece (binding port 53 needs root); it is installed +
+# managed entirely from the app via an admin prompt. NO external deps: it shells
+# out to the system `curl` for the HTTPS leg.
+
+[[bin]]
+name = "tabibu-dohd"
+path = "src/main.rs"
+
+[lints]
+workspace = true

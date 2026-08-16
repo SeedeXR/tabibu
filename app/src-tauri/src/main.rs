@@ -138,11 +138,16 @@ fn main() {
             commands::docker_prune_volumes,
             commands::network_sample,
             commands::connection_test,
+            commands::salama_status,
+            commands::salama_engine_status,
+            commands::salama_engine_on,
+            commands::salama_engine_off,
             commands::launch_at_login,
             commands::set_launch_at_login,
             commands::show_main_window,
             commands::quit_app,
             commands::popover_detail,
+            commands::popover_resize,
             commands::uptime_secs,
         ])
         .build(tauri::generate_context!())

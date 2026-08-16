@@ -1,0 +1,21 @@
+[package]
+name = "tabibu-route"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false               # internal workspace crate, never published
+
+# Salama route selection — probe scoring, 2-hop path search, and switch
+# hysteresis. PURE + ROOT-FREE + NETWORK-FREE: the transport is injected via the
+# `Prober` trait so all the interesting logic stays under `cargo test`. See
+# tabibu-vpn-notes/vpn-client-integration.md §3.
+
+[dependencies]
+tabibu-vpnproto.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

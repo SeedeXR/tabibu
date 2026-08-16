@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../src",
     "beforeDevCommand": "",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "bash ../scripts/build-dohd.sh"
   },
   "app": {
     "withGlobalTauri": true,
@@ -26,7 +26,7 @@
         "title": "Tabibu Health",
         "url": "menubar.html",
         "width": 360,
-        "height": 496,
+        "height": 536,
         "visible": false,
         "decorations": false,
         "transparent": true,
@@ -44,6 +44,9 @@
     "active": true,
     "targets": ["app", "dmg"],
     "icon": ["icons/icon.icns", "icons/icon.png"],
+    "resources": {
+      "bin/tabibu-dohd": "tabibu-dohd"
+    },
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

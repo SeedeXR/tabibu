@@ -55,7 +55,11 @@
   .status-good b { color: var(--accent); }
   .status-warn b { color: var(--tier-review); }
 
-  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 4px 12px 8px; }
+  /* flex:0 1 auto + min-height:0 + overflow lets the cards shrink and scroll
+     when the window is too short, so the header and footer (Open/Quit) are
+     never clipped — the window height is sized to fit them all normally. */
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 4px 12px 8px;
+    flex: 0 1 auto; min-height: 0; overflow-y: auto; }
   .card {
     background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
     padding: 10px 12px; transition: background 0.15s, border-color 0.15s;
@@ -76,6 +80,20 @@
   .card.net .nr .ar { font-size: 11px; font-weight: 600; color: var(--text-dim); }
   .card.net .net-test { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--accent); cursor: pointer; }
   .card.net .net-test:hover { text-decoration: underline; }
+  .card.sal { grid-column: 1 / -1; }
+  .card.sal .salrow { display: flex; align-items: center; gap: 12px; }
+  .card.sal .salrow > div:first-child { flex: 1; min-width: 0; }
+  .switch { width: 44px; height: 26px; padding: 0; flex: none; border: none; border-radius: 999px;
+    background: var(--border); position: relative; cursor: pointer;
+    transition: background .25s cubic-bezier(.4, 0, .2, 1); }
+  .switch.on { background: var(--accent); }
+  .switch .knob { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35);
+    transition: transform .25s cubic-bezier(.4, 0, .2, 1), width .15s ease; }
+  .switch.on .knob { transform: translateX(18px); }
+  .switch:not(:disabled):active .knob { width: 24px; }
+  .switch.on:not(:disabled):active .knob { transform: translateX(14px); }
+  .switch:disabled { opacity: .55; cursor: default; }
 
   .reco {
     margin: 2px 12px 10px; padding: 10px 12px; border-radius: 10px;
@@ -201,6 +219,15 @@
           <span class="net-test" id="net-test">Test Connection</span>
         </div>
       </div>
+      <div class="card sal">
+        <div class="salrow">
+          <div style="min-width:0">
+            <div class="t"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Salama · Encrypted DNS</div>
+            <div class="s" id="sal-sub">checking…</div>
+          </div>
+          <button class="switch" id="sal-switch" aria-label="Toggle encrypted DNS"><span class="knob"></span></button>
+        </div>
+      </div>
     </div>
 
     <div class="reco">
@@ -227,13 +254,16 @@
 
   $("mark").innerHTML = `<path d="${BRAND_PATH}" />`;
 
-  const GB = 1024 ** 3;
+  const GB = 1024 ** 3; // binary — RAM only (16 GiB reads "16 GB")
   const gb = (b) => (b / GB).toFixed(b / GB >= 100 ? 0 : 1);
+  const GBd = 1000 ** 3; // decimal — storage/disk/network, matches Finder
+  const gbDec = (b) => (b / GBd).toFixed(b / GBd >= 100 ? 0 : 1);
+  const gbDisk = (b) => parseFloat((b / GBd).toFixed(2)); // whole-disk, up to 2 dp
   // Human byte-rate (binary units, labelled /s) for the Network card.
   const fmtRate = (bps) => {
     if (!bps || bps < 1) return "0 B/s";
     const u = ["B", "KB", "MB", "GB"]; let i = 0, v = bps;
-    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
     return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${u[i]}/s`;
   };
   const el = (tag, cls, text) => {
@@ -323,7 +353,7 @@
     const name = el("span", "name", p.name || `pid ${p.pid}`);
     name.title = p.exe_path || "";
     const val = el("span", "val",
-      byCpu ? `${p.cpu_percent.toFixed(1)}%` : `${gb(p.memory_bytes)} GB`);
+      byCpu ? `${p.cpu_percent.toFixed(1)}%` : `${gbDec(p.memory_bytes)} GB`);
     const btn = el("button", null, "Quit");
     btn.addEventListener("click", () => {
       btn.disabled = true;
@@ -415,8 +445,8 @@
         cap.append(fill);
         body.append(cap);
         const duo = el("div", "duo");
-        duo.append(mini("Available", `${gb(d.available_bytes)} GB`, last.diskFrac < 0.1 ? "warn" : ""));
-        duo.append(mini("Total", `${gb(d.total_bytes)} GB`));
+        duo.append(mini("Available", `${gbDisk(d.available_bytes)} GB`, last.diskFrac < 0.1 ? "warn" : ""));
+        duo.append(mini("Total", `${gbDisk(d.total_bytes)} GB`));
         body.append(duo);
       } else {
         body.append(el("div", "empty", "Reading disk…"));
@@ -435,8 +465,8 @@
       const duo = el("div", "duo");
       duo.append(mini("↓ Download", n ? fmtRate(n.down_bps) : "—"));
       duo.append(mini("↑ Upload", n ? fmtRate(n.up_bps) : "—"));
-      duo.append(mini("Total down", n ? `${gb(n.total_down_bytes)} GB` : "—"));
-      duo.append(mini("Total up", n ? `${gb(n.total_up_bytes)} GB` : "—"));
+      duo.append(mini("Total down", n ? `${gbDec(n.total_down_bytes)} GB` : "—"));
+      duo.append(mini("Total up", n ? `${gbDec(n.total_up_bytes)} GB` : "—"));
       body.append(duo);
 
       body.append(el("h3", null, "Connection test"));
@@ -505,8 +535,8 @@
     if (disk && disk.total_bytes) {
       last.disk = disk;
       last.diskFrac = disk.available_bytes / disk.total_bytes;
-      $("disk-v").innerHTML = `${gb(disk.available_bytes)}<span class="unit">GB</span>`;
-      $("disk-s").textContent = `of ${gb(disk.total_bytes)} GB available`;
+      $("disk-v").innerHTML = `${gbDisk(disk.available_bytes)}<span class="unit">GB</span>`;
+      $("disk-s").textContent = `of ${gbDisk(disk.total_bytes)} GB available`;
     }
     if (bat) {
       last.bat = bat;
@@ -554,11 +584,77 @@
     if (detail === "network") renderDetail();
   }
 
-  function refresh() { fastTick(); slowTick(); netTick(); }
+  // Salama encrypted-DNS toggle. Reflects the detected state; the switch turns
+  // it on (Quad9 by default) / off. Turning on opens a one-time macOS approval.
+  let salBusy = false;
+  async function salamaTick() {
+    if (document.hidden || salBusy) return;
+    try {
+      const st = await invoke("salama_engine_status");
+      const on = !!(st && st.installed);
+      $("sal-switch").classList.toggle("on", on);
+      $("sal-sub").textContent = on ? "On · your ISP can't see your sites" : "Off · your ISP sees your sites";
+    } catch { /* leave last */ }
+  }
+  $("sal-switch").addEventListener("click", async () => {
+    if (salBusy) return;
+    salBusy = true;
+    const on = $("sal-switch").classList.contains("on");
+    $("sal-sub").textContent = "Working… (enter your password)";
+    try {
+      if (on) await invoke("salama_engine_off");
+      else await invoke("salama_engine_on", { provider: "quad9" });
+    } catch { /* cancelled or failed; status refresh reflects reality */ }
+    salBusy = false;
+    salamaTick();
+  });
+
+  // Size the popover window to fit the overview EXACTLY, in the real webview.
+  // A hard-coded height clips because WKWebView's font metrics differ from any
+  // headless measurement (and the web font may load late). Measured
+  // non-mutatingly: header + full cards content (scrollHeight, so a scrolled
+  // cards region still reports its true height) + reco + footer, plus the wrap
+  // margins / panel border / a small pad. The Rust side clamps to the display.
+  let lastFit = 0;
+  // Natural (un-stretched) height of the overview panel. Measured by briefly
+  // removing the flex stretch and reading the panel's box, then restoring — all
+  // in ONE synchronous turn, so the browser never paints the intermediate state
+  // (no flash). Window-size-independent and stable, unlike summing children
+  // (footer's `margin-top:auto` reports its used value and would inflate/creep).
+  function overviewContentHeight() {
+    const wrap = document.querySelector(".wrap");
+    const panel = document.querySelector(".panel");
+    if (!wrap || !panel) return 0;
+    const pa = wrap.style.alignItems, ph = wrap.style.height;
+    wrap.style.alignItems = "flex-start"; wrap.style.height = "auto";
+    const h = Math.ceil(panel.getBoundingClientRect().height); // includes panel border
+    wrap.style.alignItems = pa; wrap.style.height = ph;
+    return h;
+  }
+  function fitHeight() {
+    const content = overviewContentHeight();
+    if (content < 100) return; // not laid out yet
+    const height = content + 14; // 12 wrap margins + 2 pad
+    if (Math.abs(height - lastFit) < 1) return; // no change → no resize
+    lastFit = height;
+    invoke("popover_resize", { height }).catch(() => {});
+  }
+
+  function refresh() { fastTick(); slowTick(); netTick(); salamaTick(); }
   refresh();
+  // Fit once the web font is applied (metrics settle), and again if it never
+  // loads (fall back to system font metrics rather than never fitting).
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitHeight).catch(fitHeight);
+  else fitHeight();
+  requestAnimationFrame(() => requestAnimationFrame(fitHeight));
+  // Auto-refit whenever a component is added/removed from the overview cards —
+  // so the window adjusts to future additions without touching this wiring.
+  const cardsEl = document.querySelector(".cards");
+  if (cardsEl) new MutationObserver(fitHeight).observe(cardsEl, { childList: true });
   setInterval(fastTick, 3000);
   setInterval(netTick, 3000);
   setInterval(slowTick, 12000);
+  setInterval(salamaTick, 15000);
   // Hidden → shown: refresh immediately. Hidden: reset to overview so the next
   // open starts collapsed (Rust resets the window size on blur regardless).
   document.addEventListener("visibilitychange", () => {
@@ -567,7 +663,7 @@
       // Drop the last connection test: it's a point-in-time measurement, so the
       // next open must start fresh rather than show a stale result as current.
       connTest = { phase: "idle", data: null, err: null };
-    } else refresh();
+    } else { refresh(); fitHeight(); }
   });
 
   const openMain = (view) => invoke("show_main_window", view ? { view } : {}).catch(() => {});

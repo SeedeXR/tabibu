@@ -865,6 +865,156 @@ fn poisoned_throughput() -> tabibu_net::Throughput {
 }
 
 // ---------------------------------------------------------------------
+// Salama — LOCAL privacy (live now): exposure readout + encrypted DNS.
+// The IP-hiding VPN is server-dependent and deferred (see tabibu-route).
+// ---------------------------------------------------------------------
+
+/// Live privacy status: public IP / relay state + current DNS posture.
+#[tauri::command(async)]
+pub fn salama_status() -> tabibu_salama::PrivacyStatus {
+    tabibu_salama::status()
+}
+
+// ---------------------------------------------------------------------
+// Salama ENGINE — the WARP-style local encrypted-DNS resolver (tabibu-dohd).
+// Fully in-app: one admin prompt installs a root LaunchDaemon that forwards
+// 127.0.0.1:53 → DoH, then points system DNS at it. No System Settings.
+// ---------------------------------------------------------------------
+
+const DOHD_PLIST: &str = "/Library/LaunchDaemons/xr.seede.tabibu.dohd.plist";
+
+#[derive(Serialize)]
+pub struct EngineStatus {
+    /// The Salama resolver LaunchDaemon is installed.
+    pub installed: bool,
+}
+
+/// Whether Salama's own resolver is currently installed.
+#[tauri::command(async)]
+pub fn salama_engine_status() -> EngineStatus {
+    EngineStatus {
+        installed: std::path::Path::new(DOHD_PLIST).exists(),
+    }
+}
+
+/// Turn Salama ON: install the resolver daemon + point system DNS at it, in one
+/// admin prompt. Safety: the install script verifies the resolver actually
+/// answers BEFORE switching DNS, and rolls itself back if it doesn't — so a
+/// failure can never leave the machine with broken DNS.
+#[tauri::command(async)]
+pub fn salama_engine_on(app: tauri::AppHandle, provider: String) -> Result<(), String> {
+    use tauri::Manager;
+    let bin = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("tabibu-dohd");
+    if !bin.exists() {
+        return Err("Salama resolver is missing from the app bundle.".into());
+    }
+    let doh = tabibu_salama::provider_doh_url(&provider);
+    run_admin_shell(&install_script(&bin.to_string_lossy(), doh))
+}
+
+/// Turn Salama OFF / fully remove: restore system DNS FIRST, then unload and
+/// delete the daemon. Idempotent and safe to run when nothing is installed.
+#[tauri::command(async)]
+pub fn salama_engine_off() -> Result<(), String> {
+    run_admin_shell(UNINSTALL_SCRIPT)
+}
+
+/// sh single-quote a value so an embedded path/URL can't break out of the script.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Run a shell script as root via one `osascript` admin prompt. The script is
+/// passed INLINE (no temp file), which avoids a TOCTOU race on a root-run file.
+fn run_admin_shell(script: &str) -> Result<(), String> {
+    // AppleScript string escaping: backslashes then double-quotes.
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let osa = format!("do shell script \"{escaped}\" with administrator privileges");
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", &osa])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        // -128 = user cancelled the admin prompt; report it plainly.
+        if err.contains("-128") {
+            Err("Cancelled.".into())
+        } else {
+            Err(err.trim().to_string())
+        }
+    }
+}
+
+/// Build the install script: copy the daemon, write the KeepAlive plist,
+/// bootstrap it, VERIFY it resolves, then (only then) switch system DNS.
+fn install_script(bin: &str, doh: &str) -> String {
+    format!(
+        r#"set -e
+SRC={src}
+DOH={doh}
+DEST=/usr/local/libexec/tabibu-dohd
+PLIST={plist}
+/bin/mkdir -p /usr/local/libexec
+/bin/cp "$SRC" "$DEST"
+/usr/sbin/chown root:wheel "$DEST"
+/bin/chmod 755 "$DEST"
+/usr/bin/printf '%s\n' \
+ '<?xml version="1.0" encoding="UTF-8"?>' \
+ '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+ '<plist version="1.0"><dict>' \
+ '<key>Label</key><string>xr.seede.tabibu.dohd</string>' \
+ '<key>ProgramArguments</key><array>' \
+ "<string>$DEST</string><string>53</string><string>$DOH</string>" \
+ '</array>' \
+ '<key>RunAtLoad</key><true/>' \
+ '<key>KeepAlive</key><true/>' \
+ '</dict></plist>' > "$PLIST"
+/usr/sbin/chown root:wheel "$PLIST"
+/bin/chmod 644 "$PLIST"
+/bin/launchctl bootout system "$PLIST" 2>/dev/null || true
+/bin/launchctl bootstrap system "$PLIST"
+ok=0; i=0
+while [ $i -lt 12 ]; do
+  if /usr/bin/dig +time=1 +tries=1 +short @127.0.0.1 example.com >/dev/null 2>&1; then ok=1; break; fi
+  /bin/sleep 0.5; i=$((i+1))
+done
+if [ "$ok" != 1 ]; then
+  /bin/launchctl bootout system "$PLIST" 2>/dev/null || true
+  /bin/rm -f "$PLIST" "$DEST"
+  echo 'Salama resolver did not start (port 53 may be in use). No changes made.' >&2
+  exit 1
+fi
+/usr/sbin/networksetup -listallnetworkservices | while IFS= read -r svc; do
+  case "$svc" in ''|\**|'An asterisk'*) continue;; esac
+  /usr/sbin/networksetup -setdnsservers "$svc" 127.0.0.1 || true
+done
+exit 0
+"#,
+        src = sh_quote(bin),
+        doh = sh_quote(doh),
+        plist = DOHD_PLIST,
+    )
+}
+
+/// Restore DNS first, then remove the daemon. Idempotent.
+const UNINSTALL_SCRIPT: &str = r#"PLIST=/Library/LaunchDaemons/xr.seede.tabibu.dohd.plist
+DEST=/usr/local/libexec/tabibu-dohd
+/usr/sbin/networksetup -listallnetworkservices | while IFS= read -r svc; do
+  case "$svc" in ''|\**|'An asterisk'*) continue;; esac
+  /usr/sbin/networksetup -setdnsservers "$svc" empty || true
+done
+/bin/launchctl bootout system "$PLIST" 2>/dev/null || true
+/bin/rm -f "$PLIST" "$DEST"
+exit 0
+"#;
+
+// ---------------------------------------------------------------------
 // Menu bar app lifecycle (tray popover + Settings)
 // ---------------------------------------------------------------------
 
@@ -904,6 +1054,13 @@ pub fn quit_app(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn popover_detail(app: tauri::AppHandle, open: bool) {
     crate::tray::set_popover_detail(&app, open);
+}
+
+/// Size the tray popover to fit its content (height in logical px, measured by
+/// the webview). Keeps nothing clipped regardless of the webview's font metrics.
+#[tauri::command]
+pub fn popover_resize(app: tauri::AppHandle, height: f64) {
+    crate::tray::set_popover_height(&app, height);
 }
 
 /// Seconds since boot (the CPU detail panel's uptime card).

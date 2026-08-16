@@ -6,7 +6,8 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "test": "node tests/menubar-layout.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

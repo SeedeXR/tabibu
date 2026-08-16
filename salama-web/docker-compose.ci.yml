@@ -1,0 +1,8 @@
+# CI/smoke-test overlay ONLY — never used in production.
+# Publishes the admin web port to the host so the integration test can curl it
+# (in prod the web UI is `expose`d and reached via Coolify's proxy, not published).
+# Use: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+services:
+  salama-vpn:
+    ports:
+      - "51821:51821/tcp"

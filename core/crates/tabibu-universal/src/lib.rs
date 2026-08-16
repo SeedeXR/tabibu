@@ -171,6 +171,28 @@ fn signing_status(app: &Path) -> &'static str {
     "unknown"
 }
 
+/// How safe it is to thin this app's non-native slice, derived from its signing
+/// status. This is the axis the UI filters on — "show me only what I can strip
+/// without breaking the app."
+///
+/// - `safe`  — `ad-hoc`/`unsigned`: no Developer-ID/notarization seal to void,
+///   and `lipo`-thinning keeps the per-slice (ad-hoc) signature the loader
+///   checks, so the app still launches.
+/// - `risky` — `developer-id`/`apple`/`signed`: thinning changes the executable
+///   bytes and voids the notarized/Team-signed seal; the app can refuse to
+///   launch or fail Gatekeeper. Also covers Apple/SIP-protected apps you can't
+///   modify at all.
+/// - `unknown` — signing couldn't be classified with confidence; treated as
+///   risky (never guessed safe).
+#[must_use]
+pub fn strip_safety(signing: &str) -> &'static str {
+    match signing {
+        "ad-hoc" | "unsigned" => "safe",
+        "developer-id" | "apple" | "signed" => "risky",
+        _ => "unknown",
+    }
+}
+
 /// One app bundle carrying a reclaimable non-native slice.
 #[derive(Debug, Serialize)]
 pub struct UniversalApp {
@@ -186,6 +208,9 @@ pub struct UniversalApp {
     /// `"developer-id" | "apple" | "signed" | "ad-hoc" | "unsigned" | "unknown"`.
     /// Anything other than `ad-hoc`/`unsigned` means stripping likely breaks it.
     pub signing: String,
+    /// Safety bucket for filtering: `"safe" | "risky" | "unknown"`. See
+    /// [`strip_safety`].
+    pub category: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +218,11 @@ pub struct UniversalReport {
     /// The slice this Mac keeps, e.g. `"arm64"`.
     pub native_arch: String,
     pub total_reclaimable_bytes: u64,
+    /// Bytes reclaimable from `safe` apps only — the headline "you can free this
+    /// without breaking anything" figure the UI leads with.
+    pub safe_reclaimable_bytes: u64,
+    /// Count of `safe`-category apps (for the filter chip badge).
+    pub safe_app_count: u32,
     /// Apps with a reclaimable slice, largest first.
     pub apps: Vec<UniversalApp>,
 }
@@ -241,6 +271,8 @@ pub fn scan(roots: &[PathBuf], cancel: &CancelToken) -> UniversalReport {
         if reclaimable > 0 {
             // native slice first, then the rest — stable, readable display.
             arches.sort_by_key(|&c| (c != native, arch_name(c)));
+            let signing = signing_status(&app).to_owned();
+            let category = strip_safety(&signing).to_owned();
             apps.push(UniversalApp {
                 name: app
                     .file_name()
@@ -249,16 +281,20 @@ pub fn scan(roots: &[PathBuf], cancel: &CancelToken) -> UniversalReport {
                 arches: arches.iter().map(|&c| arch_name(c).to_owned()).collect(),
                 reclaimable_bytes: reclaimable,
                 fat_file_count: fat_files,
-                signing: signing_status(&app).to_owned(),
+                signing,
+                category,
                 path: app,
             });
         }
     }
 
     apps.sort_by_key(|a| std::cmp::Reverse(a.reclaimable_bytes));
+    let safe: Vec<&UniversalApp> = apps.iter().filter(|a| a.category == "safe").collect();
     UniversalReport {
         native_arch: arch_name(native).to_owned(),
         total_reclaimable_bytes: apps.iter().map(|a| a.reclaimable_bytes).sum(),
+        safe_reclaimable_bytes: safe.iter().map(|a| a.reclaimable_bytes).sum(),
+        safe_app_count: safe.len() as u32,
         apps,
     }
 }
@@ -442,5 +478,49 @@ mod tests {
         };
         assert_eq!(a.reclaimable_bytes, expected);
         assert_eq!(report.total_reclaimable_bytes, expected);
+    }
+
+    #[test]
+    fn strip_safety_buckets_signing() {
+        // Only ad-hoc/unsigned are safe to thin; every signed/notarized state is
+        // risky; anything unclassifiable is unknown (never guessed safe).
+        assert_eq!(strip_safety("ad-hoc"), "safe");
+        assert_eq!(strip_safety("unsigned"), "safe");
+        assert_eq!(strip_safety("developer-id"), "risky");
+        assert_eq!(strip_safety("apple"), "risky");
+        assert_eq!(strip_safety("signed"), "risky");
+        assert_eq!(strip_safety("unknown"), "unknown");
+        assert_eq!(strip_safety("anything-else"), "unknown");
+    }
+
+    #[test]
+    fn scan_tags_category_and_safe_totals() {
+        // An ad-hoc-signed app (the temp binary carries no real signature, so
+        // codesign reports it as unsigned → "safe"). Its reclaimable bytes must
+        // flow into both the total and the safe-only headline.
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Demo.app/Contents/MacOS");
+        fs::create_dir_all(&app).unwrap();
+        write_fat(
+            &app.join("Demo"),
+            false,
+            &[(CPU_TYPE_ARM64, 100), (CPU_TYPE_X86_64, 250)],
+        );
+        let report = scan(&[dir.path().to_path_buf()], &CancelToken::new());
+        assert_eq!(report.apps.len(), 1);
+        let a = &report.apps[0];
+        // category is always one of the three buckets and matches its signing.
+        assert_eq!(a.category, strip_safety(&a.signing));
+        assert!(["safe", "risky", "unknown"].contains(&a.category.as_str()));
+        // safe totals are consistent with the per-app category.
+        if a.category == "safe" {
+            assert_eq!(report.safe_reclaimable_bytes, a.reclaimable_bytes);
+            assert_eq!(report.safe_app_count, 1);
+        } else {
+            assert_eq!(report.safe_reclaimable_bytes, 0);
+            assert_eq!(report.safe_app_count, 0);
+        }
+        // safe bytes never exceed the total.
+        assert!(report.safe_reclaimable_bytes <= report.total_reclaimable_bytes);
     }
 }

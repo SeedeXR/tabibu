@@ -65,16 +65,36 @@ function uiToast(message, { danger = false } = {}) {
 }
 
 // ---------- formatting ----------
+// Storage + file sizes use DECIMAL units (1 KB = 1000 B) — that's what macOS
+// reports everywhere (Finder, About This Mac, Get Info). Using binary here made
+// "available disk" read ~7% low vs the OS (e.g. 56 GB instead of 60 GB).
 function fmtBytes(n) {
   n = Number(n) || 0;
   const sign = n < 0 ? "-" : "";
   n = Math.abs(n);
-  if (n < 1024) return `${sign}${n} B`;
+  if (n < 1000) return `${sign}${n} B`;
   const u = ["KB", "MB", "GB", "TB"];
   let i = -1;
-  // 1023.5 (not 1024): toFixed rounds 1023.6 up, which would print "1024 KB".
-  do { n /= 1024; i++; } while (n >= 1023.5 && i < u.length - 1);
+  // 999.5 (not 1000): toFixed would otherwise round 999.6 up to "1000 KB".
+  do { n /= 1000; i++; } while (n >= 999.5 && i < u.length - 1);
   return `${sign}${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
+}
+// Whole-disk capacity — decimal GB/TB with up to 2 decimals (trailing zeros
+// trimmed), so it reads exactly like About This Mac ("60.41 GB", "494.38 GB").
+function fmtDisk(bytes) {
+  const n = Number(bytes) || 0;
+  const [div, unit] = n >= 1e12 ? [1e12, "TB"] : [1e9, "GB"];
+  return `${parseFloat((n / div).toFixed(2))} ${unit}`;
+}
+// RAM is the exception: memory is measured in BINARY (1 GiB = 1024³), so 16 GB
+// of RAM must read "16 GB", not 17.2. Used only for system memory + swap.
+function fmtRam(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} B`;
+  const u = ["KB", "MB", "GB", "TB"];
+  let i = -1;
+  do { n /= 1024; i++; } while (n >= 1023.5 && i < u.length - 1);
+  return `${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
 }
 function displayPath(p) {
   return state.home && p.startsWith(state.home) ? "~" + p.slice(state.home.length) : p;
@@ -779,8 +799,8 @@ function fillDiskHeader(el) {
   el.innerHTML = "";
   if (m.disk) {
     const usedPct = Math.round((1 - m.disk.available_bytes / Math.max(m.disk.total_bytes, 1)) * 100);
-    el.append(h("span", { style: "font-weight:600" }, `${fmtBytes(m.disk.available_bytes)} free`),
-      h("span", { class: "dim" }, `of ${fmtBytes(m.disk.total_bytes)} · ${usedPct}% used`));
+    el.append(h("span", { style: "font-weight:600" }, `${fmtDisk(m.disk.available_bytes)} free`),
+      h("span", { class: "dim" }, `of ${fmtDisk(m.disk.total_bytes)} · ${usedPct}% used`));
   }
   el.append(h("div", { class: "spacer" }));
   const ok = m.smart === "Verified";
@@ -852,8 +872,8 @@ function renderMemory() {
     ring(memFrac, `${Math.round(memFrac * 100)}%`, memColor),
     h("div", { class: "dial" }, ring(Number(s.cpu_percent) / 100, `${Math.round(s.cpu_percent)}%`, "var(--accent)"), h("div", { class: "lbl" }, "CPU")),
     h("div", {},
-      kv("Memory used", `${fmtBytes(s.used_memory_bytes)} / ${fmtBytes(s.total_memory_bytes)}`),
-      kv("Swap used", fmtBytes(s.used_swap_bytes)),
+      kv("Memory used", `${fmtRam(s.used_memory_bytes)} / ${fmtRam(s.total_memory_bytes)}`),
+      kv("Swap used", fmtRam(s.used_swap_bytes)),
       kv("Thermal", monState.thermal ? monState.thermal.pressure + (monState.thermal.speed_limit != null ? ` (CPU ${monState.thermal.speed_limit}%)` : "") : "—"))));
   if (memFrac > 0.9) {
     const heavy = [...s.top_processes].sort((a, b) => Number(b.memory_bytes) - Number(a.memory_bytes))[0];
@@ -935,18 +955,33 @@ async function batteryView() {
 // Network (also in the tray popover; here so it's reachable when the
 // menu-bar icon is hidden behind the notch)
 // =====================================================================
-const netView = { sample: null, conn: { phase: "idle", data: null, err: null } };
+const netView = { sample: null, conn: { phase: "idle", data: null, err: null }, salama: null, engineOn: false, provider: "quad9", dnsBusy: false, advancedOpen: false };
 const fmtRate = (bps) => `${fmtBytes(bps)}/s`;
+const DNS_PROVIDERS = [
+  { id: "cloudflare", name: "Cloudflare", desc: "1.1.1.1 · fast, no query logging" },
+  { id: "quad9", name: "Quad9", desc: "9.9.9.9 · blocks known-malware domains" },
+  { id: "google", name: "Google", desc: "8.8.8.8 · Google Public DNS" },
+  { id: "adguard", name: "AdGuard", desc: "blocks ads & trackers at the DNS layer" },
+];
 function networkView() {
   setTitle("Network", []);
+  netView.customOpen = false;
+  // The 2s tick refreshes ONLY the throughput cards (in place) — a full
+  // re-render would wipe the custom-resolver form the user might be typing in.
   const tick = async () => {
-    try { netView.sample = await invoke("network_sample"); }
-    catch { return; }
-    if (state.current === "network") renderNetwork();
+    try { netView.sample = await invoke("network_sample"); } catch { return; }
+    if (state.current !== "network") return;
+    const el = document.getElementById("net-cards");
+    if (el) el.replaceWith(netCardsEl()); else renderNetwork();
   };
   tick();
   activeTimers.push(setInterval(tick, 2000));
+  fetchSalama();
   renderNetwork();
+}
+function fetchSalama() {
+  Promise.all([invoke("salama_status").catch(() => null), invoke("salama_engine_status").catch(() => ({ installed: false }))])
+    .then(([st, eng]) => { netView.salama = st; netView.engineOn = !!(eng && eng.installed); if (state.current === "network") renderNetwork(); });
 }
 function netStat(label, arrow, rate, sub) {
   return h("div", { class: "card net-stat" },
@@ -954,16 +989,15 @@ function netStat(label, arrow, rate, sub) {
     h("div", { class: "net-stat-v" }, rate),
     h("div", { class: "dim", style: "font-size:12px;margin-top:2px" }, sub));
 }
-function renderNetwork() {
+function netCardsEl() {
   const n = netView.sample;
-  const wrap = h("div", { class: "pad" });
-  wrap.append(h("div", { class: "net-cards" },
+  return h("div", { class: "net-cards", id: "net-cards" },
     netStat("Download", "↓", n ? fmtRate(n.down_bps) : "—", n ? `${fmtBytes(n.total_down_bytes)} total` : ""),
-    netStat("Upload", "↑", n ? fmtRate(n.up_bps) : "—", n ? `${fmtBytes(n.total_up_bytes)} total` : "")));
-
+    netStat("Upload", "↑", n ? fmtRate(n.up_bps) : "—", n ? `${fmtBytes(n.total_up_bytes)} total` : ""));
+}
+function testCard() {
   const c = netView.conn;
-  const test = h("div", { class: "card", style: "margin-top:16px;max-width:520px" },
-    h("h3", { style: "margin-bottom:10px" }, "Test your connection"));
+  const test = h("div", { class: "card" }, h("h3", { style: "margin-bottom:10px" }, "Test your connection"));
   if (c.phase === "testing") test.append(h("p", { class: "dim" }, "Testing — pinging and checking Wi-Fi…"));
   else test.append(h("button", { class: "primary", onClick: runNetTest }, c.phase === "done" ? "Test Again" : "Test Connection"));
   if (c.phase === "error") test.append(h("p", { style: "color:var(--tier-risky);margin-top:8px" }, `Test failed: ${c.err}`));
@@ -976,8 +1010,90 @@ function renderNetwork() {
     rows.append(kv("Latency", p.avg_ms != null ? `${Math.round(p.avg_ms)} ms` : "—"));
     test.append(rows);
   }
-  wrap.append(test);
-  setView(wrap);
+  return test;
+}
+// Every top-level block is a direct child of .net-page (a flex column with a
+// uniform gap), so they line up in one straight, evenly-spaced column.
+function renderNetwork() {
+  const page = h("div", { class: "net-page" });
+  page.append(netCardsEl());
+  page.append(testCard());
+  for (const el of salamaBlocks()) page.append(el);
+  setView(h("div", { class: "pad" }, page));
+}
+// Salama — LIVE local privacy (exposure + encrypted-DNS profile manager). The
+// IP-hiding VPN is server-dependent and shown as pending, honestly.
+function salamaBlocks() {
+  const out = [];
+  out.push(h("div", { class: "row", style: "gap:8px;align-items:center" },
+    icon("lock-keyhole"), h("h3", { style: "font-size:15px;font-weight:700" }, "Salama — Private internet"),
+    h("span", { class: "dim", style: "font-size:11.5px" }, "local privacy, live")));
+  const sal = netView.salama;
+  if (!sal) { out.push(h("div", { class: "card" }, h("p", { class: "dim" }, "Checking your exposure…"))); return out; }
+  const ex = sal.exposure;
+  const on = netView.engineOn;
+  const provName = (DNS_PROVIDERS.find((p) => p.id === netView.provider) || DNS_PROVIDERS[1]).name;
+
+  // ---- The one big ON/OFF switch — Salama's own local encrypted resolver ----
+  out.push(h("div", { class: "card salama-switch-card" },
+    h("div", { style: "flex:1;min-width:0" },
+      h("div", { style: "font-weight:700;font-size:14px" }, "Encrypted DNS"),
+      h("div", { class: "dim", style: "font-size:12px;margin-top:3px" },
+        netView.dnsBusy ? "Working…" : on ? `On · ${provName} — your ISP & Wi-Fi can't see which sites you visit`
+           : "Off — your ISP can see the sites you visit"),
+      h("div", { class: "dim", style: "font-size:11px;margin-top:2px" }, "Salama's own resolver · no WARP · turning on/off takes your admin password")),
+    h("button", { class: "switch" + (on ? " on" : ""), disabled: netView.dnsBusy ? "" : null,
+      "aria-label": on ? "Turn off" : "Turn on", onClick: () => (on ? runSalamaOff() : runSalamaOn()) }, h("span", { class: "knob" }))));
+
+  const exCard = h("div", { class: "card" }, h("h3", { style: "margin-bottom:8px" }, "What the network sees"));
+  exCard.append(kv("Your public IP", ex.ip || "—"));
+  if (ex.country) exCard.append(kv("Location", ex.country));
+  if (ex.org) exCard.append(kv("Network", ex.org));
+  exCard.append(h("p", { class: "dim", style: "font-size:11.5px;margin-top:8px" },
+    "Sites and your ISP see this IP. Encrypted DNS stops your ISP seeing which sites you visit; hiding the IP itself is the Salama VPN, coming."));
+  out.push(exCard);
+
+  // ---- Advanced: pick the resolver Salama forwards to ----
+  const adv = h("div", { class: "card" });
+  adv.append(h("a", { href: "#", style: "color:var(--view-accent);font-size:12.5px;font-weight:600",
+    onClick: (e) => { e.preventDefault(); netView.advancedOpen = !netView.advancedOpen; renderNetwork(); } },
+    (netView.advancedOpen ? "▾ " : "▸ ") + "Resolver: " + provName));
+  if (netView.advancedOpen) {
+    adv.append(h("p", { class: "dim", style: "font-size:11.5px;margin:8px 0" },
+      "Which encrypted resolver Salama forwards your DNS to. Changing it while on re-applies (admin password)."));
+    for (const p of DNS_PROVIDERS) {
+      const sel = p.id === netView.provider;
+      adv.append(h("div", { class: "prof-row" + (sel ? " sel" : ""), style: "cursor:pointer",
+        onClick: () => runSalamaPick(p.id) },
+        h("div", { style: "flex:1;min-width:0" },
+          h("div", { style: "font-weight:600;font-size:13px" }, p.name),
+          h("div", { class: "dim", style: "font-size:11.5px" }, p.desc)),
+        h("span", { style: `font-size:13px;color:${sel ? "var(--view-accent)" : "var(--text-faint)"}` }, sel ? "● selected" : "○")));
+    }
+  }
+  out.push(adv);
+
+  out.push(h("div", { class: "notice" }, icon("info"),
+    h("div", { class: "body" }, h("h3", {}, "Hide my IP (VPN) — coming"),
+      h("p", {}, "Routing your traffic through a Tabibu exit in another country needs servers we don't run yet — the engine is built and tested. Encrypted DNS already stops your ISP from seeing the sites you visit."))));
+  return out;
+}
+async function runSalamaOn() {
+  netView.dnsBusy = true; if (state.current === "network") renderNetwork();
+  try { await invoke("salama_engine_on", { provider: netView.provider }); uiToast("Salama is on — encrypted DNS active."); }
+  catch (e) { if (!/Cancelled/.test(String(e))) uiToast("Couldn't turn on: " + e); }
+  netView.dnsBusy = false; setTimeout(fetchSalama, 600);
+}
+async function runSalamaOff() {
+  netView.dnsBusy = true; if (state.current === "network") renderNetwork();
+  try { await invoke("salama_engine_off"); uiToast("Salama is off — your DNS is back to normal."); }
+  catch (e) { if (!/Cancelled/.test(String(e))) uiToast("Couldn't turn off: " + e); }
+  netView.dnsBusy = false; setTimeout(fetchSalama, 600);
+}
+async function runSalamaPick(id) {
+  netView.provider = id;
+  if (netView.engineOn && !netView.dnsBusy) { await runSalamaOn(); } // re-apply with new resolver
+  else renderNetwork();
 }
 async function runNetTest() {
   netView.conn = { phase: "testing", data: null, err: null };
@@ -986,6 +1102,7 @@ async function runNetTest() {
   catch (e) { netView.conn = { phase: "error", data: null, err: String(e) }; }
   if (state.current === "network") renderNetwork();
 }
+
 
 // =====================================================================
 // Uninstaller
@@ -1570,8 +1687,8 @@ function memCard(sample) {
   if (!sample) return h("div", { class: "dcard", id: "dash-mem-card" });
   const memFrac = sample.used_memory_bytes / Math.max(sample.total_memory_bytes, 1);
   return dcard("cpu", "Memory", `${Math.round(memFrac * 100)}% used`,
-    `${fmtBytes(sample.used_memory_bytes)} of ${fmtBytes(sample.total_memory_bytes)}`
-    + (sample.used_swap_bytes > 0 ? ` · swap ${fmtBytes(sample.used_swap_bytes)}` : ""),
+    `${fmtRam(sample.used_memory_bytes)} of ${fmtRam(sample.total_memory_bytes)}`
+    + (sample.used_swap_bytes > 0 ? ` · swap ${fmtRam(sample.used_swap_bytes)}` : ""),
     "dash-mem-card");
 }
 function cpuCard(sample) {
@@ -1720,7 +1837,7 @@ async function settingsView() {
 // =====================================================================
 // Universal Binaries — READ-ONLY report (detect + report; user decides)
 // =====================================================================
-const uniState = { phase: "idle", report: null, error: null };
+const uniState = { phase: "idle", report: null, error: null, filter: "all" };
 async function universalView() {
   setTitle("Universal Binaries", []);
   const u = uniState;
@@ -1735,7 +1852,7 @@ async function universalView() {
 }
 async function runUniversalScan() {
   const u = uniState;
-  u.phase = "scanning"; render();
+  u.phase = "scanning"; u.filter = "all"; render();
   try {
     u.report = await invoke("scan_universal");
     u.phase = "done";
@@ -1760,16 +1877,31 @@ function universalReport(rep) {
   wrap.append(h("div", { class: "notice", style: "margin:16px 24px" },
     icon("info"),
     h("div", { class: "body" },
-      h("h3", {}, `${fmtBytes(rep.total_reclaimable_bytes)} reclaimable across ${rep.apps.length} app${rep.apps.length === 1 ? "" : "s"}`),
-      h("p", {}, `This Mac runs ${rep.native_arch}. The apps below also carry other-architecture code it never executes. Reclaiming it means lipo-thinning the binary, which invalidates the app's code signature — signed & notarized apps may stop launching. Tabibu reports only and never modifies anything here; strip manually (e.g. \`lipo -thin ${rep.native_arch}\`) if you accept the risk.`),
+      h("h3", {}, `${fmtBytes(rep.safe_reclaimable_bytes)} safe to reclaim · ${fmtBytes(rep.total_reclaimable_bytes)} total across ${rep.apps.length} app${rep.apps.length === 1 ? "" : "s"}`),
+      h("p", {}, `This Mac runs ${rep.native_arch}. These apps also carry other-architecture code it never executes. "Safe" apps are ad-hoc/unsigned — thinning them (\`lipo -thin ${rep.native_arch}\`) frees the space without breaking launch. "Risky" apps are signed/notarized — thinning voids their signature and they may refuse to open. Tabibu is read-only: it measures and categorizes; you strip manually.`),
       h("button", { style: "margin-top:8px", onClick: () => { uniState.phase = "idle"; render(); } }, "Rescan"))));
   if (!rep.apps.length) {
     wrap.append(centered("layers", "No universal binaries found",
       `Every app scanned already ships ${rep.native_arch}-only, or none were found in /Applications.`));
     return wrap;
   }
+  // Safety filter — the axis the user cares about: what can I strip safely.
+  const counts = { all: rep.apps.length, safe: 0, risky: 0, unknown: 0 };
+  for (const a of rep.apps) counts[a.category] = (counts[a.category] || 0) + 1;
+  const CATS = [["all", "All"], ["safe", "Safe"], ["risky", "Risky"], ["unknown", "Unknown"]];
+  const seg = h("div", { class: "seg" });
+  for (const [id, label] of CATS) {
+    if (id !== "all" && !counts[id]) continue; // hide empty buckets
+    seg.append(h("button", { class: uniState.filter === id ? "on" : "",
+      onClick: () => { uniState.filter = id; render(); } },
+      id === "all" ? label : `${label} (${counts[id]})`));
+  }
+  wrap.append(h("div", { class: "filter-row" }, h("span", { class: "flabel" }, "Safety"), seg));
+
+  const shown = uniState.filter === "all" ? rep.apps : rep.apps.filter((a) => a.category === uniState.filter);
   const list = h("div", { class: "list" });
-  for (const a of rep.apps) {
+  if (!shown.length) list.append(h("div", { class: "dim", style: "padding:20px 24px;font-size:12px" }, "No apps in this category."));
+  for (const a of shown) {
     const chips = a.arches.map((x) => h("span", { class: "btag" + (x === rep.native_arch ? " safe" : "") }, x));
     list.append(h("div", { class: "item" },
       h("div", { class: "path" },

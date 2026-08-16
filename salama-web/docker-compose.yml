@@ -1,0 +1,65 @@
+# Salama Web VPN — a self-contained WireGuard server + admin web UI, packaged
+# for Coolify. It wraps the mature, audited `wg-easy` image rather than
+# hand-rolling a VPN server (that is how servers get compromised).
+#
+# ISOLATION — why this will not break your server or other deployments:
+#   • bridge networking (NOT network_mode: host), on its own Compose project network;
+#   • the sysctls below are NAMESPACED to this container by Docker — they never
+#     touch the host's /proc/sys or any other container;
+#   • NAT is done by wg-easy inside THIS container's network namespace, so the
+#     host's iptables are left alone;
+#   • state lives in a named volume, not a host bind-mount into system paths;
+#   • it publishes exactly ONE UDP port (configurable) + one proxied web route.
+#
+# See README.md for Coolify steps, generating PASSWORD_HASH, and firewall notes.
+
+services:
+  salama-vpn:
+    image: ghcr.io/wg-easy/wg-easy:14
+    container_name: salama-vpn
+    restart: unless-stopped
+
+    environment:
+      # Public IP or domain clients dial for the tunnel (REQUIRED).
+      WG_HOST: ${WG_HOST:?set WG_HOST to this server's public IP or a domain that resolves to it}
+      # Bcrypt hash of the admin web-UI password (REQUIRED). Generate it and note
+      # the $$ escaping — see README.md ("Set the admin password").
+      PASSWORD_HASH: ${PASSWORD_HASH:?set PASSWORD_HASH — see README.md}
+      # Web UI listens on this port INSIDE the container (Coolify proxies to it).
+      PORT: 51821
+      # Public UDP port for WireGuard (change if 51820 is already used).
+      WG_PORT: ${WG_PORT:-51820}
+      # DNS handed to connected VPN clients — Quad9 by default, matching Salama.
+      WG_DEFAULT_DNS: ${WG_DEFAULT_DNS:-9.9.9.9}
+      LANG: ${LANG:-en}
+
+    # Only the tunnel's UDP port is published to the host. The web UI is NOT
+    # published directly — expose it through Coolify's HTTPS proxy (a domain),
+    # so the admin panel is never open to the raw internet.
+    ports:
+      - "${WG_PORT:-51820}:51820/udp"
+    expose:
+      - "51821"
+
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE # loads the wireguard kernel module if absent; drop it if your host already has it
+
+    sysctls:
+      # Both are per-container-namespace (Docker rejects non-namespaced sysctls),
+      # so enabling forwarding here does NOT enable it on the host.
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+
+    volumes:
+      - salama_wg:/etc/wireguard
+
+    healthcheck:
+      test: ["CMD", "wg", "show"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  salama_wg:

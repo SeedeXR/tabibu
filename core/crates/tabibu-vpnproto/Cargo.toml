@@ -1,0 +1,20 @@
+[package]
+name = "tabibu-vpnproto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false               # internal workspace crate, never published
+
+# Shared wire types for the Salama VPN feature (app ⇄ daemon ⇄ control plane).
+# PURE serde types only — no I/O, no root, no network. See
+# tabibu-vpn-notes/vpn-client-integration.md §2.
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

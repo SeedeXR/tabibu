@@ -102,3 +102,16 @@ jobs:
       # runner's CPU/time low.
       - name: Build Tabibu app (compile only)
         run: cargo build --manifest-path app/src-tauri/Cargo.toml
+
+      # App-crate unit/regression tests (tray icon silhouette, popover
+      # positioning) — the core `test` job doesn't cover the app crate.
+      - name: Test Tabibu app (Rust)
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml
+
+      # Menu-bar popover layout regression: renders the real menubar.html in
+      # headless Chrome at the configured window size and fails if content is
+      # clipped. Skips itself if Chrome is missing.
+      - name: Install Chrome for the UI layout test
+        run: test -d "/Applications/Google Chrome.app" || brew install --cask google-chrome
+      - name: Menu-bar layout regression test
+        run: node app/tests/menubar-layout.mjs

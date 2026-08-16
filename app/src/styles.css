@@ -295,6 +295,35 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .seg button { border: none; border-radius: 0; background: var(--bg-elev); }
 .seg button.on { background: var(--accent); color: #fff; }
 
+/* Network view — one aligned column of evenly-spaced blocks. */
+.net-page { max-width: 560px; display: flex; flex-direction: column; gap: 16px; }
+.net-page .net-cards { max-width: none; }
+/* Resolver picker — each option is its own spaced, bordered row. */
+.prof-row { display: flex; align-items: center; gap: 12px; padding: 11px 13px; margin-top: 8px;
+  border: 1px solid var(--border); border-radius: 10px; transition: border-color .15s, background .15s; }
+.prof-row.sel { border-color: var(--view-accent); background: color-mix(in srgb, var(--view-accent) 8%, transparent); }
+.prof-row:not(.sel):hover { border-color: color-mix(in srgb, var(--view-accent) 40%, var(--border)); }
+.prof-custom { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+button.sm { font-size: 12px; padding: 4px 12px; }
+.inp { display: block; width: 100%; margin-top: 8px; padding: 7px 10px; font: inherit;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev); color: var(--text); }
+.inp:focus { outline: none; border-color: var(--view-accent); }
+
+/* Toggle switch — smooth, tactile. */
+.salama-switch-card { display: flex; align-items: center; gap: 16px; }
+.switch { width: 50px; height: 30px; padding: 0; flex: none; border: none; border-radius: 999px;
+  background: var(--border); position: relative; cursor: pointer;
+  transition: background .25s cubic-bezier(.4, 0, .2, 1); }
+.switch.on { background: var(--view-accent); }
+.switch .knob { position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.35);
+  transition: transform .25s cubic-bezier(.4, 0, .2, 1), width .15s ease; }
+.switch.on .knob { transform: translateX(20px); }
+.switch:not(:disabled):active .knob { width: 28px; }
+.switch.on:not(:disabled):active .knob { transform: translateX(16px); }
+.switch:disabled { opacity: .55; cursor: default; }
+.switch:focus-visible { outline: 2px solid var(--view-accent); outline-offset: 2px; }
+
 /* Network view throughput cards. */
 .net-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; max-width: 520px; }
 .net-stat { padding: 14px 16px; }
@@ -344,14 +373,14 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .hero .orb svg { width: 58px; height: 58px; stroke-width: 1.6; }
 .hero h2 { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
 .hero .sub { color: var(--text-dim); max-width: 460px; line-height: 1.55; font-size: 14px; }
-.hero .feats { display: flex; flex-direction: column; gap: var(--space-s); margin-top: var(--space-xs); }
-.hero .feat { display: flex; align-items: center; gap: var(--space-s); color: var(--text); font-size: 13px; }
-.hero .feat .fi {
-  width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+.feats { display: flex; flex-direction: column; gap: var(--space-s); margin-top: var(--space-xs); }
+.feat { display: flex; align-items: flex-start; gap: var(--space-s); color: var(--text); font-size: 13px; line-height: 1.4; }
+.feat .fi {
+  width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; flex: none;
   color: var(--view-accent);
   background: color-mix(in srgb, var(--view-accent) 16%, transparent);
 }
-.hero .feat .fi svg { width: 15px; height: 15px; }
+.feat .fi svg { width: 15px; height: 15px; }
 .scan-btn {
   margin-top: var(--space-m); padding: 12px 40px; font-size: 15px; font-weight: 600;
   color: #fff; border: none; border-radius: 24px; cursor: pointer;

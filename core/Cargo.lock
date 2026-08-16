@@ -968,6 +968,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabibu-dohd"
+version = "0.1.51"
+
+[[package]]
 name = "tabibu-dupes"
 version = "0.1.51"
 dependencies = [
@@ -1034,6 +1038,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabibu-route"
+version = "0.1.51"
+dependencies = [
+ "proptest",
+ "tabibu-vpnproto",
+]
+
+[[package]]
+name = "tabibu-salama"
+version = "0.1.51"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "tabibu-telemetry"
 version = "0.1.51"
 dependencies = [
@@ -1060,6 +1081,14 @@ dependencies = [
  "serde",
  "tabibu-engine",
  "tempfile",
+]
+
+[[package]]
+name = "tabibu-vpnproto"
+version = "0.1.51"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

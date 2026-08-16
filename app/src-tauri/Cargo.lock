@@ -3509,6 +3509,7 @@ dependencies = [
  "tabibu-malware",
  "tabibu-monitor",
  "tabibu-net",
+ "tabibu-salama",
  "tabibu-telemetry",
  "tabibu-uninstall",
  "tabibu-universal",
@@ -3592,6 +3593,14 @@ version = "0.1.51"
 dependencies = [
  "serde",
  "sysinfo",
+]
+
+[[package]]
+name = "tabibu-salama"
+version = "0.1.51"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
