@@ -250,7 +250,11 @@ function scanView(id) {
   if (s.phase === "done" || s.phase === "error") actions.push(h("button", { onClick: () => { resetSession(id); startScan(id); } }, "Scan Again"));
   setTitle(def.title, actions);
 
-  if (s.phase === "idle") return setView(heroLanding(def.icon, def.title, def.sub, (HERO[id] || {}).feats || [], () => startScan(id)));
+  if (s.phase === "idle") {
+    const hero = heroLanding(def.icon, def.title, def.sub, (HERO[id] || {}).feats || [], () => startScan(id));
+    if (id === "junk" || id === "smart") hero.append(emptyTrashControl());
+    return setView(hero);
+  }
   if (s.phase === "scanning") return setView(scanningPanel(id));
   if (s.phase === "review") return setView(reviewPanel(id));
   if (s.phase === "reclaiming") return setView(centeredSpinner("Moving items to the Trash…"));
@@ -600,6 +604,32 @@ function heroLanding(ic, title, sub, feats, onScan) {
     h("div", { class: "sub" }, sub),
     feats.length ? featList : null,
     h("button", { class: "scan-btn", onClick: onScan }, "Scan"));
+}
+// "Empty Trash" — permanently delete everything in the Trash (all of it),
+// alongside the review-based cleanup. Shows the current Trash size on the label.
+function emptyTrashControl() {
+  const btn = h("button", { class: "danger", onClick: doEmptyTrash }, "Empty Trash");
+  invoke("trash_size").then((b) => {
+    if (b > 0) btn.textContent = `Empty Trash (${fmtBytes(b)})`;
+    else { btn.textContent = "Trash is empty"; btn.disabled = true; }
+  }).catch(() => {});
+  return h("div", { class: "row", style: "gap:8px;justify-content:center;margin-top:14px" }, btn);
+}
+async function doEmptyTrash() {
+  const size = await invoke("trash_size").catch(() => 0);
+  if (!size) return uiToast("Trash is already empty");
+  if (!(await uiConfirm(
+    `Permanently empty the Trash?\n\nThis deletes everything in your Trash (${fmtBytes(size)}) for good — it can't be undone.`,
+    { danger: true, okLabel: "Empty Trash" }))) return;
+  let res;
+  try { res = await invoke("empty_trash"); }
+  catch (e) { return uiToast(`Empty Trash failed: ${e}`, { danger: true }); }
+  const failed = res.errors && res.errors.length;
+  uiToast(failed
+    ? `Freed ${fmtBytes(res.freed_bytes)} — ${res.errors.length} item(s) couldn't be deleted`
+    : `Emptied the Trash — freed ${fmtBytes(res.freed_bytes)} (${res.deleted_items} item${res.deleted_items === 1 ? "" : "s"})`,
+    { danger: !!failed });
+  render();
 }
 function centeredSpinner(msg) { return h("div", { class: "center" }, h("div", { class: "spinner" }), h("p", {}, msg)); }
 // Spinner with a Stop button for the long synchronous scans (whole-home
@@ -1820,6 +1850,43 @@ async function settingsView() {
         h("button", { class: "primary", onClick: () => invoke("open_url", { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" }) }, "Open Privacy Settings"),
         h("button", { onClick: recheckFDA }, "I've enabled it — re-check"))));
 
+  // Proactive alerts (Trash large / memory pressure) with per-alert snooze.
+  const alertPrefs = await invoke("get_alert_prefs").catch(() => null);
+  if (state.current !== "settings") return;
+  const alertRow = (kind, title, desc) => {
+    const s = (alertPrefs && alertPrefs[kind]) || { enabled: true, snooze_until: null };
+    const cb = h("input", { type: "checkbox" });
+    cb.checked = s.enabled;
+    cb.addEventListener("change", () => {
+      invoke("set_alert_enabled", { kind, enabled: cb.checked })
+        .then(() => settingsView())
+        .catch((e) => { uiToast(String(e), { danger: true }); cb.checked = !cb.checked; });
+    });
+    const isForever = s.snooze_until && s.snooze_until > 1e12; // u64::MAX sentinel
+    const status = !s.enabled ? "off"
+      : s.snooze_until ? (isForever ? "ignored until you re-enable it"
+        : `snoozed until ${new Date(s.snooze_until * 1000).toLocaleString()}`)
+      : "on";
+    const snooze = (choice, label) => h("button", {
+      onClick: () => invoke("snooze_alert", { kind, choice }).then(() => settingsView())
+        .catch((e) => uiToast(String(e), { danger: true })),
+    }, label);
+    return h("div", { class: "setting" },
+      h("div", { class: "body" },
+        h("h3", {}, title),
+        h("p", {}, `${desc} — currently ${status}.`),
+        s.enabled ? h("div", { class: "row", style: "gap:6px;margin-top:8px;flex-wrap:wrap" },
+          snooze("daily", "Ignore today"),
+          snooze("weekly", "Ignore this week"),
+          snooze("forever", "Ignore forever"),
+          s.snooze_until ? snooze("clear", "Un-snooze") : null) : null),
+      h("label", { class: "switch" }, cb, h("span", { class: "track" })));
+  };
+  const testBtn = h("button", { class: "primary", onClick: () =>
+    invoke("send_test_notification")
+      .then(() => uiToast("Test notification sent — check Notification Center"))
+      .catch((e) => uiToast(`Couldn't send: ${e}`, { danger: true })) }, "Send test notification");
+
   setView(h("div", { class: "pad" },
     fda,
     h("div", { class: "setting" },
@@ -1827,6 +1894,13 @@ async function settingsView() {
         h("h3", {}, "Launch at login"),
         h("p", {}, "Tabibu is a menu bar app: it starts in the menu bar (no Dock icon) and keeps the health readout a click away. Closing the dashboard hides it; quit from the menu bar icon.")),
       loginSw),
+    alertRow("trash", "Trash-is-large alert", "Notifies you when the Trash grows past 2 GB, so you can empty it."),
+    alertRow("memory", "Memory-pressure alert", "Notifies you when RAM is nearly full, so you can quit a heavy app."),
+    h("div", { class: "setting" },
+      h("div", { class: "body" },
+        h("h3", {}, "Notifications"),
+        h("p", {}, "If alerts don't appear, allow Tabibu in System Settings → Notifications. Notifications only show from the installed app, not during development."),
+        h("div", { class: "row", style: "gap:8px;margin-top:8px" }, testBtn))),
     h("div", { class: "setting" },
       h("div", { class: "body" },
         h("h3", {}, "Share deselection feedback"),
@@ -1845,8 +1919,8 @@ async function universalView() {
   if (u.phase === "error") return setView(centered("circle-alert", "Something went wrong", u.error, "Try Again", () => { u.phase = "idle"; render(); }));
   if (u.phase === "done") return setView(universalReport(u.report));
   const hero = heroLanding("layers", "Universal Binaries",
-    "Find apps shipping both Intel (x86_64) and Apple Silicon (arm64) code. Your Mac runs only one slice — the other is reclaimable weight. Read-only: Tabibu measures and reports; you decide whether to strip.",
-    ["Scans /Applications & ~/Applications", "Measures the reclaimable (non-native) slice per app", "Shows signing status — stripping can break signed apps"],
+    "Find apps shipping both Intel (x86_64) and Apple Silicon (arm64) code. Your Mac runs only one slice — the other is reclaimable weight. Strip an app to free it (ad-hoc re-signed so it still launches); signed apps are flagged first.",
+    ["Scans /Applications & ~/Applications", "Measures the reclaimable (non-native) slice per app", "One-click Strip — with a warning before touching signed apps"],
     runUniversalScan);
   return setView(hero);
 }
@@ -1872,13 +1946,34 @@ function signingBadge(sig) {
       : "Modifying this binary invalidates its signature; the app may refuse to launch.",
   }, strippable ? `${sig} · strippable` : `${sig} · strip may break`);
 }
+// Thin one app to the native arch (ad-hoc re-sign). Confirms first; warns hard
+// for signed/unknown apps whose signature this voids.
+async function stripApp(a, native) {
+  const freed = fmtBytes(a.reclaimable_bytes);
+  const safe = a.category === "safe";
+  const msg = safe
+    ? `Thin “${a.name}” to ${native}?\n\nFrees ${freed} by removing the other-architecture code, then re-signs it ad-hoc so it still launches. This can't be undone — reinstall the app to restore both architectures.`
+    : `⚠️ “${a.name}” is ${a.signing}-signed. Thinning changes its executable and VOIDS that signature — macOS may refuse to launch it (Gatekeeper) until you reinstall.\n\nFrees ${freed}. Continue anyway?`;
+  if (!(await uiConfirm(msg, { danger: !safe, okLabel: safe ? "Thin" : "Thin anyway" }))) return;
+  let res;
+  try { res = await invoke("strip_universal", { path: a.path }); }
+  catch (e) { return uiToast(`Strip failed: ${e}`, { danger: true }); }
+  if (res.reclaimed_bytes > 0) {
+    a.stripped = true; a.freed = res.reclaimed_bytes;
+    const warn = res.resigned ? "" : " — re-sign failed, it may not launch";
+    uiToast(`Freed ${fmtBytes(res.reclaimed_bytes)} from ${a.name}${warn}`, { danger: !res.resigned });
+    render();
+  } else {
+    uiToast(`Nothing thinned${res.errors && res.errors.length ? ": " + res.errors[0] : ""}`, { danger: true });
+  }
+}
 function universalReport(rep) {
   const wrap = h("div", { class: "review" });
   wrap.append(h("div", { class: "notice", style: "margin:16px 24px" },
     icon("info"),
     h("div", { class: "body" },
       h("h3", {}, `${fmtBytes(rep.safe_reclaimable_bytes)} safe to reclaim · ${fmtBytes(rep.total_reclaimable_bytes)} total across ${rep.apps.length} app${rep.apps.length === 1 ? "" : "s"}`),
-      h("p", {}, `This Mac runs ${rep.native_arch}. These apps also carry other-architecture code it never executes. "Safe" apps are ad-hoc/unsigned — thinning them (\`lipo -thin ${rep.native_arch}\`) frees the space without breaking launch. "Risky" apps are signed/notarized — thinning voids their signature and they may refuse to open. Tabibu is read-only: it measures and categorizes; you strip manually.`),
+      h("p", {}, `This Mac runs ${rep.native_arch}. These apps also carry other-architecture code it never executes. "Safe" apps are ad-hoc/unsigned — Strip thins them to ${rep.native_arch} and re-signs ad-hoc, freeing the space without breaking launch. "Risky" apps are signed/notarized — thinning voids their signature and they may refuse to open, so Strip warns first. Reinstall to restore both architectures.`),
       h("button", { style: "margin-top:8px", onClick: () => { uniState.phase = "idle"; render(); } }, "Rescan"))));
   if (!rep.apps.length) {
     wrap.append(centered("layers", "No universal binaries found",
@@ -1903,13 +1998,18 @@ function universalReport(rep) {
   if (!shown.length) list.append(h("div", { class: "dim", style: "padding:20px 24px;font-size:12px" }, "No apps in this category."));
   for (const a of shown) {
     const chips = a.arches.map((x) => h("span", { class: "btag" + (x === rep.native_arch ? " safe" : "") }, x));
+    const actions = a.stripped
+      ? [h("span", { class: "isize", style: "color:#10b981" }, `✓ Freed ${fmtBytes(a.freed || a.reclaimable_bytes)}`)]
+      : [h("span", { class: "isize" }, fmtBytes(a.reclaimable_bytes)),
+         h("button", { class: a.category === "safe" ? "primary" : "danger",
+           onClick: () => stripApp(a, rep.native_arch) }, "Strip"),
+         h("button", { onClick: () => invoke("reveal_in_finder", { path: a.path }) }, "Reveal")];
     list.append(h("div", { class: "item" },
       h("div", { class: "path" },
         h("div", { class: "p", title: a.path }, a.name),
         h("div", { class: "reason" }, `${a.fat_file_count} universal file${a.fat_file_count === 1 ? "" : "s"} · ${displayPath(a.path)}`)),
       h("div", { class: "btags" }, ...chips, signingBadge(a.signing)),
-      h("span", { class: "isize" }, fmtBytes(a.reclaimable_bytes)),
-      h("button", { onClick: () => invoke("reveal_in_finder", { path: a.path }) }, "Reveal")));
+      ...actions));
   }
   wrap.append(list);
   return wrap;

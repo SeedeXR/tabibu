@@ -220,6 +220,28 @@ pub fn scan_universal() -> tabibu_universal::UniversalReport {
     tabibu_universal::scan(&roots, &cancel)
 }
 
+/// Thin one app bundle to this Mac's native architecture and ad-hoc re-sign it,
+/// freeing the other-arch slices. Destructive + irreversible (the UI confirms,
+/// and warns hard for signed apps whose signature this voids). `path` is the
+/// `.app` bundle path from a prior [`scan_universal`] result.
+///
+/// Validated like the other destructive commands (`trash_path`): a frontend bug
+/// or unexpected value must not let this walk-and-thin an arbitrary subtree.
+#[tauri::command(async)]
+pub fn strip_universal(path: String) -> Result<tabibu_universal::StripResult, String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_absolute() {
+        return Err("path must be absolute".into());
+    }
+    if p.extension().and_then(|e| e.to_str()) != Some("app") {
+        return Err("only .app bundles can be thinned".into());
+    }
+    if let Some(reason) = tabibu_engine::denylist::denied(p, &system::home_dir()) {
+        return Err(format!("protected path ({reason:?}); refusing to strip"));
+    }
+    Ok(tabibu_universal::strip_app(p))
+}
+
 // ---------------------------------------------------------------------------
 // Space map
 // ---------------------------------------------------------------------------
@@ -420,6 +442,107 @@ pub fn trash_path(path: String) -> Result<(), String> {
     }
     // Same silent (no Finder sound), spawn-free trash path as reclaim uses.
     tabibu_engine::move_to_trash(p).map_err(|e| e.to_string())
+}
+
+/// `~/.Trash` plus every mounted volume's per-user trash — the same set the
+/// Trash scanner and the "Trash is large" alert use. `pub(crate)` so the tray
+/// sampler's alert shares this exact derivation (can't drift from the command).
+pub(crate) fn trash_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![system::home_dir().join(".Trash")];
+    dirs.extend(system::per_volume_trash_roots());
+    dirs
+}
+
+/// Current total size of the Trash (for the Empty-Trash button's label).
+#[tauri::command(async)]
+pub fn trash_size() -> u64 {
+    tabibu_junk::trash_total_size(&trash_dirs(), &tabibu_engine::CancelToken::new())
+}
+
+/// Result of emptying the Trash.
+#[derive(Serialize)]
+pub struct EmptyTrashResult {
+    pub freed_bytes: u64,
+    pub deleted_items: u32,
+    pub errors: Vec<String>,
+}
+
+/// PERMANENTLY empty the Trash (all of it, incl. per-volume trashes). Destructive
+/// and irreversible — the UI confirms first. Returns bytes/items freed.
+#[tauri::command(async)]
+pub fn empty_trash() -> EmptyTrashResult {
+    let o = tabibu_junk::empty_trash_dirs(&trash_dirs());
+    EmptyTrashResult {
+        freed_bytes: o.freed_bytes,
+        deleted_items: o.deleted_items,
+        errors: o.errors,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proactive alerts (Trash-large / memory-pressure) — enable + snooze prefs.
+// ---------------------------------------------------------------------------
+
+fn alerts_config_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    use tauri::Manager;
+    app.path().app_config_dir().unwrap_or_default()
+}
+
+/// Current alert preferences (for the Settings UI).
+#[tauri::command(async)]
+pub fn get_alert_prefs() -> crate::alerts::AlertPrefs {
+    crate::alerts::snapshot()
+}
+
+/// Enable/disable one alert (`kind` = "trash" | "memory"). Enabling also clears
+/// any active snooze. Returns the updated prefs.
+#[tauri::command(async)]
+pub fn set_alert_enabled(
+    app: tauri::AppHandle,
+    kind: String,
+    enabled: bool,
+) -> crate::alerts::AlertPrefs {
+    crate::alerts::update(&alerts_config_dir(&app), |p| {
+        let s = match kind.as_str() {
+            "trash" => &mut p.trash,
+            "memory" => &mut p.memory,
+            _ => return,
+        };
+        s.enabled = enabled;
+        if enabled {
+            s.snooze_until = None; // re-enabling un-snoozes
+        }
+    })
+}
+
+/// Snooze one alert. `choice` = "daily" | "weekly" | "forever" | "clear".
+#[tauri::command(async)]
+pub fn snooze_alert(
+    app: tauri::AppHandle,
+    kind: String,
+    choice: String,
+) -> crate::alerts::AlertPrefs {
+    let Some(until) = crate::alerts::snooze_until_for(&choice, crate::alerts::now_secs()) else {
+        return crate::alerts::snapshot(); // unrecognized choice: no change
+    };
+    crate::alerts::update(&alerts_config_dir(&app), |p| match kind.as_str() {
+        "trash" => p.trash.snooze_until = until,
+        "memory" => p.memory.snooze_until = until,
+        _ => {}
+    })
+}
+
+/// Fire a test notification so the user can confirm macOS is delivering them
+/// (and grant permission on first show).
+#[tauri::command(async)]
+pub fn send_test_notification(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title("Tabibu notifications are on")
+        .body("This is a test alert. Trash and memory alerts will appear like this.")
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,8 @@ use tabibu_engine::{
     CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx, ScanError, Scanner,
 };
 use tabibu_junk::{
-    scanners, DevCacheScanner, LogScanner, TempScanner, TrashScanner, UserCacheScanner,
+    empty_trash_dirs, scanners, trash_total_size, DevCacheScanner, LogScanner, TempScanner,
+    TrashScanner, UserCacheScanner,
 };
 
 fn make_ctx(home: &Path) -> ScanCtx {
@@ -391,4 +392,41 @@ fn every_scanner_returns_cancelled_when_cancelled_up_front() {
             scanner.id()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// empty_trash_dirs / trash_total_size
+// ---------------------------------------------------------------------------
+
+#[test]
+fn empty_trash_deletes_everything_and_reports_freed_bytes() {
+    let trash = tempfile::tempdir().unwrap();
+    // A loose file (5 bytes) and a nested folder (3 + 4 = 7 bytes).
+    write_file(&trash.path().join("loose.txt"), b"12345");
+    write_file(&trash.path().join("sub/a.bin"), b"abc");
+    write_file(&trash.path().join("sub/b.bin"), b"defg");
+    let dirs = vec![trash.path().to_path_buf()];
+
+    // Size before matches the bytes we'll free.
+    let before = trash_total_size(&dirs, &CancelToken::new());
+    assert_eq!(
+        before, 12,
+        "5 + 3 + 4 bytes across the two top-level entries"
+    );
+
+    let out = empty_trash_dirs(&dirs);
+    assert_eq!(out.deleted_items, 2, "two top-level entries removed");
+    assert_eq!(out.freed_bytes, 12);
+    assert!(out.errors.is_empty(), "clean delete: {:?}", out.errors);
+    // The trash dir itself remains but is now empty.
+    assert_eq!(fs::read_dir(trash.path()).unwrap().count(), 0);
+    assert_eq!(trash_total_size(&dirs, &CancelToken::new()), 0);
+}
+
+#[test]
+fn empty_trash_missing_dir_is_a_noop() {
+    let out = empty_trash_dirs(&[PathBuf::from("/no/such/trash/dir")]);
+    assert_eq!(out.deleted_items, 0);
+    assert_eq!(out.freed_bytes, 0);
+    assert!(out.errors.is_empty());
 }

@@ -289,6 +289,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         // spam). Pausing monitoring pauses the alerts too.
         let mut mem_alert_armed = true;
         let mut therm_alert_armed = true;
+        let mut trash_alert_armed = true;
         let mut tick: u32 = 0;
         loop {
             if PAUSED.load(Ordering::Relaxed) {
@@ -316,8 +317,9 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                     let _ = tray.set_tooltip(Some(&tip));
                 }
 
-                // RAM nearly depleted → notify once; re-arm below 85%.
-                if mem_pct >= 90 && mem_alert_armed {
+                // RAM nearly depleted → notify once (unless the user disabled or
+                // snoozed the alert); re-arm below 85%.
+                if mem_pct >= 90 && mem_alert_armed && crate::alerts::memory_active() {
                     mem_alert_armed = false;
                     notify(
                         &handle,
@@ -330,6 +332,33 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                     );
                 } else if mem_pct < 85 {
                     mem_alert_armed = true;
+                }
+
+                // Trash grown past 2 GB → notify once (walking the Trash is the
+                // heavy bit, so only every 60th tick ≈ 5 min); re-arm well below
+                // the line. Gated by the user's snooze/disable choice.
+                if tick % 60 == 0 {
+                    let size = tabibu_junk::trash_total_size(
+                        &crate::commands::trash_dirs(),
+                        &tabibu_engine::CancelToken::new(),
+                    );
+                    if size >= crate::alerts::TRASH_ALERT_BYTES
+                        && trash_alert_armed
+                        && crate::alerts::trash_active()
+                    {
+                        trash_alert_armed = false;
+                        notify(
+                            &handle,
+                            "Your Trash is getting large",
+                            &format!(
+                                "The Trash holds {:.1} GB. Open Tabibu → Junk to \
+                                 empty it and reclaim the space.",
+                                size as f64 / 1_000_000_000.0
+                            ),
+                        );
+                    } else if size < crate::alerts::TRASH_ALERT_BYTES * 8 / 10 {
+                        trash_alert_armed = true;
+                    }
                 }
 
                 // Thermal costs a pmset spawn — every 6th tick (30s) is plenty.

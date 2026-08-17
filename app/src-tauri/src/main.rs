@@ -10,6 +10,7 @@
 // until first opened. Only Quit (tray / Cmd-Q) exits.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod alerts;
 mod commands;
 mod system;
 mod tray;
@@ -28,6 +29,11 @@ fn main() {
             Some(vec!["--from-autostart"]),
         ))
         .setup(|app| {
+            // Load persisted alert prefs (Trash / memory snooze) before the tray
+            // sampler starts reading them.
+            if let Ok(dir) = app.path().app_config_dir() {
+                alerts::load(&dir);
+            }
             // A login (LaunchAgent) start passes `--from-autostart`; start
             // quietly in the menu bar then (Accessory, dashboard hidden) so we
             // don't pop a 1120x740 window on every login. A manual open has no
@@ -116,6 +122,12 @@ fn main() {
             commands::reveal_in_finder,
             commands::open_url,
             commands::trash_path,
+            commands::trash_size,
+            commands::empty_trash,
+            commands::get_alert_prefs,
+            commands::set_alert_enabled,
+            commands::snooze_alert,
+            commands::send_test_notification,
             commands::telemetry_enabled,
             commands::set_telemetry_enabled,
             commands::record_deselection,
@@ -125,6 +137,7 @@ fn main() {
             commands::scan_orphans,
             commands::scan_malware,
             commands::scan_universal,
+            commands::strip_universal,
             commands::quarantine,
             commands::record_free_space,
             commands::brew_analyze,

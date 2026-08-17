@@ -280,6 +280,65 @@ pub fn per_volume_trash_dirs(volumes_root: &Path, uid: u32) -> Vec<PathBuf> {
     dirs
 }
 
+/// Outcome of permanently emptying trash directories.
+pub struct EmptyTrashOutcome {
+    pub freed_bytes: u64,
+    pub deleted_items: u32,
+    /// Per-entry failures (e.g. a locked/permission-denied item); the rest still
+    /// get deleted.
+    pub errors: Vec<String>,
+}
+
+/// Total recursive size of the given trash directories — the figure the
+/// "your Trash is large" alert and the Empty-Trash button display. Missing dirs
+/// contribute 0; never follows symlinks.
+#[must_use]
+pub fn trash_total_size(dirs: &[PathBuf], cancel: &CancelToken) -> u64 {
+    dirs.iter()
+        .flat_map(|d| fs::read_dir(d).into_iter().flatten().flatten())
+        .map(|e| entry_size(&e.path(), cancel).unwrap_or(0))
+        .sum()
+}
+
+/// PERMANENTLY delete every top-level entry in each trash directory (the OS
+/// "Empty Trash"). Sizes each entry first so the caller can report bytes freed.
+/// Best-effort and irreversible: a failed delete is recorded and the rest
+/// proceed. Callers MUST confirm with the user before invoking.
+#[must_use]
+pub fn empty_trash_dirs(dirs: &[PathBuf]) -> EmptyTrashOutcome {
+    let cancel = CancelToken::new();
+    let mut freed = 0u64;
+    let mut deleted_items = 0u32;
+    let mut errors = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue; // trash dir doesn't exist / unreadable → nothing to empty
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let size = entry_size(&p, &cancel).unwrap_or(0);
+            // symlink → remove the link itself (never the target); dir →
+            // recursive; file → unlink.
+            let res = match fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => fs::remove_dir_all(&p),
+                _ => fs::remove_file(&p),
+            };
+            match res {
+                Ok(()) => {
+                    freed += size;
+                    deleted_items += 1;
+                }
+                Err(e) => errors.push(format!("{}: {e}", p.display())),
+            }
+        }
+    }
+    EmptyTrashOutcome {
+        freed_bytes: freed,
+        deleted_items,
+        errors,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UserCacheScanner
 // ---------------------------------------------------------------------------

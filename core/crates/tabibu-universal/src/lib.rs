@@ -1,14 +1,17 @@
-//! Universal ("fat") binary analysis — READ-ONLY.
+//! Universal ("fat") binary analysis and thinning.
 //!
 //! A universal binary carries machine code for more than one CPU architecture
 //! (e.g. `x86_64` + `arm64`). Your Mac only ever runs the slice matching its
-//! hardware; the other slice is dead weight on disk. This crate *detects and
-//! measures* that reclaimable weight per app bundle. It never modifies a file.
+//! hardware; the other slice is dead weight on disk. [`scan`] *detects and
+//! measures* that reclaimable weight per app bundle (read-only). [`strip_app`]
+//! *reclaims* it by thinning every fat Mach-O in a bundle down to the native
+//! slice, then ad-hoc re-signing so the app still launches.
 //!
-//! Reclaiming the space means `lipo`-thinning the binary in place, which
-//! invalidates the app's code signature and can stop signed/notarized apps
-//! from launching — so Tabibu reports the opportunity and the signing status
-//! and leaves the decision (a manual `lipo`) to the user. Nothing here writes.
+//! Thinning extracts the native slice's bytes directly (a fat slice IS a
+//! standalone thin Mach-O), so it needs no `lipo`/Xcode — only `codesign`,
+//! which ships with macOS. It DOES invalidate a Developer-ID/notarized seal:
+//! [`strip_safety`] classifies each app so the UI can warn before thinning a
+//! signed app (which may then refuse to launch until reinstalled).
 //!
 //! ## Mach-O fat format (all fields big-endian on disk)
 //! `fat_header { magic: u32, nfat_arch: u32 }` then `nfat_arch` × `fat_arch`.
@@ -37,6 +40,10 @@ const MAX_SANE_ARCHS: u32 = 32;
 /// One architecture slice within a fat binary.
 struct Slice {
     cpu_type: i32,
+    /// Byte offset of the slice within the fat file (a fat slice is a complete,
+    /// standalone thin Mach-O — extracting `[offset, offset+size)` yields the
+    /// thinned binary, no `lipo` needed).
+    offset: u64,
     size: u64,
 }
 
@@ -96,7 +103,11 @@ fn read_fat_slices(path: &Path) -> Option<Vec<Slice>> {
         if offset.checked_add(size)? > file_len {
             return None;
         }
-        slices.push(Slice { cpu_type, size });
+        slices.push(Slice {
+            cpu_type,
+            offset,
+            size,
+        });
     }
     Some(slices)
 }
@@ -349,6 +360,137 @@ fn walk_files(dir: &Path, cancel: &CancelToken, visit: &mut dyn FnMut(&Path)) {
     }
 }
 
+/// Outcome of thinning one app bundle.
+#[derive(Debug, Serialize)]
+pub struct StripResult {
+    pub app: String,
+    /// Bytes freed (sum of the non-native slices removed across the bundle).
+    pub reclaimed_bytes: u64,
+    /// Number of fat Mach-O files thinned to the native slice.
+    pub files_thinned: u32,
+    /// Whether the ad-hoc re-sign succeeded (an unsigned arm64 binary won't
+    /// launch, so this matters even for already-unsigned apps).
+    pub resigned: bool,
+    /// Per-file / re-sign failures (empty on a fully clean strip). Non-fatal
+    /// ones are collected so a partial strip still reports what it did.
+    pub errors: Vec<String>,
+}
+
+/// Monotonic counter for unique temp filenames (avoids `rand`/timestamp).
+static THIN_CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Thin one fat Mach-O file to `native` by extracting that slice's bytes into a
+/// sibling temp file and atomically renaming over the original (preserving
+/// permissions). Returns `Ok(Some(reclaimed))` when it thinned, `Ok(None)` when
+/// the file is not a multi-slice fat binary containing the native arch.
+fn thin_file_to_native(file: &Path, native: i32) -> std::io::Result<Option<u64>> {
+    use std::io::{Seek, SeekFrom};
+    let Some(slices) = read_fat_slices(file) else {
+        return Ok(None);
+    };
+    if slices.len() < 2 {
+        return Ok(None); // already thin-in-a-fat-wrapper or single arch: skip
+    }
+    let Some(nat) = slices.iter().find(|s| s.cpu_type == native) else {
+        return Ok(None); // no native slice → thinning would remove all runnable code
+    };
+    let reclaimed: u64 = slices
+        .iter()
+        .filter(|s| s.cpu_type != native)
+        .map(|s| s.size)
+        .sum();
+
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let n = THIN_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".tabibu-thin-{}-{n}", std::process::id()));
+    let perms = fs::metadata(file)?.permissions();
+
+    let mut src = File::open(file)?;
+    src.seek(SeekFrom::Start(nat.offset))?;
+    // Extract the native slice into the temp file. On ANY failure (create,
+    // copy, chmod, or the rename) remove the temp so a partial `.tabibu-thin-*`
+    // never litters the app bundle.
+    let write = (|| -> std::io::Result<()> {
+        let mut dst = File::create(&tmp)?;
+        std::io::copy(&mut src.take(nat.size), &mut dst)?;
+        dst.set_permissions(perms)?;
+        Ok(())
+    })()
+    .and_then(|()| fs::rename(&tmp, file)); // atomic within the directory
+    if let Err(e) = write {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(Some(reclaimed))
+}
+
+/// Ad-hoc re-sign a bundle so the thinned binaries still launch. `codesign`
+/// ships with macOS (unlike `lipo`), so this needs no Xcode.
+fn resign_adhoc(app: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-", "--deep"])
+        .arg(app)
+        .output()
+        .map_err(|e| format!("codesign: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// Thin every fat Mach-O in `app` down to this Mac's native slice, then ad-hoc
+/// re-sign the bundle. Irreversible (the other architecture is discarded);
+/// callers must confirm, and warn hard for signed apps (see [`strip_safety`]).
+///
+/// Best-effort and non-atomic across files: a per-file error is collected and
+/// the rest still proceed, so `reclaimed_bytes`/`files_thinned` report what
+/// actually happened even on a partial failure.
+#[must_use]
+pub fn strip_app(app: &Path) -> StripResult {
+    let native = native_cpu_type();
+    let mut files: Vec<PathBuf> = Vec::new();
+    walk_files(app, &CancelToken::new(), &mut |p| files.push(p.to_owned()));
+
+    let mut reclaimed = 0u64;
+    let mut thinned = 0u32;
+    let mut errors = Vec::new();
+    for f in &files {
+        match thin_file_to_native(f, native) {
+            Ok(Some(bytes)) => {
+                reclaimed += bytes;
+                thinned += 1;
+            }
+            Ok(None) => {}
+            Err(e) => errors.push(format!("{}: {e}", f.display())),
+        }
+    }
+
+    // Re-sign only if we actually changed something.
+    let resigned = if thinned > 0 {
+        match resign_adhoc(app) {
+            Ok(()) => true,
+            Err(e) => {
+                errors.push(format!("re-sign: {e}"));
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    StripResult {
+        app: app
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_end_matches(".app").to_owned())
+            .unwrap_or_default(),
+        reclaimed_bytes: reclaimed,
+        files_thinned: thinned,
+        resigned,
+        errors,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +633,110 @@ mod tests {
         assert_eq!(strip_safety("signed"), "risky");
         assert_eq!(strip_safety("unknown"), "unknown");
         assert_eq!(strip_safety("anything-else"), "unknown");
+    }
+
+    #[test]
+    fn thin_file_extracts_native_slice_and_frees_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bin");
+        // arm64 (100) + x86_64 (250).
+        write_fat(&p, true, &[(CPU_TYPE_ARM64, 100), (CPU_TYPE_X86_64, 250)]);
+        let orig_len = fs::metadata(&p).unwrap().len();
+
+        let native = native_cpu_type();
+        let non_native = if native == CPU_TYPE_ARM64 { 250 } else { 100 };
+        let native_size = if native == CPU_TYPE_ARM64 { 100 } else { 250 };
+
+        let reclaimed = thin_file_to_native(&p, native).unwrap();
+        assert_eq!(
+            reclaimed,
+            Some(non_native),
+            "frees exactly the non-native slice"
+        );
+        // File is now just the native slice's bytes — no longer a fat binary.
+        assert_eq!(fs::metadata(&p).unwrap().len(), native_size);
+        assert!(fs::metadata(&p).unwrap().len() < orig_len);
+        assert!(
+            read_fat_slices(&p).is_none(),
+            "thinned file is no longer fat"
+        );
+    }
+
+    #[test]
+    fn thin_file_skips_non_fat_and_single_arch() {
+        let dir = tempfile::tempdir().unwrap();
+        // A plain (non-fat) file is left untouched.
+        let txt = dir.path().join("readme.txt");
+        File::create(&txt)
+            .unwrap()
+            .write_all(b"hello world")
+            .unwrap();
+        assert_eq!(thin_file_to_native(&txt, native_cpu_type()).unwrap(), None);
+        assert_eq!(fs::read(&txt).unwrap(), b"hello world");
+    }
+
+    /// End-to-end on a REAL universal binary: build with clang, thin the bundle,
+    /// and assert the thinned binary still RUNS (the whole point). Skips if the
+    /// toolchain to build a universal binary isn't available.
+    #[test]
+    fn strip_app_thins_a_real_bundle_and_it_still_runs() {
+        let has_clang = std::process::Command::new("/usr/bin/clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !has_clang {
+            eprintln!("skipping: /usr/bin/clang unavailable (can't build a universal binary)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("u.c");
+        File::create(&src)
+            .unwrap()
+            .write_all(b"int main(){return 7;}")
+            .unwrap();
+        let macos = dir.path().join("Demo.app/Contents/MacOS");
+        fs::create_dir_all(&macos).unwrap();
+        let bin = macos.join("Demo");
+        let built = std::process::Command::new("/usr/bin/clang")
+            .args(["-arch", "x86_64", "-arch", "arm64", "-o"])
+            .arg(&bin)
+            .arg(&src)
+            .output()
+            .unwrap();
+        if !built.status.success() {
+            eprintln!(
+                "skipping: clang couldn't build universal ({})",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            return;
+        }
+        // Sum the non-native slice bytes present BEFORE thinning — what a
+        // correct strip should report as reclaimed (grounds the parser).
+        let native = native_cpu_type();
+        let expected_reclaim: u64 = read_fat_slices(&bin)
+            .unwrap()
+            .iter()
+            .filter(|s| s.cpu_type != native)
+            .map(|s| s.size)
+            .sum();
+
+        let app = dir.path().join("Demo.app");
+        let res = strip_app(&app);
+        assert_eq!(res.files_thinned, 1, "the one fat Mach-O was thinned");
+        assert_eq!(
+            res.reclaimed_bytes, expected_reclaim,
+            "reports the removed slice bytes"
+        );
+        assert!(res.resigned, "ad-hoc re-sign succeeded: {:?}", res.errors);
+        // The non-native slice is gone: the file is a thin Mach-O, not fat.
+        // (Net file size can even tick up on a *tiny* binary because arm64
+        // page-alignment + the ad-hoc signature exceed 4KB of x86_64 slice;
+        // real multi-MB apps reclaim far more than that padding.)
+        assert!(read_fat_slices(&bin).is_none(), "no longer a fat binary");
+
+        // The critical property for a destructive op: it must still execute.
+        let run = std::process::Command::new(&bin).status().unwrap();
+        assert_eq!(run.code(), Some(7), "thinned binary must still run");
     }
 
     #[test]
