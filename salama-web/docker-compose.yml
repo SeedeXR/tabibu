@@ -54,8 +54,13 @@ services:
     volumes:
       - salama_wg:/etc/wireguard
 
+    # Healthy only when BOTH the tunnel is up (wg show) AND the admin web
+    # UI/API is actually serving on its internal port — so Coolify's deploy
+    # status reflects the API, not just the WireGuard interface. `wg` and
+    # busybox `wget` both ship in the image.
     healthcheck:
-      test: ["CMD", "wg", "show"]
+      test:
+        ["CMD-SHELL", "wg show >/dev/null 2>&1 && wget -q -O /dev/null http://127.0.0.1:51821/"]
       interval: 30s
       timeout: 5s
       retries: 3

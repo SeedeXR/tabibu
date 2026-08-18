@@ -101,12 +101,14 @@ this one once its data-plane (`tabibu-tunnel`) ships. See
 `.github/workflows/salama-web.yml` runs on any change under `salama-web/`:
 
 - **`validate`** (unit-level, every push/PR): `docker compose config`, enforces a
-  **UDP** tunnel port and a **pinned** image (no `:latest`/untagged), checks
-  `.env.example` documents every variable, and that no real `.env` is committed.
+  **UDP** tunnel port and a **pinned** image (no `:latest`/untagged), that the
+  **healthcheck probes the web UI** (not just the tunnel), that `.env.example`
+  documents every variable, and that no real `.env` is committed.
 - **`yamllint`**: lints both compose files.
 - **`e2e`** (every push/PR): the real regression gate. Brings the container up,
-  waits for healthy, asserts `wg0` is up on the tunnel port and the admin web UI
-  returns `200`, then **creates a client through the admin API, spins up a
+  waits for healthy, asserts `wg0` is up on the tunnel port and that both the web
+  UI (`/`) and the admin **API** (`/api/release`) return `200`, then **creates a
+  client through the admin API, spins up a
   separate WireGuard client container on the same network, and proves a real
   cryptographic handshake** — ICMP flows through the tunnel to the server and
   `wg` reports a completed handshake. Finally tears everything down (`down -v`,
@@ -126,7 +128,11 @@ push to `main` that touches `salama-web/` will then redeploy.
 ## Operate
 
 - **Logs:** Coolify → the resource → Logs (or `docker logs salama-vpn`).
-- **Health:** the container reports healthy once `wg` is up.
+- **Health:** the container's healthcheck goes `healthy` only when **both** the
+  WireGuard tunnel (`wg show`) **and** the admin web UI/API (HTTP on `51821`) are
+  serving — so Coolify's deploy status reflects the whole app, not just the
+  tunnel. A crashed web UI shows unhealthy and Coolify's restart policy recovers
+  it. Check with `docker inspect --format '{{.State.Health.Status}}' salama-vpn`.
 - **Update:** re-pull `ghcr.io/wg-easy/wg-easy:14` and redeploy (pinned tag — no surprise upgrades).
 - **Reputation:** datacenter IPs often trip CAPTCHAs / streaming blocks — that's
   the IP range, not this config.

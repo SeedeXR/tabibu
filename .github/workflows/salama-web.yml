@@ -59,6 +59,12 @@ jobs:
           grep -qE 'image:\s*ghcr\.io/wg-easy/wg-easy:[0-9]+' docker-compose.yml \
             && echo "image pinned OK"
 
+      - name: healthcheck must verify the web UI (not just the tunnel)
+        run: |
+          grep -qE "wget .*127\.0\.0\.1:51821" docker-compose.yml \
+            || { echo "::error file=salama-web/docker-compose.yml::healthcheck must probe the admin web UI on 51821 so Coolify's deploy health reflects the API, not only WireGuard"; exit 1; }
+          echo "healthcheck covers the web UI"
+
       - name: .env.example documents every variable the compose reads
         run: |
           missing=0
@@ -128,11 +134,13 @@ jobs:
           docker exec salama-vpn wg show | grep -q "listening port: ${WG_PORT}" \
             || { echo "::error::wg0 not listening on ${WG_PORT}/udp"; exit 1; }
 
-      - name: admin web UI must serve
+      - name: admin web UI + API must serve
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:51821/)
-          echo "web UI http_code=${code}"
-          [ "$code" = 200 ] || { echo "::error::web UI did not return 200"; exit 1; }
+          for path in "/" "/api/release"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:51821${path}")
+            echo "GET ${path} -> ${code}"
+            [ "$code" = 200 ] || { echo "::error::${path} did not return 200 (API unhealthy)"; exit 1; }
+          done
 
       - name: create a client via the admin API and download its config
         run: |
