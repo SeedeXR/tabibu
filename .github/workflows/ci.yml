@@ -95,6 +95,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri
+      # cargo build/test run build.rs (tauri_build), which validates the
+      # bundle.resources paths (bin/tabibu-dohd, bin/tabibu-wg). Those binaries
+      # are produced by beforeBuildCommand during `tauri build` in release.yml;
+      # this compile-only job doesn't run that (and bin/ is gitignored), so stage
+      # empty placeholders just to satisfy the path check — content is irrelevant
+      # here since nothing is bundled or executed.
+      - name: Stage placeholder bundled binaries (compile-only)
+        run: |
+          mkdir -p app/src-tauri/bin
+          : > app/src-tauri/bin/tabibu-dohd
+          : > app/src-tauri/bin/tabibu-wg
       # Compile the Tauri shell (Rust backend + core crates, via path deps).
       # The frontend is static (no Node build step), so a plain cargo build is
       # the lightest way to verify the app compiles. Full bundling + signing +
