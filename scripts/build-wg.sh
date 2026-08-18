@@ -14,6 +14,15 @@ ROOT="$PWD"
 VER="0.7.1"
 
 mkdir -p app/src-tauri/bin
+
+# Skip the (slow) rebuild if a valid universal binary is already staged. Delete
+# app/src-tauri/bin/tabibu-wg to force a rebuild (e.g. after bumping VER).
+OUT="app/src-tauri/bin/tabibu-wg"
+if [ -x "$OUT" ] && lipo -info "$OUT" 2>/dev/null | grep -q "arm64" && lipo -info "$OUT" 2>/dev/null | grep -q "x86_64"; then
+  echo "✓ tabibu-wg already staged (universal) — skipping rebuild (rm $OUT to force)"
+  exit 0
+fi
+
 rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
 
 tmp="$(mktemp -d)"

@@ -421,7 +421,11 @@ button.sm { font-size: 12px; padding: 4px 12px; }
 .health-hero .verdict { font-size: 30px; font-weight: 700; }
 
 /* ---------- Toggle switch (settings) ---------- */
-.switch { position: relative; width: 42px; height: 24px; flex: none; }
+/* Checkbox-based toggle (Settings). Scoped with :has(input) so it does NOT
+   override the button-based `.switch` (Salama DNS / VPN) defined earlier, which
+   is 50x30 with a `.knob` — before this scoping the two collided and the button
+   switch rendered at 42x24, clamping its knob and breaking the animation. */
+.switch:has(input) { position: relative; width: 42px; height: 24px; flex: none; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .switch .track { position: absolute; inset: 0; background: var(--track); border-radius: 20px; transition: background var(--dur-fast); cursor: pointer; }
 .switch .track::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform var(--dur-fast); }

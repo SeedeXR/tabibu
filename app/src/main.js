@@ -1177,34 +1177,36 @@ function vpnBlocks() {
   }
   out.push(picker);
 
-  // ---- Connection (only when a server is active) — one big on/off switch ----
-  if (vpn.active) {
-    const conn = h("div", { class: "card salama-switch-card" });
-    conn.append(h("div", { class: "row", style: "align-items:center;gap:12px" },
+  // ---- Connection (only when a server is active) ----
+  if (vpn.active && !vs.provisioned) {
+    // Setup state — a roomy card that explains what's needed (incl. WHERE the
+    // password comes from), not a cramped one-liner.
+    out.push(h("div", { class: "card" },
+      h("div", { style: "font-weight:700;font-size:14px" }, "Set up this VPN"),
+      h("p", { class: "dim", style: "font-size:12px;margin-top:8px;line-height:1.5" },
+        "Fetch a VPN client config from this server. You'll enter its ",
+        h("b", {}, "admin password"),
+        " — the password you set when you deployed salama-web (its ",
+        h("code", { style: "font-size:11px" }, "PASSWORD_HASH"),
+        "). It's used once to pull the config and is never stored."),
+      h("button", { class: "primary", style: "margin-top:14px", disabled: netView.vpnBusy ? "" : null, onClick: vpnProvision },
+        netView.vpnBusy ? "Working…" : "Provision")));
+  } else if (vpn.active) {
+    // Connected/ready state — one big on/off switch.
+    const on = vs.connected;
+    const sw = h("button", { class: "switch" + (on ? " on" : ""), disabled: netView.vpnBusy ? "" : null,
+      "aria-label": on ? "Turn VPN off" : "Turn VPN on",
+      onClick: () => (on ? vpnDisconnect() : vpnConnect()) }, h("span", { class: "knob" }));
+    out.push(h("div", { class: "card salama-switch-card" },
       h("div", { style: "flex:1;min-width:0" },
-        h("div", { style: "font-weight:700;font-size:14px" },
-          vs.connected ? "VPN on — your IP is hidden" : vs.provisioned ? "VPN off" : "Not provisioned yet"),
-        h("div", { class: "dim", style: "font-size:12px;margin-top:3px" },
+        h("div", { style: "font-weight:700;font-size:14px" }, on ? "VPN on — your IP is hidden" : "VPN off"),
+        h("div", { class: "dim", style: "font-size:12px;margin-top:4px;line-height:1.45" },
           netView.vpnBusy ? "Working… (enter your password when asked)"
-            : vs.connected ? "All traffic routes through your server; DNS goes through the tunnel."
-            : vs.provisioned ? "Turn on to route all traffic through your server and hide your IP."
-            : "Fetch a client config from the server to get started.")),
-      vpnActionButton(vs)));
-    conn.append(h("p", { class: "dim", style: "font-size:11px;margin-top:10px;line-height:1.4" },
-      "Turning on verifies the tunnel first, then routes everything through it. If the tunnel ever drops, your normal internet resumes automatically (fail-open). Turning off restores your routes and DNS. Takes your admin password."));
-    out.push(conn);
+            : on ? "All traffic routes through your server; DNS goes through the tunnel."
+            : "Turn on to route all traffic through your server and hide your IP. If the tunnel drops, your internet resumes automatically. Takes your admin password.")),
+      sw));
   }
   return out;
-}
-// Provision button until there's a config; then a big on/off switch (on = full
-// tunnel connected). Mirrors the Salama encrypted-DNS switch.
-function vpnActionButton(vs) {
-  const busy = netView.vpnBusy ? "" : null;
-  if (!vs.provisioned) return h("button", { class: "primary", disabled: busy, onClick: vpnProvision }, "Provision");
-  const on = vs.connected;
-  return h("button", { class: "switch" + (on ? " on" : ""), disabled: busy,
-    "aria-label": on ? "Turn VPN off" : "Turn VPN on",
-    onClick: () => (on ? vpnDisconnect() : vpnConnect()) }, h("span", { class: "knob" }));
 }
 async function vpnRefresh() {
   netView.vpn = await invoke("vpn_config").catch(() => netView.vpn);
@@ -1229,7 +1231,7 @@ async function vpnRemove(s) {
 }
 async function vpnProvision() {
   const id = (netView.vpn || {}).active; if (!id) return;
-  const pw = await uiPromptText("Enter the admin password for this salama-web server to fetch a VPN client config:", { password: true });
+  const pw = await uiPromptText("Enter this server's salama-web admin password (the one you set when you deployed it — its PASSWORD_HASH). Used once to fetch the config; never stored.", { password: true });
   if (pw == null) return;
   netView.vpnBusy = true; renderNetwork();
   try { await invoke("vpn_provision", { id, password: pw }); uiToast("Provisioned a VPN client config."); }
