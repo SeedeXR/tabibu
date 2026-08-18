@@ -291,6 +291,15 @@ button.lg { padding: 9px 20px; font-size: 14px; }
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-s);
   padding: 5px 10px; color: var(--text); font-family: inherit; font-size: 13px; width: 220px;
 }
+/* Text/password inputs inside cards (VPN server form, prompts) — themed to
+   match the surface instead of the raw browser default. */
+.card input[type="text"], .card input[type="password"], .modal-card input {
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-s);
+  padding: 8px 11px; color: var(--text); font-family: inherit; font-size: 13px; box-sizing: border-box;
+}
+.card input[type="text"]:focus, .card input[type="password"]:focus, .modal-card input:focus {
+  outline: none; border-color: var(--view-accent, var(--accent));
+}
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-s); overflow: hidden; }
 .seg button { border: none; border-radius: 0; background: var(--bg-elev); }
 .seg button.on { background: var(--accent); color: #fff; }

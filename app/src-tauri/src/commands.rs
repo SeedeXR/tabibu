@@ -1137,6 +1137,362 @@ done
 exit 0
 "#;
 
+// ---------------------------------------------------------------------------
+// Salama VPN — multi-server config, provisioning, and a default-route-SAFE
+// connect (establishes the tunnel + verifies the handshake with host routes
+// only; never touches the system default route, so a failed/partial connect
+// can't strand your internet). Engine: the bundled `tabibu-wg` (boringtun-cli).
+// ---------------------------------------------------------------------------
+
+fn vpn_config_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    use tauri::Manager;
+    app.path().app_config_dir().unwrap_or_default()
+}
+
+/// Per-server provisioned client config (0600).
+fn vpn_conf_path(app: &tauri::AppHandle, id: &str) -> std::path::PathBuf {
+    vpn_config_dir(app).join("vpn").join(format!("{id}.conf"))
+}
+
+/// A server id names a file (`<id>.conf`), so restrict it to a safe slug — it can
+/// never traverse out of the vpn dir. The UI already slugifies; this is the Rust
+/// trust boundary (a compromised renderer can't path-traverse a write/delete).
+fn valid_server_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+#[tauri::command(async)]
+pub fn vpn_config() -> crate::vpn::VpnConfig {
+    crate::vpn::snapshot()
+}
+
+#[tauri::command(async)]
+pub fn vpn_upsert_server(
+    app: tauri::AppHandle,
+    id: String,
+    name: String,
+    url: String,
+) -> crate::vpn::VpnConfig {
+    if !valid_server_id(&id) {
+        return crate::vpn::snapshot(); // reject unsafe ids rather than store them
+    }
+    crate::vpn::update(&vpn_config_dir(&app), |c| {
+        crate::vpn::upsert(c, crate::vpn::VpnServer { id, name, url });
+    })
+}
+
+#[tauri::command(async)]
+pub fn vpn_remove_server(app: tauri::AppHandle, id: String) -> crate::vpn::VpnConfig {
+    if !valid_server_id(&id) {
+        return crate::vpn::snapshot(); // never build a path from an unsafe id
+    }
+    let _ = std::fs::remove_file(vpn_conf_path(&app, &id)); // drop its provisioned config
+    crate::vpn::update(&vpn_config_dir(&app), |c| crate::vpn::remove(c, &id))
+}
+
+#[tauri::command(async)]
+pub fn vpn_set_active(app: tauri::AppHandle, id: String) -> crate::vpn::VpnConfig {
+    crate::vpn::update(&vpn_config_dir(&app), |c| crate::vpn::set_active(c, &id))
+}
+
+/// UI state: is the active server provisioned, is the tunnel up. (The active id
+/// itself comes from `vpn_config`, so it isn't duplicated here.)
+#[derive(Serialize)]
+pub struct VpnState {
+    pub provisioned: bool,
+    pub connected: bool,
+}
+
+#[tauri::command(async)]
+pub fn vpn_state(app: tauri::AppHandle) -> VpnState {
+    let cfg = crate::vpn::snapshot();
+    let provisioned = cfg
+        .active
+        .as_ref()
+        .is_some_and(|id| vpn_conf_path(&app, id).exists());
+    // Connected = the marker is present AND the engine is actually alive (a
+    // crashed engine would otherwise read as connected until reboot clears
+    // /var/run). pgrep sees processes across users.
+    let engine_alive = std::process::Command::new("/usr/bin/pgrep")
+        .args(["-f", "tabibu-wg"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    VpnState {
+        provisioned,
+        connected: engine_alive && std::path::Path::new("/var/run/tabibu-vpn.on").exists(),
+    }
+}
+
+/// Find a wg-easy client's id by name in the `/api/wireguard/client` JSON array.
+fn find_client_id(list_json: &str, name: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(list_json).ok()?;
+    v.as_array()?.iter().find_map(|c| {
+        (c.get("name")?.as_str()? == name)
+            .then(|| c.get("id").and_then(|i| i.as_str()).map(str::to_owned))
+            .flatten()
+    })
+}
+
+/// Provision (or refresh) a client config for a server from its salama-web admin
+/// API. `password` is used transiently (never stored). Writes a 0600 `<id>.conf`.
+#[tauri::command(async)]
+pub fn vpn_provision(app: tauri::AppHandle, id: String, password: String) -> Result<(), String> {
+    if !valid_server_id(&id) {
+        return Err("Invalid server id.".into());
+    }
+    // A private 0700 dir holds the session cookie jar, so even a world-readable
+    // jar file inside is unreadable to other local users. Removed on EVERY exit
+    // path (including the `?` early returns inside the inner fn).
+    let dir = std::env::temp_dir().join(format!("tabibu-wg-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let result = vpn_provision_inner(&app, &id, &password, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn vpn_provision_inner(
+    app: &tauri::AppHandle,
+    id: &str,
+    password: &str,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    let cfg = crate::vpn::snapshot();
+    let base = cfg
+        .servers
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or("unknown server")?
+        .url
+        .trim_end_matches('/')
+        .to_owned();
+    let jar_s = dir.join("jar").to_string_lossy().into_owned();
+    let curl = |args: &[&str]| -> Result<std::process::Output, String> {
+        std::process::Command::new("/usr/bin/curl")
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())
+    };
+    // Login: the password goes on STDIN (`--data @-`), never in argv where
+    // same-user `ps -ww` could read it.
+    let body = serde_json::json!({ "password": password }).to_string();
+    let login = {
+        use std::io::Write;
+        let mut child = std::process::Command::new("/usr/bin/curl")
+            .args([
+                "-fsS",
+                "-c",
+                &jar_s,
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "--data",
+                "@-",
+                &format!("{base}/api/session"),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        child
+            .stdin
+            .take()
+            .ok_or("curl stdin unavailable")?
+            .write_all(body.as_bytes())
+            .map_err(|e| e.to_string())?;
+        child.wait_with_output().map_err(|e| e.to_string())?
+    };
+    if !login.status.success() {
+        return Err("Login failed — check the server URL and admin password.".into());
+    }
+    let name = "tabibu";
+    let list_url = format!("{base}/api/wireguard/client");
+    let list = curl(&["-fsS", "-b", &jar_s, &list_url])?;
+    let cid = match find_client_id(&String::from_utf8_lossy(&list.stdout), name) {
+        Some(c) => c,
+        None => {
+            let create_body = serde_json::json!({ "name": name }).to_string();
+            curl(&[
+                "-fsS",
+                "-b",
+                &jar_s,
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &create_body,
+                &list_url,
+            ])?;
+            let list2 = curl(&["-fsS", "-b", &jar_s, &list_url])?;
+            find_client_id(&String::from_utf8_lossy(&list2.stdout), name)
+                .ok_or("Could not create a client on the server.")?
+        }
+    };
+    let conf = curl(&[
+        "-fsS",
+        "-b",
+        &jar_s,
+        &format!("{base}/api/wireguard/client/{cid}/configuration"),
+    ])?;
+    let text = String::from_utf8_lossy(&conf.stdout);
+    if !conf.status.success() || !text.contains("[Interface]") {
+        return Err("Server returned an invalid client config.".into());
+    }
+    let path = vpn_conf_path(app, id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Connect (full tunnel): start the bundled engine, configure the peer, VERIFY
+/// the handshake, then route all traffic through the tunnel via the split-default
+/// pair (never replacing the real default route) + point DNS at the tunnel
+/// resolver. Verify-before-flip means a failed handshake changes nothing; the
+/// split-default design means an engine crash fails OPEN (kernel drops the
+/// interface routes, the real default resumes) rather than stranding the Mac.
+#[tauri::command(async)]
+pub fn vpn_connect(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let cfg = crate::vpn::snapshot();
+    let id = cfg.active.ok_or("No active server selected.")?;
+    let conf = vpn_conf_path(&app, &id);
+    if !conf.exists() {
+        return Err("This server isn't provisioned yet — provision it first.".into());
+    }
+    let wg = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("tabibu-wg");
+    if !wg.exists() {
+        return Err("VPN engine (tabibu-wg) is missing from the app bundle.".into());
+    }
+    run_admin_shell(&vpn_connect_script(
+        &wg.to_string_lossy(),
+        &conf.to_string_lossy(),
+    ))
+}
+
+/// Disconnect: kill the engine (its utun + host routes vanish with it) and clear
+/// the marker. Trivial + safe because connect never changed the default route.
+#[tauri::command(async)]
+pub fn vpn_disconnect() -> Result<(), String> {
+    run_admin_shell(VPN_DISCONNECT_SCRIPT)
+}
+
+/// Root script: bring up boringtun on an auto-assigned utun, configure the peer
+/// over its UAPI socket (keys converted base64→hex with base tools), pin the
+/// endpoint via the real gateway, then ping the server's tunnel IP to confirm a
+/// live handshake — using host routes only, never the default route. A `trap`
+/// tears the engine + endpoint route back down on ANY failure before success,
+/// so a partial connect can't leave a live-but-untracked tunnel. POSIX sh only
+/// (osascript runs /bin/sh) — no bashisms.
+fn vpn_connect_script(wg: &str, conf: &str) -> String {
+    format!(
+        r#"set -e
+WG={wg}
+CONF={conf}
+PRIV=$(/usr/bin/awk -F ' = ' '/^PrivateKey/{{print $2}}' "$CONF")
+ADDR=$(/usr/bin/awk -F ' = ' '/^Address/{{print $2}}' "$CONF" | /usr/bin/cut -d, -f1)
+PUB=$(/usr/bin/awk -F ' = ' '/^PublicKey/{{print $2}}' "$CONF")
+PSK=$(/usr/bin/awk -F ' = ' '/^PresharedKey/{{print $2}}' "$CONF")
+EP=$(/usr/bin/awk -F ' = ' '/^Endpoint/{{print $2}}' "$CONF")
+EPH=${{EP%:*}}; EPP=${{EP##*:}}
+EPIP=$(/usr/bin/dig +short "$EPH" | /usr/bin/tail -1); [ -z "$EPIP" ] && EPIP="$EPH"
+IPONLY=${{ADDR%/*}}
+GWVPN=$(echo "$IPONLY" | /usr/bin/awk -F. '{{print $1"."$2"."$3".1"}}')
+hex() {{ printf '%s' "$1" | /usr/bin/base64 -d | /usr/bin/xxd -p -c 32; }}
+/bin/mkdir -p /var/run/wireguard
+"$WG" utun
+SOCK=""; i=0
+while [ $i -lt 25 ]; do
+  SOCK=$(/bin/ls -t /var/run/wireguard/*.sock 2>/dev/null | /usr/bin/head -1)
+  [ -n "$SOCK" ] && break; i=$((i+1)); /bin/sleep 0.2
+done
+[ -z "$SOCK" ] && {{ echo "VPN engine failed to start"; exit 1; }}
+IF=$(/usr/bin/basename "$SOCK" .sock)
+GW=$(/sbin/route -n get default 2>/dev/null | /usr/bin/awk '/gateway/{{print $2}}')
+OK=0
+cleanup() {{ [ "$OK" = 1 ] && return; /usr/bin/pkill -f {wg} 2>/dev/null || true; [ -n "$EPIP" ] && /sbin/route delete -host "$EPIP" >/dev/null 2>&1 || true; }}
+trap cleanup EXIT
+PSKLINE=""
+[ -n "$PSK" ] && PSKLINE="preshared_key=$(hex "$PSK")
+"
+printf 'set=1\nprivate_key=%s\nreplace_peers=true\npublic_key=%s\n%sendpoint=%s:%s\npersistent_keepalive_interval=25\nreplace_allowed_ips=true\nallowed_ip=0.0.0.0/0\n\n' \
+  "$(hex "$PRIV")" "$(hex "$PUB")" "$PSKLINE" "$EPIP" "$EPP" | /usr/bin/nc -U "$SOCK"
+/sbin/ifconfig "$IF" inet "$IPONLY" "$IPONLY" up
+[ -n "$GW" ] && /sbin/route add -host "$EPIP" "$GW" >/dev/null 2>&1 || true
+/sbin/route add -host "$GWVPN" -interface "$IF" >/dev/null 2>&1 || true
+ok=0; n=0
+while [ $n -lt 8 ]; do /sbin/ping -c1 -t1 "$GWVPN" >/dev/null 2>&1 && {{ ok=1; break; }}; n=$((n+1)); /bin/sleep 0.5; done
+[ "$ok" != 1 ] && {{ echo "Tunnel did not establish (handshake failed) — internet untouched."; exit 1; }}
+OK=1
+# --- FULL TUNNEL (only after the handshake verified) ---
+# Route ALL traffic through the tunnel with the split-default pair, WITHOUT
+# replacing the real default route. If the engine dies, the kernel drops these
+# interface-scoped routes and the real default resumes on its own (fail-open —
+# internet comes back), so no resident kill-switch daemon is needed.
+/sbin/route add -net 0.0.0.0/1 -interface "$IF" >/dev/null 2>&1 || true
+/sbin/route add -net 128.0.0.0/1 -interface "$IF" >/dev/null 2>&1 || true
+# Point DNS at the tunnel's resolver (stops DNS leaking to the ISP), saving each
+# service's CURRENT setting so disconnect restores it exactly (incl. Salama's).
+DNS=$(/usr/bin/awk -F ' = ' '/^DNS/{{print $2}}' "$CONF" | /usr/bin/cut -d, -f1)
+: > /var/run/tabibu-vpn.dns
+/usr/sbin/networksetup -listallnetworkservices 2>/dev/null | while IFS= read -r svc; do
+  case "$svc" in ''|\**|"An asterisk"*) continue;; esac
+  cur=$(/usr/sbin/networksetup -getdnsservers "$svc" 2>/dev/null)
+  case "$cur" in "There aren't any"*) cur="empty";; *) cur=$(echo "$cur" | /usr/bin/tr '\n' ' ');; esac
+  printf '%s\t%s\n' "$svc" "$cur" >> /var/run/tabibu-vpn.dns
+  [ -n "$DNS" ] && /usr/sbin/networksetup -setdnsservers "$svc" "$DNS" >/dev/null 2>&1 || true
+done
+printf '%s\n%s\n' "$IF" "$EPIP" > /var/run/tabibu-vpn.on
+/bin/chmod 644 /var/run/tabibu-vpn.on
+echo "Connected — all traffic via $IF"
+"#,
+        wg = sh_quote(wg),
+        conf = sh_quote(conf),
+    )
+}
+
+/// Tear the full tunnel down and restore everything: DNS FIRST (from the saved
+/// manifest, exactly as it was — including Salama's resolver), then the
+/// split-default + endpoint routes, then kill the engine and clear the markers.
+/// Idempotent and safe when nothing is up. Restore-first mirrors the DNS engine.
+const VPN_DISCONNECT_SCRIPT: &str = r#"if [ -f /var/run/tabibu-vpn.dns ]; then
+  while IFS="$(printf '\t')" read -r svc dns; do
+    [ -z "$svc" ] && continue
+    /usr/sbin/networksetup -setdnsservers "$svc" $dns >/dev/null 2>&1 || true
+  done < /var/run/tabibu-vpn.dns
+  /bin/rm -f /var/run/tabibu-vpn.dns
+fi
+/sbin/route delete -net 0.0.0.0/1 >/dev/null 2>&1 || true
+/sbin/route delete -net 128.0.0.0/1 >/dev/null 2>&1 || true
+EPIP=""
+[ -f /var/run/tabibu-vpn.on ] && EPIP=$(/usr/bin/sed -n 2p /var/run/tabibu-vpn.on)
+[ -n "$EPIP" ] && /sbin/route delete -host "$EPIP" >/dev/null 2>&1 || true
+/usr/bin/pkill -f 'tabibu-wg' 2>/dev/null || true
+/bin/rm -f /var/run/tabibu-vpn.on
+exit 0
+"#;
+
 // ---------------------------------------------------------------------
 // Menu bar app lifecycle (tray popover + Settings)
 // ---------------------------------------------------------------------
@@ -1190,4 +1546,36 @@ pub fn popover_resize(app: tauri::AppHandle, height: f64) {
 #[tauri::command(async)]
 pub fn uptime_secs() -> u64 {
     sysinfo::System::uptime()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_client_id, valid_server_id};
+
+    #[test]
+    fn valid_server_id_blocks_path_traversal() {
+        assert!(valid_server_id("home"));
+        assert!(valid_server_id("my-vpn-2"));
+        // Anything that could escape the vpn dir or name a weird file is rejected.
+        assert!(!valid_server_id("../etc/passwd"));
+        assert!(!valid_server_id("a/b"));
+        assert!(!valid_server_id("a.b"));
+        assert!(!valid_server_id("A")); // upper-case not in the slug set
+        assert!(!valid_server_id(""));
+        assert!(!valid_server_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn find_client_id_matches_by_name() {
+        let json = r#"[
+            {"id":"aaa-111","name":"other"},
+            {"id":"bbb-222","name":"tabibu"},
+            {"id":"ccc-333","name":"laptop"}
+        ]"#;
+        assert_eq!(find_client_id(json, "tabibu").as_deref(), Some("bbb-222"));
+        assert_eq!(find_client_id(json, "ghost"), None);
+        // Malformed / empty inputs are None, never a panic.
+        assert_eq!(find_client_id("not json", "tabibu"), None);
+        assert_eq!(find_client_id("[]", "tabibu"), None);
+    }
 }

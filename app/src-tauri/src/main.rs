@@ -14,6 +14,7 @@ mod alerts;
 mod commands;
 mod system;
 mod tray;
+mod vpn;
 
 use tauri::Manager;
 
@@ -33,6 +34,7 @@ fn main() {
             // sampler starts reading them.
             if let Ok(dir) = app.path().app_config_dir() {
                 alerts::load(&dir);
+                vpn::load(&dir);
             }
             // A login (LaunchAgent) start passes `--from-autostart`; start
             // quietly in the menu bar then (Accessory, dashboard hidden) so we
@@ -128,6 +130,14 @@ fn main() {
             commands::set_alert_enabled,
             commands::snooze_alert,
             commands::send_test_notification,
+            commands::vpn_config,
+            commands::vpn_upsert_server,
+            commands::vpn_remove_server,
+            commands::vpn_set_active,
+            commands::vpn_state,
+            commands::vpn_provision,
+            commands::vpn_connect,
+            commands::vpn_disconnect,
             commands::telemetry_enabled,
             commands::set_telemetry_enabled,
             commands::record_deselection,

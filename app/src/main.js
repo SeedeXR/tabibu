@@ -57,6 +57,27 @@ function uiConfirm(message, { danger = false, okLabel = "OK" } = {}) {
     ok.focus();
   });
 }
+// One-field modal prompt (e.g. an admin password). Resolves the entered value,
+// or null on Cancel/Escape. Mirrors uiConfirm's structure.
+function uiPromptText(message, { password = false } = {}) {
+  return new Promise((resolve) => {
+    const finish = (v) => { document.removeEventListener("keydown", onKey, true); overlay.remove(); resolve(v); };
+    const input = h("input", { type: password ? "password" : "text", style: "width:100%;margin-top:12px" });
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      else if (e.key === "Enter") { e.preventDefault(); finish(input.value); }
+    };
+    const card = h("div", { class: "modal-card", onClick: (e) => e.stopPropagation() },
+      h("p", { class: "modal-msg" }, message), input,
+      h("div", { class: "modal-actions" },
+        h("button", { onClick: () => finish(null) }, "Cancel"),
+        h("button", { class: "primary", onClick: () => finish(input.value) }, "OK")));
+    const overlay = h("div", { class: "modal-overlay", onClick: () => finish(null) }, card);
+    document.body.append(overlay);
+    document.addEventListener("keydown", onKey, true);
+    input.focus();
+  });
+}
 function uiToast(message, { danger = false } = {}) {
   const t = h("div", { class: "toast" + (danger ? " danger" : "") }, message);
   document.body.append(t);
@@ -985,7 +1006,8 @@ async function batteryView() {
 // Network (also in the tray popover; here so it's reachable when the
 // menu-bar icon is hidden behind the notch)
 // =====================================================================
-const netView = { sample: null, conn: { phase: "idle", data: null, err: null }, salama: null, engineOn: false, provider: "quad9", dnsBusy: false, advancedOpen: false };
+const netView = { sample: null, conn: { phase: "idle", data: null, err: null }, salama: null, engineOn: false, provider: "quad9", dnsBusy: false, advancedOpen: false,
+  vpn: null, vpnState: null, vpnBusy: false, addingServer: false, serverForm: { name: "", url: "" } };
 const fmtRate = (bps) => `${fmtBytes(bps)}/s`;
 const DNS_PROVIDERS = [
   { id: "cloudflare", name: "Cloudflare", desc: "1.1.1.1 · fast, no query logging" },
@@ -1010,8 +1032,16 @@ function networkView() {
   renderNetwork();
 }
 function fetchSalama() {
-  Promise.all([invoke("salama_status").catch(() => null), invoke("salama_engine_status").catch(() => ({ installed: false }))])
-    .then(([st, eng]) => { netView.salama = st; netView.engineOn = !!(eng && eng.installed); if (state.current === "network") renderNetwork(); });
+  Promise.all([
+    invoke("salama_status").catch(() => null),
+    invoke("salama_engine_status").catch(() => ({ installed: false })),
+    invoke("vpn_config").catch(() => ({ servers: [], active: null })),
+    invoke("vpn_state").catch(() => ({ active: null, provisioned: false, connected: false })),
+  ]).then(([st, eng, vpn, vpnState]) => {
+    netView.salama = st; netView.engineOn = !!(eng && eng.installed);
+    netView.vpn = vpn; netView.vpnState = vpnState;
+    if (state.current === "network") renderNetwork();
+  });
 }
 function netStat(label, arrow, rate, sub) {
   return h("div", { class: "card net-stat" },
@@ -1080,7 +1110,7 @@ function salamaBlocks() {
   if (ex.country) exCard.append(kv("Location", ex.country));
   if (ex.org) exCard.append(kv("Network", ex.org));
   exCard.append(h("p", { class: "dim", style: "font-size:11.5px;margin-top:8px" },
-    "Sites and your ISP see this IP. Encrypted DNS stops your ISP seeing which sites you visit; hiding the IP itself is the Salama VPN, coming."));
+    "Sites and your ISP see this IP. Encrypted DNS stops your ISP seeing which sites you visit; to hide the IP itself, turn on the Salama VPN below."));
   out.push(exCard);
 
   // ---- Advanced: pick the resolver Salama forwards to ----
@@ -1103,10 +1133,122 @@ function salamaBlocks() {
   }
   out.push(adv);
 
-  out.push(h("div", { class: "notice" }, icon("info"),
-    h("div", { class: "body" }, h("h3", {}, "Hide my IP (VPN) — coming"),
-      h("p", {}, "Routing your traffic through a Tabibu exit in another country needs servers we don't run yet — the engine is built and tested. Encrypted DNS already stops your ISP from seeing the sites you visit."))));
+  for (const el of vpnBlocks()) out.push(el);
   return out;
+}
+
+// Salama VPN — connect to a self-deployed salama-web WireGuard server. Multiple
+// servers can be registered by URL (others deploy their own); one is active.
+function vpnBlocks() {
+  const out = [];
+  out.push(h("div", { class: "row", style: "gap:8px;align-items:center;margin-top:6px" },
+    icon("shield"), h("h3", { style: "font-size:15px;font-weight:700" }, "Salama VPN — hide my IP"),
+    h("span", { class: "dim", style: "font-size:11.5px" }, "beta")));
+
+  const vpn = netView.vpn || { servers: [], active: null };
+  const vs = netView.vpnState || { active: null, provisioned: false, connected: false };
+
+  // ---- Server picker (add / select / remove different server URLs) ----
+  const picker = h("div", { class: "card" });
+  picker.append(h("h3", { style: "margin-bottom:8px" }, "VPN servers"));
+  if (!vpn.servers.length) {
+    picker.append(h("p", { class: "dim", style: "font-size:12px" },
+      "Add your salama-web server (or someone else's) by URL — the one you deployed."));
+  }
+  for (const s of vpn.servers) {
+    const sel = s.id === vpn.active;
+    picker.append(h("div", { class: "prof-row" + (sel ? " sel" : ""), style: "cursor:pointer;align-items:center", onClick: () => vpnSelect(s.id) },
+      h("div", { style: "flex:1;min-width:0" },
+        h("div", { style: "font-weight:600;font-size:13px" }, s.name || s.url),
+        h("div", { class: "dim", style: "font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, s.url)),
+      h("span", { style: `font-size:12.5px;margin:0 10px;white-space:nowrap;color:${sel ? "var(--view-accent)" : "var(--text-faint)"}` }, sel ? "● active" : "○"),
+      h("button", { style: "font-size:11px;padding:4px 9px", onClick: (e) => { e.stopPropagation(); vpnRemove(s); } }, "Remove")));
+  }
+  if (netView.addingServer) {
+    const nameI = h("input", { type: "text", placeholder: "Name (e.g. My VPN)", value: netView.serverForm.name, style: "width:100%;margin-top:10px" });
+    const urlI = h("input", { type: "text", placeholder: "https://vpn.example.com", value: netView.serverForm.url, style: "width:100%;margin-top:8px" });
+    nameI.addEventListener("input", () => { netView.serverForm.name = nameI.value; });
+    urlI.addEventListener("input", () => { netView.serverForm.url = urlI.value; });
+    picker.append(nameI, urlI, h("div", { class: "row", style: "gap:8px;margin-top:10px" },
+      h("button", { class: "primary", onClick: vpnAddServer }, "Save server"),
+      h("button", { onClick: () => { netView.addingServer = false; renderNetwork(); } }, "Cancel")));
+  } else {
+    picker.append(h("button", { style: "margin-top:12px", onClick: () => { netView.addingServer = true; renderNetwork(); } }, "+ Add server"));
+  }
+  out.push(picker);
+
+  // ---- Connection (only when a server is active) — one big on/off switch ----
+  if (vpn.active) {
+    const conn = h("div", { class: "card salama-switch-card" });
+    conn.append(h("div", { class: "row", style: "align-items:center;gap:12px" },
+      h("div", { style: "flex:1;min-width:0" },
+        h("div", { style: "font-weight:700;font-size:14px" },
+          vs.connected ? "VPN on — your IP is hidden" : vs.provisioned ? "VPN off" : "Not provisioned yet"),
+        h("div", { class: "dim", style: "font-size:12px;margin-top:3px" },
+          netView.vpnBusy ? "Working… (enter your password when asked)"
+            : vs.connected ? "All traffic routes through your server; DNS goes through the tunnel."
+            : vs.provisioned ? "Turn on to route all traffic through your server and hide your IP."
+            : "Fetch a client config from the server to get started.")),
+      vpnActionButton(vs)));
+    conn.append(h("p", { class: "dim", style: "font-size:11px;margin-top:10px;line-height:1.4" },
+      "Turning on verifies the tunnel first, then routes everything through it. If the tunnel ever drops, your normal internet resumes automatically (fail-open). Turning off restores your routes and DNS. Takes your admin password."));
+    out.push(conn);
+  }
+  return out;
+}
+// Provision button until there's a config; then a big on/off switch (on = full
+// tunnel connected). Mirrors the Salama encrypted-DNS switch.
+function vpnActionButton(vs) {
+  const busy = netView.vpnBusy ? "" : null;
+  if (!vs.provisioned) return h("button", { class: "primary", disabled: busy, onClick: vpnProvision }, "Provision");
+  const on = vs.connected;
+  return h("button", { class: "switch" + (on ? " on" : ""), disabled: busy,
+    "aria-label": on ? "Turn VPN off" : "Turn VPN on",
+    onClick: () => (on ? vpnDisconnect() : vpnConnect()) }, h("span", { class: "knob" }));
+}
+async function vpnRefresh() {
+  netView.vpn = await invoke("vpn_config").catch(() => netView.vpn);
+  netView.vpnState = await invoke("vpn_state").catch(() => netView.vpnState);
+  if (state.current === "network") renderNetwork();
+}
+async function vpnAddServer() {
+  const name = netView.serverForm.name.trim();
+  const url = netView.serverForm.url.trim();
+  if (!/^https?:\/\/.+/.test(url)) return uiToast("Enter a valid http(s):// URL", { danger: true });
+  const id = (name || url).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "server";
+  try { await invoke("vpn_upsert_server", { id, name: name || url, url }); }
+  catch (e) { return uiToast(String(e), { danger: true }); }
+  netView.addingServer = false; netView.serverForm = { name: "", url: "" };
+  vpnRefresh();
+}
+async function vpnSelect(id) { try { await invoke("vpn_set_active", { id }); } catch { /* keep */ } vpnRefresh(); }
+async function vpnRemove(s) {
+  if (!(await uiConfirm(`Remove “${s.name || s.url}”?\n\nThis forgets the server and its provisioned config.`, { danger: true, okLabel: "Remove" }))) return;
+  try { await invoke("vpn_remove_server", { id: s.id }); } catch (e) { uiToast(String(e), { danger: true }); }
+  vpnRefresh();
+}
+async function vpnProvision() {
+  const id = (netView.vpn || {}).active; if (!id) return;
+  const pw = await uiPromptText("Enter the admin password for this salama-web server to fetch a VPN client config:", { password: true });
+  if (pw == null) return;
+  netView.vpnBusy = true; renderNetwork();
+  try { await invoke("vpn_provision", { id, password: pw }); uiToast("Provisioned a VPN client config."); }
+  catch (e) { uiToast(`Provision failed: ${e}`, { danger: true }); }
+  netView.vpnBusy = false; vpnRefresh();
+}
+async function vpnConnect() {
+  netView.vpnBusy = true; renderNetwork();
+  try { await invoke("vpn_connect"); uiToast("VPN on — your IP is now hidden."); }
+  catch (e) { uiToast(`Connect failed: ${e}`, { danger: true }); }
+  netView.vpnBusy = false;
+  fetchSalama(); // re-reads exposure (new public IP) + vpn state
+}
+async function vpnDisconnect() {
+  netView.vpnBusy = true; renderNetwork();
+  try { await invoke("vpn_disconnect"); uiToast("VPN off — routes and DNS restored."); }
+  catch (e) { uiToast(`Disconnect failed: ${e}`, { danger: true }); }
+  netView.vpnBusy = false;
+  fetchSalama();
 }
 async function runSalamaOn() {
   netView.dnsBusy = true; if (state.current === "network") renderNetwork();
