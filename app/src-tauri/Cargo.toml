@@ -35,6 +35,7 @@ tabibu-malware = { path = "../../core/crates/tabibu-malware" }
 tabibu-monitor = { path = "../../core/crates/tabibu-monitor" }
 tabibu-telemetry = { path = "../../core/crates/tabibu-telemetry" }
 tabibu-universal = { path = "../../core/crates/tabibu-universal" }
+tabibu-devscan = { path = "../../core/crates/tabibu-devscan" }
 tabibu-docker = { path = "../../core/crates/tabibu-docker" }
 tabibu-net = { path = "../../core/crates/tabibu-net" }
 tabibu-salama = { path = "../../core/crates/tabibu-salama" }

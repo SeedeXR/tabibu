@@ -67,8 +67,25 @@ The app (sidebar → view) covers:
   `autoremove` previews, and every formula/cask sized with install date and
   dependency status. All removal is delegated to `brew` itself (never deletes
   Homebrew files directly).
+- **Build artifacts** — scan your home for rebuildable dev directories (Rust
+  `target`, `node_modules`, `dist`/`build`, `__pycache__`/`.venv`, `.gradle`,
+  `Pods`, `DerivedData`, …), review, and move what you don't need to the Trash.
 - **Disk** (treemap), **Memory & CPU** (force-quit, Rosetta flagging),
   **Battery**, **Security** (adware/rogue-profile heuristics + quarantine).
+
+There is also a terminal companion, **`tabibu`** (the `tabibu-cli` crate),
+driving the same core — `tabibu doctor`, `status`, `trash`, `slim`, `privacy`,
+`space`, `scan` (incl. cross-stack **dev-artifacts**), `flush-dns`, `clean`
+(report-first, `--yes` moves to Trash), `brew` (status + `cleanup`/`autoremove`),
+`docker` (status + prune of build cache/unused images) — package/build cleanup
+delegated to the tool itself — `uninstall <app>` (app + its leftovers → Trash),
+`protect` (a protected-paths list **shared with the app** that no cleanup ever
+touches), `report` (a one-shot health+disk+privacy snapshot for CI/cron), and
+`completions <shell>` (bash/zsh/fish) — with global `--json`/`--quiet`/`--no-color`
+flags, stable exit codes, and an optional `~/.config/tabibu/config.toml` for flag
+defaults, for scripting/CI/cron. An opt-in `launchd`/cron scheduling recipe (sample
+at [`scripts/xr.seede.tabibu.maintenance.plist`](scripts/xr.seede.tabibu.maintenance.plist))
+runs a reversible weekly cleanup on a timer. See [`docs/tabibu-cli.md`](docs/tabibu-cli.md).
 
 ## Repository layout
 
@@ -88,6 +105,8 @@ tabibu/
 │       ├── tabibu-malware/     # adware/profile heuristics + quarantine vault
 │       ├── tabibu-monitor/     # sysinfo system + per-process sampling
 │       ├── tabibu-telemetry/   # opt-in, content-free deselection telemetry
+│       ├── tabibu-cli/         # `tabibu` terminal CLI (clap; --json; man page via build.rs)
+│       ├── tabibu-devscan/     # cross-stack rebuildable dev-artifact scanner (target, node_modules, …)
 │       └── tabibu-bench/       # criterion benches (also live per-crate in benches/)
 ├── app/                        # Tauri v2 desktop shell
 │   ├── package.json            # @tauri-apps/cli (CLI only; frontend has no bundler)
@@ -196,6 +215,9 @@ A designed, interactive overview lives at [`docs/index.html`](docs/index.html)
 | `docs/setup.md` | Clean-machine build instructions |
 | `docs/release.md` | Signing, notarization, external blockers |
 | `docs/modules/*.md` | Per-crate guides with mermaid diagrams |
+| `docs/tabibu-cli.md` | The `tabibu` CLI — commands, config, scheduling, JSON/app parity, dev guide, mermaid flows |
+| `docs/account-system.md` | Accounts/sign-in design (self-host model) with mermaid flows |
+| `todo.md` | Active roadmap/worklist (CLI + holistic) |
 
 ## Contributing workflow
 

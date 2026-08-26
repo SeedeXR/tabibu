@@ -72,10 +72,19 @@ docker run --rm ghcr.io/wg-easy/wg-easy:14 wgpw 'your-strong-password'
 # prints: PASSWORD_HASH='$2a$12$....'
 ```
 
-Paste the hash **exactly as printed — raw, single `$`** — into either the Coolify
-env UI or a local `.env`. This compose reads it via `${PASSWORD_HASH}`, so **do
-not double the `$`.** (The common "double every `$` to `$$`" advice applies only
-when you write the hash *inline* in a compose file; we don't.)
+A bcrypt hash contains `$` signs, and **where you put it decides whether you must
+escape them**:
+
+| Where you set `PASSWORD_HASH` | How | Why |
+|---|---|---|
+| **Coolify env UI** (the real deploy) | Paste the hash **raw — single `$`** | A real environment variable is substituted into `${PASSWORD_HASH}` verbatim — Compose does not re-interpret the `$` in a real env var's value. |
+| **Local `.env` file** | **Double every `$` → `$$`** (`gen-password.sh --env` does this for you) | `docker compose` interpolates `.env` *file* values; a raw `$…` segment would be eaten and the hash corrupted (login fails). |
+| **Local shell** | `export PASSWORD_HASH='<raw hash>'` before `docker compose up` | A real env var is passed through verbatim — no escaping. |
+
+> Earlier guidance here said "paste raw, never double" for `.env` — that was
+> wrong and produced a hash that silently failed login. The rule above is
+> verified against `docker compose` (bare passthrough + real env var = literal;
+> `.env` = interpolated, so double).
 
 ---
 

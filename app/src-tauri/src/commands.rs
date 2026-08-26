@@ -242,6 +242,31 @@ pub fn strip_universal(path: String) -> Result<tabibu_universal::StripResult, St
     Ok(tabibu_universal::strip_app(p))
 }
 
+/// Scan for rebuildable dev build artifacts (Rust `target`, `node_modules`,
+/// `dist`/`build`, `__pycache__`, `.gradle`, `Pods`, `DerivedData`, …) under
+/// `root` (default: home = a global scan). Returned as reclaimable `DevCache`
+/// items (Trash action) so the existing `reclaim` flow moves them to the Trash;
+/// `reason` carries the kind + how to rebuild it. Registered in CURRENT_SYNC so
+/// Stop / navigating away cancels the walk.
+#[tauri::command(async)]
+pub fn scan_dev_artifacts(root: Option<String>) -> Vec<CleanupItem> {
+    let cancel = begin_sync_op();
+    let home = system::home_dir();
+    let root = root.map(std::path::PathBuf::from).unwrap_or_else(|| home.clone());
+    tabibu_devscan::scan(&[root], &home, &cancel)
+        .into_iter()
+        .map(|a| CleanupItem {
+            path: a.path,
+            category: tabibu_engine::Category::DevCache,
+            size_bytes: a.size_bytes,
+            tier: tabibu_engine::SafetyTier::Safe,
+            reason: format!("{} — rebuild: {}", a.kind, a.rebuild),
+            selected: false,
+            action: tabibu_engine::ReclaimAction::Trash,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Space map
 // ---------------------------------------------------------------------------
@@ -356,26 +381,12 @@ pub fn menubar_sample(top_n: usize, by_cpu: bool) -> SystemSample {
     sample_with(&POPOVER_SAMPLER, top_n, by_cpu)
 }
 
-#[derive(Serialize)]
-pub struct DiskSpace {
-    pub total_bytes: u64,
-    pub available_bytes: u64,
-}
-
 /// Free/total bytes on the boot volume ("/"). Measured, for the dashboard.
+/// Delegates to `tabibu_monitor::disk_space` so the app and the CLI report
+/// identical figures from one implementation.
 #[tauri::command(async)]
-pub fn disk_space() -> DiskSpace {
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    // Prefer the disk mounted at "/"; fall back to the largest.
-    let root = disks
-        .list()
-        .iter()
-        .find(|d| d.mount_point() == std::path::Path::new("/"))
-        .or_else(|| disks.list().iter().max_by_key(|d| d.total_space()));
-    DiskSpace {
-        total_bytes: root.map_or(0, sysinfo::Disk::total_space),
-        available_bytes: root.map_or(0, sysinfo::Disk::available_space),
-    }
+pub fn disk_space() -> tabibu_monitor::DiskSpace {
+    tabibu_monitor::disk_space()
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +488,16 @@ pub fn empty_trash() -> EmptyTrashResult {
         deleted_items: o.deleted_items,
         errors: o.errors,
     }
+}
+
+/// Flush the macOS DNS resolver cache (a Junk-view maintenance action). Clears
+/// the resolver cache and restarts mDNSResponder — fixes stale DNS after a
+/// network change. NON-destructive (frees no disk, removes no files); needs root
+/// so it runs behind one admin prompt. Fixed argv-free command string — no user
+/// input reaches the shell.
+#[tauri::command(async)]
+pub fn flush_dns() -> Result<(), String> {
+    run_admin_shell("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder")
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,7 +1334,7 @@ fn vpn_provision_inner(
         child.wait_with_output().map_err(|e| e.to_string())?
     };
     if !login.status.success() {
-        return Err("Login failed — check the server URL and admin password.".into());
+        return Err("Login failed. Use your PLAIN admin password (the text you turned into PASSWORD_HASH with wgpw) — not the hash — and check the server URL.".into());
     }
     let name = "tabibu";
     let list_url = format!("{base}/api/wireguard/client");

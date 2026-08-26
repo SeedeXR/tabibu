@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Sample OPT-IN LaunchAgent for scheduled Tabibu maintenance.
+  This file is NOT installed by Tabibu — copy it into ~/Library/LaunchAgents/
+  yourself and `launchctl` it (see docs/tabibu-cli.md → "Scheduling").
+
+  It runs `tabibu clean caches --yes` once a week. This is safe to automate:
+  every removal is a MOVE TO THE TRASH (reversible — restore from Trash), never
+  a permanent delete, and a LaunchAgent runs as YOU (no sudo, no root).
+
+  Before loading, replace the two placeholders below:
+    - /usr/local/bin/tabibu   → the output of `which tabibu`
+    - REPLACE_USERNAME        → your login name (launchd does NOT expand ~)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>xr.seede.tabibu.maintenance</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/tabibu</string>
+    <string>clean</string>
+    <string>caches</string>
+    <string>--yes</string>
+  </array>
+
+  <!-- Sunday 03:00 local time (Weekday 0 = Sunday). -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key><integer>0</integer>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <!-- A timer job — do not also fire at load/login. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <!-- launchd does NOT expand ~ — use an absolute path. -->
+  <key>StandardOutPath</key>
+  <string>/Users/REPLACE_USERNAME/Library/Logs/tabibu-maintenance.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/REPLACE_USERNAME/Library/Logs/tabibu-maintenance.log</string>
+</dict>
+</plist>

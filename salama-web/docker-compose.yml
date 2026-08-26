@@ -22,9 +22,14 @@ services:
     environment:
       # Public IP or domain clients dial for the tunnel (REQUIRED).
       WG_HOST: ${WG_HOST:?set WG_HOST to this server's public IP or a domain that resolves to it}
-      # Bcrypt hash of the admin web-UI password (REQUIRED). Generate it and note
-      # the $$ escaping — see README.md ("Set the admin password").
-      PASSWORD_HASH: ${PASSWORD_HASH:?set PASSWORD_HASH — see README.md}
+      # Bcrypt hash of the admin web-UI password (REQUIRED; `:?` fails the deploy
+      # if unset, so the panel is never left open). A bcrypt hash contains `$`,
+      # and how you supply it decides whether the `$` need escaping:
+      #   • Coolify env UI / a real env var → paste it RAW (single `$`); it is
+      #     handed to Compose verbatim.
+      #   • a local .env FILE → Compose interpolates .env, so DOUBLE every `$`
+      #     -> `$$` (`./gen-password.sh --env` does this). See README.md.
+      PASSWORD_HASH: ${PASSWORD_HASH:?set PASSWORD_HASH — see README.md (raw in Coolify, doubled in a .env)}
       # Web UI listens on this port INSIDE the container (Coolify proxies to it).
       PORT: 51821
       # Public UDP port for WireGuard (change if 51820 is already used).

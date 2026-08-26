@@ -3502,6 +3502,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tabibu-brew",
+ "tabibu-devscan",
  "tabibu-docker",
  "tabibu-dupes",
  "tabibu-engine",
@@ -3529,6 +3530,15 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tabibu-devscan"
+version = "0.1.51"
+dependencies = [
+ "serde",
+ "tabibu-engine",
+ "tabibu-walk",
 ]
 
 [[package]]

@@ -145,6 +145,7 @@ const NAV = [
   { section: "Applications", items: [
     { id: "uninstall", title: "Uninstaller", icon: "rocket" },
     { id: "brew", title: "Developer / CLI", icon: "terminal" },
+    { id: "devartifacts", title: "Build artifacts", icon: "package" },
     { id: "docker", title: "Docker", icon: "container" },
     { id: "universal", title: "Universal Binaries", icon: "layers" },
     { id: "startup", title: "Startup Items", icon: "activity" },
@@ -273,7 +274,7 @@ function scanView(id) {
 
   if (s.phase === "idle") {
     const hero = heroLanding(def.icon, def.title, def.sub, (HERO[id] || {}).feats || [], () => startScan(id));
-    if (id === "junk" || id === "smart") hero.append(emptyTrashControl());
+    if (id === "junk" || id === "smart") { hero.append(emptyTrashControl()); hero.append(flushDnsControl()); }
     return setView(hero);
   }
   if (s.phase === "scanning") return setView(scanningPanel(id));
@@ -635,6 +636,18 @@ function emptyTrashControl() {
     else { btn.textContent = "Trash is empty"; btn.disabled = true; }
   }).catch(() => {});
   return h("div", { class: "row", style: "gap:8px;justify-content:center;margin-top:14px" }, btn);
+}
+// Flush the DNS resolver cache — maintenance (non-destructive), one admin prompt.
+function flushDnsControl() {
+  return h("div", { class: "row", style: "gap:8px;justify-content:center;margin-top:8px" },
+    h("button", { onClick: doFlushDns }, "Flush DNS cache"));
+}
+async function doFlushDns() {
+  if (!(await uiConfirm(
+    "Flush the DNS cache?\n\nClears macOS's DNS resolver cache and restarts mDNSResponder — fixes stale DNS after a network change. Non-destructive; frees no disk. Takes your admin password.",
+    { okLabel: "Flush DNS" }))) return;
+  try { await invoke("flush_dns"); uiToast("DNS cache flushed."); }
+  catch (e) { uiToast(`Flush failed: ${e}`, { danger: true }); }
 }
 async function doEmptyTrash() {
   const size = await invoke("trash_size").catch(() => 0);
@@ -1162,7 +1175,9 @@ function vpnBlocks() {
         h("div", { style: "font-weight:600;font-size:13px" }, s.name || s.url),
         h("div", { class: "dim", style: "font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, s.url)),
       h("span", { style: `font-size:12.5px;margin:0 10px;white-space:nowrap;color:${sel ? "var(--view-accent)" : "var(--text-faint)"}` }, sel ? "● active" : "○"),
-      h("button", { style: "font-size:11px;padding:4px 9px", onClick: (e) => { e.stopPropagation(); vpnRemove(s); } }, "Remove")));
+      h("button", { style: "font-size:11px;padding:4px 9px", title: "Open this server's web dashboard (log in with its admin password)",
+        onClick: (e) => { e.stopPropagation(); vpnOpenDashboard(s); } }, "Dashboard"),
+      h("button", { style: "font-size:11px;padding:4px 9px;margin-left:6px", onClick: (e) => { e.stopPropagation(); vpnRemove(s); } }, "Remove")));
   }
   if (netView.addingServer) {
     const nameI = h("input", { type: "text", placeholder: "Name (e.g. My VPN)", value: netView.serverForm.name, style: "width:100%;margin-top:10px" });
@@ -1184,11 +1199,17 @@ function vpnBlocks() {
     out.push(h("div", { class: "card" },
       h("div", { style: "font-weight:700;font-size:14px" }, "Set up this VPN"),
       h("p", { class: "dim", style: "font-size:12px;margin-top:8px;line-height:1.5" },
-        "Fetch a VPN client config from this server. You'll enter its ",
-        h("b", {}, "admin password"),
-        " — the password you set when you deployed salama-web (its ",
+        "Fetch a VPN client config from this server. Enter the ",
+        h("b", {}, "plain admin password"),
+        " you chose when deploying — the text you ran through ",
+        h("code", { style: "font-size:11px" }, "wgpw"),
+        " / ",
+        h("code", { style: "font-size:11px" }, "gen-password.sh"),
+        " to create ",
         h("code", { style: "font-size:11px" }, "PASSWORD_HASH"),
-        "). It's used once to pull the config and is never stored."),
+        ", ",
+        h("b", {}, "not the hash itself"),
+        ". It's used once to pull the config and is never stored."),
       h("button", { class: "primary", style: "margin-top:14px", disabled: netView.vpnBusy ? "" : null, onClick: vpnProvision },
         netView.vpnBusy ? "Working…" : "Provision")));
   } else if (vpn.active) {
@@ -1224,6 +1245,11 @@ async function vpnAddServer() {
   vpnRefresh();
 }
 async function vpnSelect(id) { try { await invoke("vpn_set_active", { id }); } catch { /* keep */ } vpnRefresh(); }
+// Self-host model: the server's own web UI IS the dashboard + login (single
+// admin). Open it in the browser; the user signs in with the admin password.
+async function vpnOpenDashboard(s) {
+  invoke("open_url", { url: s.url }).catch((e) => uiToast(`Couldn't open ${s.url}: ${e}`, { danger: true }));
+}
 async function vpnRemove(s) {
   if (!(await uiConfirm(`Remove “${s.name || s.url}”?\n\nThis forgets the server and its provisioned config.`, { danger: true, okLabel: "Remove" }))) return;
   try { await invoke("vpn_remove_server", { id: s.id }); } catch (e) { uiToast(String(e), { danger: true }); }
@@ -1231,7 +1257,7 @@ async function vpnRemove(s) {
 }
 async function vpnProvision() {
   const id = (netView.vpn || {}).active; if (!id) return;
-  const pw = await uiPromptText("Enter this server's salama-web admin password (the one you set when you deployed it — its PASSWORD_HASH). Used once to fetch the config; never stored.", { password: true });
+  const pw = await uiPromptText("Enter the PLAIN admin password you chose for this server — the text you turned into PASSWORD_HASH with wgpw, NOT the hash. Used once to fetch the config; never stored.", { password: true });
   if (pw == null) return;
   netView.vpnBusy = true; renderNetwork();
   try { await invoke("vpn_provision", { id, password: pw }); uiToast("Provisioned a VPN client config."); }
@@ -2160,6 +2186,91 @@ function universalReport(rep) {
 }
 
 // =====================================================================
+// Build artifacts (Developer) — rebuildable dev dirs, review → Trash
+// =====================================================================
+const daState = { phase: "idle", items: [], selection: new Set(), report: null, error: null };
+
+async function devArtifactsView() {
+  setTitle("Build artifacts", []);
+  const d = daState;
+  if (d.phase === "idle") return setView(heroLanding("package", "Rebuildable build artifacts",
+    "Find build & dependency folders that regenerate from source — Rust target/, node_modules, dist/build, __pycache__/.venv, .gradle, Pods, DerivedData, .terraform and more — across your home. Review, then move what you don't need to the Trash (reversible).",
+    ["Scans your whole home", "Only flags dirs a project can rebuild", "You choose what to remove"],
+    scanDevArtifacts));
+  if (d.phase === "scanning") return setView(cancellableSpinner("Scanning for build artifacts…"));
+  if (d.phase === "reclaiming") return setView(centeredSpinner("Moving to the Trash…"));
+  if (d.phase === "error") return setView(centered("circle-alert", "Something went wrong", d.error, "Back", () => { d.phase = "idle"; render(); }));
+  if (d.phase === "done") return setView(daResult());
+  return setView(daReview());
+}
+
+async function scanDevArtifacts() {
+  const d = daState;
+  d.phase = "scanning"; d.report = null; render();
+  try {
+    d.items = await invoke("scan_dev_artifacts", {});
+    d.selection = new Set(d.items.map((i) => i.path)); // default: all selected
+    d.phase = "review";
+  } catch (e) { d.phase = "error"; d.error = String(e); }
+  render();
+}
+
+function daReview() {
+  const d = daState;
+  if (!d.items.length) {
+    return centered("package", "No rebuildable artifacts found",
+      "Nothing under your home matched a known build/dependency directory.", "Scan again", () => { d.phase = "idle"; render(); });
+  }
+  const selectedItems = d.items.filter((i) => d.selection.has(i.path));
+  const selBytes = selectedItems.reduce((s, i) => s + Number(i.size_bytes), 0);
+  const wrap = h("div", { class: "review" });
+  wrap.append(h("div", { class: "row", style: "padding:16px 24px;align-items:center;gap:12px" },
+    h("div", {},
+      h("div", { style: "font-weight:600" }, `${d.items.length} artifact dir(s) · ${fmtBytes(selBytes)} selected`),
+      h("div", { class: "dim", style: "font-size:11px" }, "All rebuildable from source. Uncheck anything you want to keep.")),
+    h("div", { class: "spacer", style: "flex:1" }),
+    h("button", { onClick: () => { const all = d.selection.size === d.items.length; d.selection = all ? new Set() : new Set(d.items.map((i) => i.path)); render(); } },
+      d.selection.size === d.items.length ? "Deselect all" : "Select all"),
+    h("button", { class: "danger", disabled: selectedItems.length ? null : "", onClick: doReclaimDevArtifacts },
+      `Move ${selectedItems.length} to Trash`)));
+  const list = h("div", { class: "list" });
+  for (const i of d.items) {
+    const on = d.selection.has(i.path);
+    list.append(h("div", { class: "item selectable" + (on ? "" : " off"), style: "cursor:pointer",
+      onClick: () => { if (on) d.selection.delete(i.path); else d.selection.add(i.path); render(); } },
+      h("input", { type: "checkbox", checked: on ? "" : null, tabindex: "-1" }),
+      h("div", { class: "path", style: "flex:1;min-width:0" },
+        h("div", { class: "p", title: i.path }, displayPath(i.path)),
+        h("div", { class: "reason" }, i.reason)),
+      h("span", { class: "isize" }, fmtBytes(i.size_bytes))));
+  }
+  wrap.append(list);
+  return wrap;
+}
+
+async function doReclaimDevArtifacts() {
+  const d = daState;
+  const items = d.items.filter((i) => d.selection.has(i.path));
+  if (!items.length) return uiToast("Select at least one folder to remove.");
+  const total = items.reduce((s, i) => s + Number(i.size_bytes), 0);
+  if (!(await uiConfirm(
+    `Move ${items.length} build-artifact folder(s) (${fmtBytes(total)}) to the Trash?\n\nThey rebuild from source when you next build. Reversible — restore from the Trash.`,
+    { danger: true, okLabel: "Move to Trash" }))) return;
+  d.phase = "reclaiming"; render();
+  try { d.report = await invoke("reclaim", { items, extraRoots: [state.home] }); d.phase = "done"; }
+  catch (e) { d.phase = "error"; d.error = String(e); }
+  render();
+}
+
+function daResult() {
+  const r = daState.report;
+  const freed = r ? fmtBytes(r.reclaimed_bytes) : "0 MB";
+  return centered("package", "Build artifacts cleaned",
+    `Moved ${freed} to the Trash (${r ? r.succeeded : 0} folder(s)${r && r.failed ? `, ${r.failed} failed` : ""}). Rebuild from source when needed.`,
+    "Scan again", () => { daState.phase = "idle"; daState.items = []; render(); });
+}
+
+// =====================================================================
 // router
 // =====================================================================
 function render() {
@@ -2174,6 +2285,7 @@ function render() {
   if (id === "network") return networkView();
   if (id === "uninstall") return uninstallerView();
   if (id === "brew") return brewView();
+  if (id === "devartifacts") return devArtifactsView();
   if (id === "docker") return dockerView();
   if (id === "universal") return universalView();
   if (id === "startup") return startupView();
