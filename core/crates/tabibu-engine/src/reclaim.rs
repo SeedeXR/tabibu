@@ -6,6 +6,7 @@
 
 use crate::denylist;
 use crate::item::{CleanupItem, ReclaimAction, SafetyTier};
+use crate::protect;
 use crate::scanner::ScanCtx;
 use crate::undo::{ManifestEntry, UndoManifest};
 use std::fs;
@@ -125,9 +126,14 @@ pub fn reclaim(
     // can reclaim everything outside protected folders while leaving the
     // protected copies untouched. A non-Safe item with a destructive action is
     // a programming error the UI never produces, so that still fails fast.
+    // User-managed protected paths (shared with the app), loaded once. Anything
+    // overlapping an entry is skipped exactly like a denylisted path.
+    let user_protected = protect::load(&ctx.home);
     let mut to_act: Vec<&CleanupItem> = Vec::new();
     for item in &selected {
-        if !denylist::permitted(&item.path, &ctx.allowed_roots, &ctx.home) {
+        if !denylist::permitted(&item.path, &ctx.allowed_roots, &ctx.home)
+            || protect::is_protected(&item.path, &user_protected)
+        {
             report.failed += 1;
             report.outcomes.push(ItemOutcome {
                 path: item.path.clone(),
@@ -204,4 +210,45 @@ pub fn reclaim(
     // entries staying incomplete on disk errs in the safe direction.
     let _ = manifest.persist();
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::Category;
+    use crate::scanner::ScanCtx;
+    use std::collections::HashSet;
+
+    /// Safety regression: an item under a user-protected path is skipped and the
+    /// file survives, even though it is otherwise a valid, selected Safe target.
+    #[test]
+    fn user_protected_paths_are_never_reclaimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let keep_dir = home.join("keep");
+        std::fs::create_dir_all(&keep_dir).unwrap();
+        let file = keep_dir.join("data.bin");
+        std::fs::write(&file, b"important").unwrap();
+
+        protect::add(&home, &keep_dir).unwrap();
+
+        let ctx = ScanCtx {
+            home: home.clone(),
+            allowed_roots: vec![home.clone()],
+            running_bundle_ids: HashSet::new(),
+            full_disk_access: false,
+        };
+        let item = CleanupItem::new(
+            file.clone(),
+            Category::UserCache,
+            9,
+            SafetyTier::Safe,
+            "cache",
+        );
+        let report = reclaim(&ctx, &[item], &home.join("undo")).unwrap();
+
+        assert_eq!(report.succeeded, 0);
+        assert_eq!(report.failed, 1);
+        assert!(file.exists(), "protected file must NOT be trashed");
+    }
 }

@@ -48,6 +48,30 @@ pub enum TopBy {
     Memory,
 }
 
+/// Free/total bytes on a volume.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DiskSpace {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// Free/total bytes on the boot volume (`/`). Prefers the disk mounted at `/`,
+/// falling back to the largest. Shared by the app dashboard and the CLI so both
+/// report identical figures.
+#[must_use]
+pub fn disk_space() -> DiskSpace {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let root = disks
+        .list()
+        .iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/"))
+        .or_else(|| disks.list().iter().max_by_key(|d| d.total_space()));
+    DiskSpace {
+        total_bytes: root.map_or(0, sysinfo::Disk::total_space),
+        available_bytes: root.map_or(0, sysinfo::Disk::available_space),
+    }
+}
+
 /// Stateful sampler. CPU percentages need two refreshes spaced apart; call
 /// [`Sampler::sample`] on your interval and the deltas come out right.
 pub struct Sampler {

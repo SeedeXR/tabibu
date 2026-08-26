@@ -1,0 +1,78 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH tabibu 1  "tabibu 0.1.51" 
+.SH NAME
+tabibu \- Tabibu — a doctor for your Mac (health, cleanup, privacy) from the terminal
+.SH SYNOPSIS
+\fBtabibu\fR [\fB\-\-json\fR] [\fB\-\-quiet\fR] [\fB\-\-no\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Tabibu is the terminal companion to the Tabibu app. It drives the same core as the desktop UI, so you can script health checks, cleanup, and privacy from a shell, CI, or cron.
+.PP
+Every command supports \-\-json for machine\-readable output. Destructive actions are a DRY RUN by default and require \-\-yes to execute.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit machine\-readable JSON instead of human text
+.TP
+\fB\-\-quiet\fR
+Suppress human progress/hint/confirmation lines on stdout. Errors (stderr) and `\-\-json` output are unaffected — useful in cron
+.TP
+\fB\-\-no\-color\fR
+Accepted for script/CI compatibility. Output is already plain text with no color, so this is a documented no\-op (Tabibu also never colors when `NO_COLOR` is set — because it never colors at all)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+tabibu\-status(1)
+Quick vitals: CPU, memory, and your public IP (one glance)
+.TP
+tabibu\-doctor(1)
+Full checkup: vitals plus swap and the top resource\-hungry processes
+.TP
+tabibu\-trash(1)
+Inspect or empty the Trash
+.TP
+tabibu\-slim(1)
+Slim universal apps to this Mac\*(Aqs architecture (reclaim the other slice). With no APP, lists reclaimable apps; with an APP, thins it (needs `\-\-yes`)
+.TP
+tabibu\-privacy(1)
+Privacy readout: what the network sees (IP/ISP) and whether DNS is encrypted
+.TP
+tabibu\-report(1)
+One snapshot — health (CPU/memory/swap), disk space, and privacy — in a single call. Ideal piped through `\-\-json` for CI or a cron health check
+.TP
+tabibu\-space(1)
+Disk\-usage tree for a folder, largest entries first (read\-only)
+.TP
+tabibu\-scan(1)
+Find things worth reviewing — report only, never removes anything
+.TP
+tabibu\-flush\-dns(1)
+Flush the macOS DNS resolver cache (maintenance; needs admin — uses sudo if not already root). Fixes stale DNS after network changes
+.TP
+tabibu\-clean(1)
+Reclaim space by moving items to the Trash (reversible). Prints a report first; pass `\-\-yes` to actually move them
+.TP
+tabibu\-brew(1)
+Homebrew maintenance: read its status, or clean its cache / orphans. Destructive verbs report first and need `\-\-yes`; the removal is done by `brew` itself (Homebrew manages what it deletes)
+.TP
+tabibu\-docker(1)
+Docker maintenance: read reclaimable space, or prune build cache + unused images. Prune reports first and needs `\-\-yes`; the removal is done by `docker` itself (images re\-pull, build cache rebuilds)
+.TP
+tabibu\-uninstall(1)
+Uninstall an app AND its leftover support files (caches, preferences, containers, …). Give a `.app` path or an app name; reports the bundle plus every remnant first, and `\-\-yes` moves them all to the Trash (reversible — restore from Trash)
+.TP
+tabibu\-protect(1)
+Manage protected paths — a safety list shared with the desktop app. Nothing under a protected path is ever trashed or deleted by any cleanup (`clean`, `uninstall`, the app), no matter which asked
+.TP
+tabibu\-completions(1)
+Print a shell completion script to stdout. Source it from your shell rc, e.g. `tabibu completions zsh > ~/.zfunc/_tabibu`
+.TP
+tabibu\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH VERSION
+v0.1.51

@@ -12,6 +12,7 @@ pub mod cancel;
 pub mod denylist;
 pub mod item;
 pub mod orchestrate;
+pub mod protect;
 pub mod reclaim;
 pub mod scanner;
 pub mod undo;

@@ -17,6 +17,8 @@ members = [
     "crates/tabibu-route",
     "crates/tabibu-salama",
     "crates/tabibu-dohd",
+    "crates/tabibu-cli",
+    "crates/tabibu-devscan",
 ]
 
 [workspace.package]
@@ -41,6 +43,7 @@ tabibu-net = { path = "crates/tabibu-net" }
 tabibu-vpnproto = { path = "crates/tabibu-vpnproto" }
 tabibu-route = { path = "crates/tabibu-route" }
 tabibu-salama = { path = "crates/tabibu-salama" }
+tabibu-devscan = { path = "crates/tabibu-devscan" }
 
 rayon = "1.10"
 blake3 = { version = "1.5", features = ["rayon"] }

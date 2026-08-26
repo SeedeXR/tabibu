@@ -1,0 +1,18 @@
+[package]
+name = "tabibu-devscan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tabibu-engine.workspace = true
+tabibu-walk.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

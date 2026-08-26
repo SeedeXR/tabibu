@@ -1,0 +1,45 @@
+[package]
+name = "tabibu-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The CLI binary is `tabibu` (the app is the Tauri bundle; this is the terminal
+# companion that drives the same core crates).
+[[bin]]
+name = "tabibu"
+path = "src/main.rs"
+
+[dependencies]
+tabibu-engine.workspace = true
+tabibu-monitor.workspace = true
+tabibu-junk.workspace = true
+tabibu-salama.workspace = true
+tabibu-universal.workspace = true
+tabibu-walk.workspace = true
+tabibu-dupes.workspace = true
+tabibu-malware.workspace = true
+tabibu-devscan.workspace = true
+tabibu-brew.workspace = true
+tabibu-docker.workspace = true
+tabibu-uninstall.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+
+# build.rs generates the man page (tabibu.1) from the clap definition, so the
+# man page and --help can never drift. It `include!`s src/cli.rs, which now
+# references clap_complete::Shell — so clap_complete is a build-dep too.
+[build-dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
