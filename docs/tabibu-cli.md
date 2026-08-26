@@ -106,6 +106,19 @@ schedule those only if you accept the tool's own removal.
 
 ## Install / build
 
+**Everything, one shot** — builds the desktop app (+ its bundled helpers) *and*
+the CLI, then installs the app to `/Applications`, `tabibu` to `/usr/local/bin`,
+and the man page. `sudo` is used only where a target isn't writable as you:
+
+```bash
+./scripts/install.sh              # universal app + host-arch CLI, then install
+./scripts/install.sh --native     # app for this Mac's arch only (faster)
+./scripts/install.sh --debug      # quick unoptimized build of both
+./scripts/install.sh --no-install # build everything, install nothing
+```
+
+**Just the CLI:**
+
 ```bash
 cd core
 cargo build --release -p tabibu-cli      # binary at core/target/release/tabibu

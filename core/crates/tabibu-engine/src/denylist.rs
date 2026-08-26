@@ -94,9 +94,15 @@ pub fn denied(path: &Path, home: &Path) -> Option<DenyReason> {
 /// This is the invariant every scanner's output must satisfy.
 #[must_use]
 pub fn permitted(path: &Path, allowed_roots: &[PathBuf], home: &Path) -> bool {
-    if denied(path, home).is_some() {
-        return false;
-    }
+    denied(path, home).is_none() && within_roots(path, allowed_roots)
+}
+
+/// Whether `path` lies within one of `allowed_roots` (alias-normalized), with no
+/// denylist judgement. `reclaim` uses this together with [`denied`] so a narrow,
+/// reversible exception (rebuildable dev artifacts under a user-data dir) can be
+/// permitted without widening the general [`permitted`] rule.
+#[must_use]
+pub fn within_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
     let path = normalize(path);
     allowed_roots
         .iter()

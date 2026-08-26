@@ -1303,15 +1303,21 @@ fn vpn_provision_inner(
             .map_err(|e| e.to_string())
     };
     // Login: the password goes on STDIN (`--data @-`), never in argv where
-    // same-user `ps -ww` could read it.
+    // same-user `ps -ww` could read it. Capture the HTTP status (no `-f`) so we
+    // can tell the user WHICH thing failed — unreachable server vs wrong
+    // password/corrupted hash vs an unexpected response.
     let body = serde_json::json!({ "password": password }).to_string();
     let login = {
         use std::io::Write;
         let mut child = std::process::Command::new("/usr/bin/curl")
             .args([
-                "-fsS",
+                "-sS",
                 "-c",
                 &jar_s,
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
                 "-X",
                 "POST",
                 "-H",
@@ -1334,7 +1340,25 @@ fn vpn_provision_inner(
         child.wait_with_output().map_err(|e| e.to_string())?
     };
     if !login.status.success() {
-        return Err("Login failed. Use your PLAIN admin password (the text you turned into PASSWORD_HASH with wgpw) — not the hash — and check the server URL.".into());
+        // curl itself failed → the HTTP request never completed.
+        let why = String::from_utf8_lossy(&login.stderr);
+        let why = why.trim();
+        return Err(format!(
+            "Can't reach {base}. Check the server URL is right and the server is deployed and reachable (https, DNS, firewall).{}",
+            if why.is_empty() { String::new() } else { format!(" ({why})") }
+        ));
+    }
+    let code = String::from_utf8_lossy(&login.stdout);
+    match code.trim() {
+        "200" | "204" => {} // logged in
+        "401" | "403" => {
+            return Err("Login rejected by the server (401). Either the admin password is wrong, or the server's PASSWORD_HASH is corrupted — regenerate it with ./salama-web/gen-password.sh and redeploy (see docs/account-system.md). Enter the PLAIN password you chose, not the hash.".into());
+        }
+        other => {
+            return Err(format!(
+                "Unexpected response (HTTP {other}) from {base}/api/session — is this your salama-web (wg-easy) server URL?"
+            ));
+        }
     }
     let name = "tabibu";
     let list_url = format!("{base}/api/wireguard/client");

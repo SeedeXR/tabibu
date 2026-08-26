@@ -33,6 +33,37 @@ flowchart LR
   A -->|"VPN switch"| F["tunnel up/down"]
 ```
 
+## The full flow (create account + password → pull config)
+
+In the self-host model your "account" is the server's single admin, and its
+password is set at deploy — so "create an account and a password" happens once,
+when you stand the server up:
+
+1. **Create the password:** `./salama-web/gen-password.sh` → choose your admin
+   password. It prints `PASSWORD_HASH=…`. (This password *is* your account.)
+2. **Deploy with it:** paste the **raw** hash into Coolify's `PASSWORD_HASH` env
+   var (raw = single `$`; the compose passes a real env var through verbatim —
+   see `salama-web/README.md`), set `WG_HOST`, and deploy.
+3. **Pull the config in the app:** Network → Salama VPN → **+ Add server** (the
+   deployed URL) → **Provision** → enter the **plain** password from step 1.
+   Tabibu logs in, creates a `tabibu` client, and downloads its config (stored
+   `0600`, never uploaded).
+4. **Toggle the VPN on.**
+
+## Troubleshooting — "Provision failed"
+
+The app now says which of these it is:
+
+- **"Login rejected (401)…"** — the password is wrong, **or** the server's
+  `PASSWORD_HASH` is corrupted. The most common cause: an older setup put the
+  hash in a `.env` file **without doubling the `$`**, so `docker compose`
+  interpolation mangled it (e.g. `$2a$12$abc…` → `$2a$12`). **Fix:** regenerate
+  and redeploy — `./salama-web/gen-password.sh` (paste raw into Coolify), or for
+  a local `.env` use `gen-password.sh --env` (which doubles the `$` for you).
+- **"Can't reach …"** — wrong URL, server not deployed, or the web route/DNS/
+  firewall isn't up. Confirm the server's web UI opens in a browser (the
+  **Dashboard** button), and that it's `https`.
+
 ## Reset the admin password (self-host)
 
 There's no self-service reset on a single-admin server — you re-set the

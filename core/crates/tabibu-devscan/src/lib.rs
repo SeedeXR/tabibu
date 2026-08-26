@@ -196,13 +196,21 @@ pub fn scan(roots: &[PathBuf], home: &Path, cancel: &CancelToken) -> Vec<DevArti
 
 /// Directories the scan must never descend into or flag: the user's `~/Library`
 /// (app/OS-managed data — its `node_modules`/caches belong to installed apps,
-/// not to source projects, and `tabibu-junk` handles Library caches), and
-/// anything the engine denylist protects (Documents, Desktop, Photos, …) — which
-/// `reclaim` would refuse anyway, so surfacing them is misleading and unsafe.
+/// not to source projects, and `tabibu-junk` handles Library caches), the
+/// top-level `~/.dotdir`s, and the engine denylist's user-data trees — EXCEPT
+/// `~/Documents` and `~/Desktop`, where developers commonly keep projects (those
+/// we scan; `reclaim` permits recognized rebuildable artifacts there). The other
+/// protected trees (Pictures, Movies, Music, Mail, iCloud, …) hold no build
+/// output and are huge, so skipping them is both safer and much faster.
 fn excluded(path: &Path, home: &Path) -> bool {
-    path == home.join("Library")
-        || is_home_dotdir(path, home)
-        || tabibu_engine::denylist::denied(path, home).is_some()
+    if path == home.join("Library") || is_home_dotdir(path, home) {
+        return true;
+    }
+    if tabibu_engine::denylist::denied(path, home).is_some() {
+        return !path.starts_with(home.join("Documents"))
+            && !path.starts_with(home.join("Desktop"));
+    }
+    false
 }
 
 /// A hidden directory directly under home (`~/.vscode`, `~/.npm`, `~/.nvm`,
@@ -345,38 +353,37 @@ mod tests {
         touch(&home.join("code/app/node_modules/x/i.js"));
         // App-managed node_modules under ~/Library → must be skipped.
         touch(&home.join("Library/Application Support/Code/ext/node_modules/y/i.js"));
-        // Project under ~/Documents (engine denylist / reclaim refuses) → skipped.
+        // Projects under ~/Documents and ~/Desktop → developers keep code here,
+        // so these ARE scanned (reclaim permits recognized artifacts there).
         touch(&home.join("Documents/proj/node_modules/z/i.js"));
+        touch(&home.join("Desktop/hack/node_modules/q/i.js"));
+        // A media tree (~/Movies — denylisted, no build output) → skipped.
+        touch(&home.join("Movies/edit/node_modules/m/i.js"));
         // Tool-managed top-level dot-dir (~/.vscode/…/node_modules) → skipped.
         touch(&home.join(".vscode/extensions/e/node_modules/w/i.js"));
-        // But a project's OWN deeper .venv is still found.
+        // A project's OWN deeper .venv is still found.
         touch(&home.join("code/api/.venv/pyvenv.cfg"));
 
         let arts = scan(&[home.to_path_buf()], home, &CancelToken::new());
-        let paths: Vec<_> = arts.iter().map(|a| a.path.clone()).collect();
-        assert!(paths.iter().any(|p| p.ends_with("code/app/node_modules")));
+        let has = |needle: &str| {
+            arts.iter()
+                .any(|a| a.path.to_string_lossy().contains(needle))
+        };
+        assert!(arts
+            .iter()
+            .any(|a| a.path.ends_with("code/app/node_modules")));
+        assert!(has("/Documents/"), "~/Documents projects ARE scanned");
+        assert!(has("/Desktop/"), "~/Desktop projects ARE scanned");
         assert!(
-            paths.iter().any(|p| p.ends_with("code/api/.venv")),
+            arts.iter().any(|a| a.path.ends_with("code/api/.venv")),
             "a project's own deeper .venv is still found"
         );
         assert!(
-            !paths
-                .iter()
-                .any(|p| p.to_string_lossy().contains("/.vscode/")),
-            "top-level ~/.vscode (tool-managed) must be excluded"
+            !has("/.vscode/"),
+            "top-level ~/.vscode (tool-managed) is excluded"
         );
-        assert!(
-            !paths
-                .iter()
-                .any(|p| p.to_string_lossy().contains("/Library/")),
-            "~/Library trees must be excluded"
-        );
-        assert!(
-            !paths
-                .iter()
-                .any(|p| p.to_string_lossy().contains("/Documents/")),
-            "denylisted (Documents) trees must be excluded"
-        );
+        assert!(!has("/Library/"), "~/Library trees are excluded");
+        assert!(!has("/Movies/"), "media trees (~/Movies) are excluded");
     }
 
     #[test]

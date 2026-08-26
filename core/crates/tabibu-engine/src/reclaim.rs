@@ -4,8 +4,8 @@
 //! 3. undo manifest durably on disk before the first mutation,
 //! 4. measured — not estimated — reclaimed bytes in the report.
 
-use crate::denylist;
-use crate::item::{CleanupItem, ReclaimAction, SafetyTier};
+use crate::denylist::{self, DenyReason};
+use crate::item::{Category, CleanupItem, ReclaimAction, SafetyTier};
 use crate::protect;
 use crate::scanner::ScanCtx;
 use crate::undo::{ManifestEntry, UndoManifest};
@@ -131,7 +131,18 @@ pub fn reclaim(
     let user_protected = protect::load(&ctx.home);
     let mut to_act: Vec<&CleanupItem> = Vec::new();
     for item in &selected {
-        if !denylist::permitted(&item.path, &ctx.allowed_roots, &ctx.home)
+        // A recognized rebuildable dev artifact (`DevCache`) may be reclaimed even
+        // from a user-data dir like ~/Documents or ~/Desktop — that's where many
+        // developers keep projects, the folder is not user data, and the move is
+        // reversible (Trash). System paths, path traversal, and the user's own
+        // protected list are NEVER overridden — only the user-data (`UserData`)
+        // denial is, and only for a `DevCache` item being moved to the Trash.
+        let deny = denylist::denied(&item.path, &ctx.home);
+        let dev_override = item.category == Category::DevCache
+            && item.action == ReclaimAction::Trash
+            && matches!(deny, Some(DenyReason::UserData));
+        if !denylist::within_roots(&item.path, &ctx.allowed_roots)
+            || (deny.is_some() && !dev_override)
             || protect::is_protected(&item.path, &user_protected)
         {
             report.failed += 1;
@@ -250,5 +261,46 @@ mod tests {
         assert_eq!(report.succeeded, 0);
         assert_eq!(report.failed, 1);
         assert!(file.exists(), "protected file must NOT be trashed");
+    }
+
+    /// A rebuildable dev artifact (`DevCache`) under a user-data dir like
+    /// ~/Documents IS reclaimable (developers keep projects there; reversible
+    /// Trash) — but any OTHER item in that denied tree stays protected.
+    #[test]
+    fn dev_artifacts_are_reclaimable_from_user_data_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let ctx = ScanCtx {
+            home: home.clone(),
+            allowed_roots: vec![home.clone()],
+            running_bundle_ids: HashSet::new(),
+            full_disk_access: false,
+        };
+
+        // DevCache + Trash under ~/Documents → the override lets it through.
+        let art = home.join("Documents/proj/node_modules");
+        std::fs::create_dir_all(&art).unwrap();
+        std::fs::write(art.join("f"), b"x").unwrap();
+        let dev = CleanupItem::new(art, Category::DevCache, 1, SafetyTier::Safe, "node_modules");
+        let r = reclaim(&ctx, &[dev], &home.join("undo")).unwrap();
+        assert_eq!(
+            r.failed, 0,
+            "a DevCache artifact under Documents is not skipped"
+        );
+        assert_eq!(r.succeeded, 1);
+
+        // Control: a NON-DevCache item in the same denied tree stays protected.
+        let keep = home.join("Documents/proj/thesis.txt");
+        std::fs::write(&keep, b"y").unwrap();
+        let item = CleanupItem::new(
+            keep.clone(),
+            Category::LargeOldFile,
+            1,
+            SafetyTier::Safe,
+            "big",
+        );
+        let r2 = reclaim(&ctx, &[item], &home.join("undo")).unwrap();
+        assert_eq!(r2.failed, 1, "non-DevCache under Documents is refused");
+        assert!(keep.exists(), "the non-artifact file is untouched");
     }
 }
