@@ -812,17 +812,23 @@ fn junk_ctx() -> ScanCtx {
     }
 }
 
+/// True if we're already running as root (uid 0) — then admin commands run
+/// directly; otherwise they go through `sudo`.
+fn is_root() -> bool {
+    std::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .is_some_and(|s| s.trim() == "0")
+}
+
 /// Flush the DNS resolver cache. Signalling mDNSResponder needs root, so if we
 /// aren't already root the work runs via `sudo` (which prompts in a terminal; in
 /// a non-interactive shell it fails and we report that). This is maintenance —
 /// it frees no disk and removes no files.
 fn cmd_flush_dns(json: bool) -> i32 {
-    let is_root = std::process::Command::new("/usr/bin/id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .is_some_and(|s| s.trim() == "0");
+    let is_root = is_root();
     // Both steps in ONE privileged shell so the user is asked for a password at
     // most once (not once per command). Both run regardless of the first's
     // result; the script exits non-zero if EITHER failed.
@@ -850,63 +856,66 @@ fn cmd_flush_dns(json: bool) -> i32 {
     i32::from(!ok)
 }
 
-/// Current used/total system memory, from a fresh one-shot sample (memory is a
-/// snapshot, so a single refresh is accurate — unlike CPU%, which needs a delta).
-fn memory_used_total() -> (u64, u64) {
-    let mut sampler = Sampler::new();
-    let s = sampler.sample(0, TopBy::Cpu);
-    (s.used_memory_bytes, s.total_memory_bytes)
-}
-
 /// `free-memory` — run macOS `purge` to return inactive/cached memory to the
 /// free pool. Harmless (flushes disk caches; no data loss). Needs root, so uses
-/// `sudo` when not already root. Reports the measured before/after delta.
+/// `sudo` when not already root. `purge` moves reclaimable pages into *free*
+/// memory (it barely changes `used`), so the freed amount is the rise in FREE
+/// memory across the operation.
 fn cmd_free_memory(json: bool) -> i32 {
-    let (before, total) = memory_used_total();
-    let is_root = std::process::Command::new("/usr/bin/id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .is_some_and(|s| s.trim() == "0");
-    let status = if is_root {
+    let root = is_root();
+    if !root {
+        // Prime sudo (prompts once) so the purge below runs non-interactively.
+        // This also means `before` is sampled AFTER authentication, isolating
+        // the measurement from time spent typing the password.
+        let primed = std::process::Command::new("/usr/bin/sudo")
+            .arg("-v")
+            .status()
+            .is_ok_and(|s| s.success());
+        if !primed {
+            if json {
+                print_json(&serde_json::json!({ "freed": false }));
+            } else {
+                eprintln!("free-memory: admin authentication failed or was cancelled.");
+            }
+            return 1;
+        }
+    }
+    let before = tabibu_monitor::memory_snapshot();
+    let status = if root {
         std::process::Command::new("/usr/sbin/purge").status()
     } else {
         std::process::Command::new("/usr/bin/sudo")
-            .arg("/usr/sbin/purge")
+            .args(["-n", "/usr/sbin/purge"])
             .status()
     };
-    let ok = status.is_ok_and(|s| s.success());
-    if !ok {
+    if !status.is_ok_and(|s| s.success()) {
         if json {
             print_json(&serde_json::json!({ "freed": false }));
         } else {
-            eprintln!(
-                "free-memory: failed — run `sudo tabibu free-memory`, or grant the admin prompt."
-            );
+            eprintln!("free-memory: purge failed — try `sudo tabibu free-memory`.");
         }
         return 1;
     }
-    let (after, _) = memory_used_total();
-    let freed = before.saturating_sub(after);
+    let after = tabibu_monitor::memory_snapshot();
+    let freed = after.free_bytes.saturating_sub(before.free_bytes);
     if json {
         print_json(&serde_json::json!({
             "freed": true,
             "freed_bytes": freed,
-            "before_used_bytes": before,
-            "after_used_bytes": after,
-            "total_bytes": total,
+            "before_free_bytes": before.free_bytes,
+            "after_free_bytes": after.free_bytes,
+            "total_bytes": before.total_bytes,
         }));
     } else {
         println!(
-            "Freed {} — memory used {} → {} of {}.",
+            "Freed {} back to the free pool (free {} → {} of {}).",
             human_bytes(freed),
-            human_bytes(before),
-            human_bytes(after),
-            human_bytes(total)
+            human_bytes(before.free_bytes),
+            human_bytes(after.free_bytes),
+            human_bytes(before.total_bytes)
         );
         if freed == 0 {
-            println!("(Nothing purgeable right now — macOS already had it optimized.)");
+            println!("(Nothing to reclaim right now — macOS already had it optimized.)");
         }
     }
     0

@@ -673,17 +673,28 @@ function cancellableSpinner(msg) {
     h("button", { style: "margin-top:8px", onClick: () => invoke("cancel_sync").catch(() => {}) }, "Stop"));
 }
 function fdaNotice() {
-  const recheck = h("button", { onClick: recheckFDA }, "I've enabled it — re-check");
   return h("div", { class: "notice" }, icon("lock-keyhole"),
     h("div", { class: "body" },
       h("h3", {}, "Grant Full Disk Access once for complete results"),
-      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security), and there's no per-folder shortcut. Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access, then come back."),
-      h("div", { class: "row", style: "gap:8px" },
-        h("button", { class: "primary", onClick: () => invoke("open_url", { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" }) }, "Open Privacy Settings"),
-        recheck)));
+      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security), and there's no per-folder shortcut. Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access, then Relaunch — macOS only applies the change when the app restarts."),
+      h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
+        h("button", { class: "primary", onClick: openFdaSettings }, "Open Privacy Settings"),
+        h("button", { onClick: relaunchApp }, "Relaunch Tabibu"),
+        h("button", { onClick: recheckFDA }, "Re-check"))));
+}
+function openFdaSettings() {
+  invoke("open_url", { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" });
+}
+async function relaunchApp() {
+  // Restarts the process so a just-granted FDA takes effect (macOS caches the
+  // decision per-process). invoke never returns if the restart succeeds.
+  try { await invoke("relaunch"); } catch (e) { uiToast(`Couldn't relaunch: ${e}`, { danger: true }); }
 }
 async function recheckFDA() {
   try { const info = await invoke("system_info"); state.fda = info.full_disk_access; } catch {}
+  if (!state.fda) {
+    uiToast("Still limited. If you just enabled Full Disk Access, Relaunch Tabibu — macOS applies it only on restart.", { danger: true });
+  }
   updateFooter();
   render();
 }
@@ -977,8 +988,8 @@ async function doFreeMemory() {
     const r = await invoke("free_memory");
     const freed = Number(r.freed_bytes);
     uiToast(freed > 0
-      ? `Freed ${fmtRam(freed)} — memory used ${fmtRam(r.before_used_bytes)} → ${fmtRam(r.after_used_bytes)}.`
-      : "Nothing purgeable right now — macOS already had memory optimized.");
+      ? `Freed ${fmtRam(freed)} back to the free pool.`
+      : "Nothing to reclaim right now — macOS already had memory optimized.");
   } catch (e) { uiToast(`Couldn't free memory: ${e}`, { danger: true }); }
   monState.freeingMem = false;
   try { monState.sample = await invoke("monitor_sample", { topN: 12, byCpu: monState.byCpu }); } catch { /* keep last */ }
@@ -2033,10 +2044,11 @@ async function settingsView() {
     h("div", { class: "body" },
       h("h3", {}, h("span", { class: "dot", style: `display:inline-block;margin-right:8px;background:${on ? "var(--tier-safe)" : "var(--tier-review)"}` }),
         on ? "Full Disk Access — granted" : "Full Disk Access — not granted"),
-      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security), and there's no per-folder shortcut. Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access."),
-      on ? null : h("div", { class: "row", style: "gap:8px;margin-top:10px" },
-        h("button", { class: "primary", onClick: () => invoke("open_url", { url: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" }) }, "Open Privacy Settings"),
-        h("button", { onClick: recheckFDA }, "I've enabled it — re-check"))));
+      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security), and there's no per-folder shortcut. Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access, then Relaunch — macOS only applies it when the app restarts."),
+      on ? null : h("div", { class: "row", style: "gap:8px;margin-top:10px;flex-wrap:wrap" },
+        h("button", { class: "primary", onClick: openFdaSettings }, "Open Privacy Settings"),
+        h("button", { onClick: relaunchApp }, "Relaunch Tabibu"),
+        h("button", { onClick: recheckFDA }, "Re-check"))));
 
   // Proactive alerts (Trash large / memory pressure) with per-alert snooze.
   const alertPrefs = await invoke("get_alert_prefs").catch(() => null);
@@ -2256,19 +2268,19 @@ function daReview() {
   }
   sizeSel.addEventListener("change", () => { d.minSize = Number(sizeSel.value); render(); });
 
-  wrap.append(h("div", { class: "row", style: "padding:16px 24px;align-items:center;gap:12px" },
-    h("div", {},
+  wrap.append(h("div", { class: "row", style: "padding:16px 24px;gap:12px;flex-wrap:wrap;align-items:flex-end" },
+    h("div", { style: "min-width:0;flex:1 1 220px" },
       h("div", { style: "font-weight:600" }, `${visible.length} of ${d.items.length} artifact dir(s) · ${fmtBytes(selBytes)} selected`),
       h("div", { class: "dim", style: "font-size:11px" }, "Rebuildable from source. Uncheck to keep; Reveal to inspect a folder before deleting.")),
-    h("div", { class: "spacer", style: "flex:1" }),
-    h("label", { class: "dim", style: "font-size:11px;display:flex;align-items:center;gap:5px" }, "Show", sizeSel),
-    h("button", { onClick: () => {
-        if (allVisibleSelected) { for (const i of visible) d.selection.delete(i.path); }
-        else { for (const i of visible) d.selection.add(i.path); }
-        render();
-      } }, allVisibleSelected ? "Deselect all" : "Select all"),
-    h("button", { class: "danger", disabled: selectedVisible.length ? null : "", onClick: doReclaimDevArtifacts },
-      `Move ${selectedVisible.length} to Trash`)));
+    h("div", { class: "row", style: "gap:8px;flex-wrap:wrap;justify-content:flex-end" },
+      h("label", { class: "dim", style: "font-size:11px;display:flex;align-items:center;gap:5px;white-space:nowrap" }, "Show", sizeSel),
+      h("button", { style: "white-space:nowrap", onClick: () => {
+          if (allVisibleSelected) { for (const i of visible) d.selection.delete(i.path); }
+          else { for (const i of visible) d.selection.add(i.path); }
+          render();
+        } }, allVisibleSelected ? "Deselect all" : "Select all"),
+      h("button", { class: "danger", style: "white-space:nowrap", disabled: selectedVisible.length ? null : "", onClick: doReclaimDevArtifacts },
+        `Move ${selectedVisible.length} to Trash`))));
 
   const list = h("div", { class: "list" });
   for (const i of visible) {

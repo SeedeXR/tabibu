@@ -252,7 +252,9 @@ pub fn strip_universal(path: String) -> Result<tabibu_universal::StripResult, St
 pub fn scan_dev_artifacts(root: Option<String>) -> Vec<CleanupItem> {
     let cancel = begin_sync_op();
     let home = system::home_dir();
-    let root = root.map(std::path::PathBuf::from).unwrap_or_else(|| home.clone());
+    let root = root
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
     tabibu_devscan::scan(&[root], &home, &cancel)
         .into_iter()
         .map(|a| CleanupItem {
@@ -500,36 +502,39 @@ pub fn flush_dns() -> Result<(), String> {
     run_admin_shell("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder")
 }
 
+/// Restart Tabibu. macOS caches an app's Full Disk Access decision for the life
+/// of the process, so right after the user grants FDA the running app still sees
+/// it as denied — relaunching is what makes the new grant take effect.
+#[tauri::command]
+pub fn relaunch(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[derive(Serialize)]
 pub struct FreeMemoryResult {
+    /// Truly-free RAM reclaimed (the rise in free memory across the purge).
     pub freed_bytes: u64,
-    pub before_used_bytes: u64,
-    pub after_used_bytes: u64,
+    pub before_free_bytes: u64,
+    pub after_free_bytes: u64,
     pub total_bytes: u64,
 }
 
 /// Free inactive/cached memory via macOS `purge` (one admin prompt). Harmless:
 /// it flushes disk caches and returns purgeable pages to the free pool — no data
-/// is lost (caches re-read from disk). Reports the measured before/after delta.
+/// is lost (caches re-read from disk). `purge` moves reclaimable pages into
+/// *free* memory (it barely changes `used`/`available`), so the freed amount is
+/// the rise in FREE memory across the operation.
 #[tauri::command(async)]
 pub fn free_memory() -> Result<FreeMemoryResult, String> {
-    let (before, total) = mem_used_total();
+    let before = tabibu_monitor::memory_snapshot();
     run_admin_shell("/usr/sbin/purge")?;
-    let (after, _) = mem_used_total();
+    let after = tabibu_monitor::memory_snapshot();
     Ok(FreeMemoryResult {
-        freed_bytes: before.saturating_sub(after),
-        before_used_bytes: before,
-        after_used_bytes: after,
-        total_bytes: total,
+        freed_bytes: after.free_bytes.saturating_sub(before.free_bytes),
+        before_free_bytes: before.free_bytes,
+        after_free_bytes: after.free_bytes,
+        total_bytes: before.total_bytes,
     })
-}
-
-/// One-shot used/total system memory (a fresh sampler — memory is a snapshot, so
-/// no CPU-style delta is needed, and this avoids disturbing the shared sampler).
-fn mem_used_total() -> (u64, u64) {
-    let mut s = Sampler::new();
-    let snap = s.sample(0, TopBy::Cpu);
-    (snap.used_memory_bytes, snap.total_memory_bytes)
 }
 
 // ---------------------------------------------------------------------------

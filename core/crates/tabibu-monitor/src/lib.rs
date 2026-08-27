@@ -48,6 +48,32 @@ pub enum TopBy {
     Memory,
 }
 
+/// A one-shot system-memory reading.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MemorySnapshot {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    /// Truly-free RAM (macOS: `vm_stat` "Pages free"). This is what rises when
+    /// `purge` reclaims inactive/purgeable pages — `used` and `available` barely
+    /// move — so a free-memory delta is the honest measure of what purge freed.
+    pub free_bytes: u64,
+}
+
+/// Read system memory with a MEMORY-ONLY refresh — no process sweep (unlike
+/// [`Sampler::sample`], which refreshes every process even when you only want
+/// totals). Shared by the app and CLI so a purge's freed-bytes delta is computed
+/// one way, correctly, in both.
+#[must_use]
+pub fn memory_snapshot() -> MemorySnapshot {
+    let mut sys = System::new();
+    sys.refresh_memory();
+    MemorySnapshot {
+        total_bytes: sys.total_memory(),
+        used_bytes: sys.used_memory(),
+        free_bytes: sys.free_memory(),
+    }
+}
+
 /// Free/total bytes on a volume.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct DiskSpace {
@@ -160,6 +186,14 @@ impl Sampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_snapshot_is_coherent() {
+        let m = memory_snapshot();
+        assert!(m.total_bytes > 0);
+        assert!(m.used_bytes <= m.total_bytes);
+        assert!(m.free_bytes <= m.total_bytes);
+    }
 
     #[test]
     fn sample_returns_real_data() {

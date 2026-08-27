@@ -8,8 +8,14 @@ cd "$(dirname "$0")/.."
 ( cd core && cargo build -p tabibu-cli >/dev/null )
 # Pick the NEWEST generated page: there can be several build-script OUT_DIRs
 # (debug + release + stale hashes), and an arbitrary one (e.g. an old release
-# build) would copy a STALE man page. `ls -t` orders by mtime, newest first.
-MAN=$(find core/target -path '*/build/tabibu-cli-*/out/tabibu.1' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+# build) would copy a STALE man page. A `find | xargs ls -t` pipe is NOT used:
+# under GNU xargs an empty match still runs `ls` (listing the cwd), which would
+# defeat the not-found guard below. This newer-than loop is portable and, on no
+# match, leaves MAN empty so the guard fires.
+MAN=""
+while IFS= read -r f; do
+  if [ -z "$MAN" ] || [ "$f" -nt "$MAN" ]; then MAN="$f"; fi
+done < <(find core/target -path '*/build/tabibu-cli-*/out/tabibu.1' 2>/dev/null)
 [ -n "$MAN" ] || { echo "error: generated tabibu.1 not found in OUT_DIR" >&2; exit 1; }
 
 mkdir -p core/crates/tabibu-cli/man

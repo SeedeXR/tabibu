@@ -23,11 +23,40 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// TCC offers no query API; the honest probe is reading a path that is gated
-/// behind Full Disk Access and that we never otherwise touch. Readable ⇒ FDA.
+/// TCC offers no query API; the honest probe is READING (not just stat-ing) a
+/// path gated behind Full Disk Access. A successful read ⇒ FDA.
+///
+/// We try several gated paths and accept the FIRST that reads — crucially we do
+/// NOT treat a *missing* path as "denied" (the old probe read only
+/// `~/Library/Safari`, so a user who never ran Safari looked permission-less
+/// even with FDA granted). The per-user TCC store is listed first because it
+/// effectively always exists.
 #[must_use]
 pub fn has_full_disk_access(home: &Path) -> bool {
-    std::fs::read_dir(home.join("Library/Safari")).is_ok()
+    const GATED: &[&str] = &[
+        "Library/Application Support/com.apple.TCC/TCC.db", // always present, FDA-gated
+        "Library/Safari",
+        "Library/Mail",
+        "Library/Messages",
+    ];
+    GATED.iter().any(|rel| readable(&home.join(rel)))
+}
+
+/// Whether we can actually read `p`'s contents. `stat` succeeds without FDA, so
+/// we must open/list, not just check existence: a directory is listed, a file
+/// is opened and one byte read. A missing path or a denial both return `false`
+/// (a denial is only conclusive across the whole probe set, not per path).
+fn readable(p: &Path) -> bool {
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_dir() => std::fs::read_dir(p).is_ok(),
+        Ok(_) => {
+            use std::io::Read;
+            std::fs::File::open(p)
+                .and_then(|mut f| f.read(&mut [0u8; 1]).map(|_| ()))
+                .is_ok()
+        }
+        Err(_) => false,
+    }
 }
 
 #[must_use]
@@ -36,6 +65,32 @@ pub fn system_info() -> SystemInfo {
     SystemInfo {
         full_disk_access: has_full_disk_access(&home),
         home: home.to_string_lossy().into_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::readable;
+    use std::io::Write;
+
+    #[test]
+    fn readable_reads_file_and_dir_but_not_missing() {
+        let base = std::env::temp_dir().join(format!("tabibu-fda-{}", std::process::id()));
+        let dir = base.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = base.join("f.txt");
+        std::fs::File::create(&file)
+            .unwrap()
+            .write_all(b"hi")
+            .unwrap();
+
+        assert!(readable(&file), "an existing readable file reads");
+        assert!(readable(&dir), "an existing readable directory lists");
+        // A MISSING path must be a non-signal (false), never a false positive —
+        // this is exactly why the old single-path Safari probe misfired.
+        assert!(!readable(&base.join("nope")));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 
