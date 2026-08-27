@@ -173,13 +173,14 @@ tabibu scan large             Large, old files in Downloads (review only)
 tabibu scan dupes <PATH> [--min-size N]  Byte-identical duplicates (keep newest)
 tabibu scan junk              Reclaimable junk by category (report only)
 tabibu scan malware           Adware / rogue-profile heuristics (report only)
-tabibu scan dev-artifacts [PATH] [--global]   Rebuildable build dirs (report only)
+tabibu scan dev-artifacts [PATH] [--global] [--min-size N]   Rebuildable build dirs (report only)
 tabibu flush-dns              Flush the macOS DNS resolver cache (admin)
+tabibu free-memory            Free inactive/cached memory via macOS purge (admin)
 tabibu clean junk [--yes]     Move junk to the Trash — reports first, --yes acts
 tabibu clean caches [--yes]   App + developer caches only
 tabibu clean logs [--yes]     Log files only
 tabibu clean all [--yes]      All junk + rebuildable dev artifacts across home
-tabibu clean dev-artifacts [PATH] [--global] [--yes]   Trash rebuildable build dirs
+tabibu clean dev-artifacts [PATH] [--global] [--min-size N] [--yes]   Trash rebuildable build dirs
 tabibu brew status           Homebrew readout: version, packages, reclaimable cache, orphans
 tabibu brew clean [--yes]    Clear old versions + stale cache (runs `brew cleanup`)
 tabibu brew autoremove [--yes]   Remove orphaned dependencies (runs `brew autoremove`)
@@ -232,6 +233,26 @@ So a hand-authored folder named `build` or `dist` is never flagged. A `venv`
 must actually contain `pyvenv.cfg` to count. Recognized dirs are counted as a
 unit (not descended into). Each result carries a `rebuild:` hint (e.g. `cargo
 build`, `npm install`).
+
+**Filtering & selection.** Pass `--min-size N` (bytes) to hide small artifacts
+and focus on the big wins — e.g. `tabibu scan dev-artifacts --global --min-size
+104857600` (≥ 100 MB). In the desktop app's **Build artifacts** view the same
+scan is presented as a review list: a size-threshold dropdown (All / ≥1 MB /
+≥10 MB / ≥100 MB / ≥1 GB), a per-row checkbox with **Select all / Deselect
+all**, a **Reveal** button to open any folder in Finder and inspect it *before*
+deleting, and a running "N selected" total — then **Move to Trash** (reversible).
+The CLI is the same but non-interactive: it prints the full list first and only
+acts on `--yes` (so you review, then commit).
+
+## Free memory (`free-memory`)
+
+`tabibu free-memory` runs macOS's own `/usr/sbin/purge` (needs admin — `sudo` if
+not already root) to flush disk caches and return inactive/purgeable pages to
+the free pool, then reports the measured before/after delta. It's **harmless** —
+no data is lost (caches re-read from disk) — but honest: it isn't a magic RAM
+fix (macOS already reclaims these pages under pressure), so quitting heavy apps
+is still the real remedy. The desktop app exposes the same thing as a **Free up
+memory** button in **Memory & CPU** (one admin prompt).
 
 A whole-home scan (`--global`, or the app's Build-artifacts view) **excludes
 tool/OS-managed trees** so it never offers to trash something an app depends on:

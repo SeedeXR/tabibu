@@ -69,13 +69,16 @@ The app (sidebar → view) covers:
   Homebrew files directly).
 - **Build artifacts** — scan your home for rebuildable dev directories (Rust
   `target`, `node_modules`, `dist`/`build`, `__pycache__`/`.venv`, `.gradle`,
-  `Pods`, `DerivedData`, …), review, and move what you don't need to the Trash.
-- **Disk** (treemap), **Memory & CPU** (force-quit, Rosetta flagging),
-  **Battery**, **Security** (adware/rogue-profile heuristics + quarantine).
+  `Pods`, `DerivedData`, …) with a size-threshold filter, per-item select /
+  select-all, and Reveal-in-Finder to inspect before you move any to the Trash.
+- **Disk** (treemap), **Memory & CPU** (force-quit, Rosetta flagging, and a
+  **Free up memory** button that runs macOS `purge`), **Battery**, **Security**
+  (adware/rogue-profile heuristics + quarantine).
 
 There is also a terminal companion, **`tabibu`** (the `tabibu-cli` crate),
 driving the same core — `tabibu doctor`, `status`, `trash`, `slim`, `privacy`,
-`space`, `scan` (incl. cross-stack **dev-artifacts**), `flush-dns`, `clean`
+`space`, `scan` (incl. cross-stack **dev-artifacts** with `--min-size`),
+`flush-dns`, `free-memory` (macOS `purge`), `clean`
 (report-first, `--yes` moves to Trash), `brew` (status + `cleanup`/`autoremove`),
 `docker` (status + prune of build cache/unused images) — package/build cleanup
 delegated to the tool itself — `uninstall <app>` (app + its leftovers → Trash),

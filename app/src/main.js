@@ -939,6 +939,11 @@ function renderMemory() {
       kv("Memory used", `${fmtRam(s.used_memory_bytes)} / ${fmtRam(s.total_memory_bytes)}`),
       kv("Swap used", fmtRam(s.used_swap_bytes)),
       kv("Thermal", monState.thermal ? monState.thermal.pressure + (monState.thermal.speed_limit != null ? ` (CPU ${monState.thermal.speed_limit}%)` : "") : "—"))));
+  wrap.append(h("div", { class: "row", style: "padding:0 24px 6px;align-items:center;gap:10px" },
+    h("button", { disabled: monState.freeingMem ? "" : null, onClick: doFreeMemory },
+      monState.freeingMem ? "Freeing…" : "Free up memory"),
+    h("div", { class: "dim", style: "font-size:11px" },
+      "Returns inactive/cached memory to the free pool (macOS purge, one admin prompt). Harmless — no data lost. Not a substitute for quitting heavy apps.")));
   if (memFrac > 0.9) {
     const heavy = [...s.top_processes].sort((a, b) => Number(b.memory_bytes) - Number(a.memory_bytes))[0];
     wrap.append(h("div", { class: "notice" }, icon("circle-alert"),
@@ -965,6 +970,19 @@ function renderMemory() {
     wrap.append(row);
   }
   setView(wrap);
+}
+async function doFreeMemory() {
+  monState.freeingMem = true; renderMemory();
+  try {
+    const r = await invoke("free_memory");
+    const freed = Number(r.freed_bytes);
+    uiToast(freed > 0
+      ? `Freed ${fmtRam(freed)} — memory used ${fmtRam(r.before_used_bytes)} → ${fmtRam(r.after_used_bytes)}.`
+      : "Nothing purgeable right now — macOS already had memory optimized.");
+  } catch (e) { uiToast(`Couldn't free memory: ${e}`, { danger: true }); }
+  monState.freeingMem = false;
+  try { monState.sample = await invoke("monitor_sample", { topN: 12, byCpu: monState.byCpu }); } catch { /* keep last */ }
+  renderMemory();
 }
 async function quitProcess(p) {
   if (!(await uiConfirm(`Quit "${p.name}" (pid ${p.pid})?\n\nThis asks the process to quit. Save your work first — Tabibu can't recover unsaved changes.`, { danger: true, okLabel: "Quit" }))) return;
@@ -2188,7 +2206,7 @@ function universalReport(rep) {
 // =====================================================================
 // Build artifacts (Developer) — rebuildable dev dirs, review → Trash
 // =====================================================================
-const daState = { phase: "idle", items: [], selection: new Set(), report: null, error: null };
+const daState = { phase: "idle", items: [], selection: new Set(), minSize: 0, report: null, error: null };
 
 async function devArtifactsView() {
   setTitle("Build artifacts", []);
@@ -2221,20 +2239,39 @@ function daReview() {
     return centered("package", "No rebuildable artifacts found",
       "Nothing under your home matched a known build/dependency directory.", "Scan again", () => { d.phase = "idle"; render(); });
   }
-  const selectedItems = d.items.filter((i) => d.selection.has(i.path));
-  const selBytes = selectedItems.reduce((s, i) => s + Number(i.size_bytes), 0);
+  const minSize = d.minSize || 0;
+  const visible = d.items.filter((i) => Number(i.size_bytes) >= minSize);
+  const selectedVisible = visible.filter((i) => d.selection.has(i.path));
+  const selBytes = selectedVisible.reduce((s, i) => s + Number(i.size_bytes), 0);
+  const allVisibleSelected = visible.length > 0 && selectedVisible.length === visible.length;
   const wrap = h("div", { class: "review" });
+
+  // Size filter — hide small artifacts so you can focus on the big wins.
+  const THRESHOLDS = [["All sizes", 0], ["≥ 1 MB", 1e6], ["≥ 10 MB", 1e7], ["≥ 100 MB", 1e8], ["≥ 1 GB", 1e9]];
+  const sizeSel = h("select", { style: "font-size:12px;padding:3px 6px" });
+  for (const [label, v] of THRESHOLDS) {
+    const opt = h("option", { value: String(v) }, label);
+    if (v === minSize) opt.selected = "selected";
+    sizeSel.append(opt);
+  }
+  sizeSel.addEventListener("change", () => { d.minSize = Number(sizeSel.value); render(); });
+
   wrap.append(h("div", { class: "row", style: "padding:16px 24px;align-items:center;gap:12px" },
     h("div", {},
-      h("div", { style: "font-weight:600" }, `${d.items.length} artifact dir(s) · ${fmtBytes(selBytes)} selected`),
-      h("div", { class: "dim", style: "font-size:11px" }, "All rebuildable from source. Uncheck anything you want to keep.")),
+      h("div", { style: "font-weight:600" }, `${visible.length} of ${d.items.length} artifact dir(s) · ${fmtBytes(selBytes)} selected`),
+      h("div", { class: "dim", style: "font-size:11px" }, "Rebuildable from source. Uncheck to keep; Reveal to inspect a folder before deleting.")),
     h("div", { class: "spacer", style: "flex:1" }),
-    h("button", { onClick: () => { const all = d.selection.size === d.items.length; d.selection = all ? new Set() : new Set(d.items.map((i) => i.path)); render(); } },
-      d.selection.size === d.items.length ? "Deselect all" : "Select all"),
-    h("button", { class: "danger", disabled: selectedItems.length ? null : "", onClick: doReclaimDevArtifacts },
-      `Move ${selectedItems.length} to Trash`)));
+    h("label", { class: "dim", style: "font-size:11px;display:flex;align-items:center;gap:5px" }, "Show", sizeSel),
+    h("button", { onClick: () => {
+        if (allVisibleSelected) { for (const i of visible) d.selection.delete(i.path); }
+        else { for (const i of visible) d.selection.add(i.path); }
+        render();
+      } }, allVisibleSelected ? "Deselect all" : "Select all"),
+    h("button", { class: "danger", disabled: selectedVisible.length ? null : "", onClick: doReclaimDevArtifacts },
+      `Move ${selectedVisible.length} to Trash`)));
+
   const list = h("div", { class: "list" });
-  for (const i of d.items) {
+  for (const i of visible) {
     const on = d.selection.has(i.path);
     list.append(h("div", { class: "item selectable" + (on ? "" : " off"), style: "cursor:pointer",
       onClick: () => { if (on) d.selection.delete(i.path); else d.selection.add(i.path); render(); } },
@@ -2242,7 +2279,12 @@ function daReview() {
       h("div", { class: "path", style: "flex:1;min-width:0" },
         h("div", { class: "p", title: i.path }, displayPath(i.path)),
         h("div", { class: "reason" }, i.reason)),
-      h("span", { class: "isize" }, fmtBytes(i.size_bytes))));
+      h("span", { class: "isize" }, fmtBytes(i.size_bytes)),
+      revealBtn(i.path)));
+  }
+  if (!visible.length) {
+    list.append(h("div", { class: "dim", style: "padding:24px;text-align:center" },
+      "No artifacts at this size threshold — lower the filter to see smaller ones."));
   }
   wrap.append(list);
   return wrap;
@@ -2250,7 +2292,10 @@ function daReview() {
 
 async function doReclaimDevArtifacts() {
   const d = daState;
-  const items = d.items.filter((i) => d.selection.has(i.path));
+  const minSize = d.minSize || 0;
+  // Only trash what's both selected AND currently visible under the size filter,
+  // so a hidden-by-filter selection can never be removed by surprise.
+  const items = d.items.filter((i) => d.selection.has(i.path) && Number(i.size_bytes) >= minSize);
   if (!items.length) return uiToast("Select at least one folder to remove.");
   const total = items.reduce((s, i) => s + Number(i.size_bytes), 0);
   if (!(await uiConfirm(

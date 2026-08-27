@@ -54,6 +54,9 @@ Find things worth reviewing — report only, never removes anything
 tabibu\-flush\-dns(1)
 Flush the macOS DNS resolver cache (maintenance; needs admin — uses sudo if not already root). Fixes stale DNS after network changes
 .TP
+tabibu\-free\-memory(1)
+Free inactive/cached memory back to the system (runs macOS `purge`; needs admin — uses sudo if not already root). Harmless: it flushes disk caches and returns purgeable pages to the free pool, no data is lost
+.TP
 tabibu\-clean(1)
 Reclaim space by moving items to the Trash (reversible). Prints a report first; pass `\-\-yes` to actually move them
 .TP

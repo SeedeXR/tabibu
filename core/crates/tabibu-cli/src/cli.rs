@@ -76,6 +76,10 @@ pub enum Command {
     /// Flush the macOS DNS resolver cache (maintenance; needs admin — uses sudo
     /// if not already root). Fixes stale DNS after network changes.
     FlushDns,
+    /// Free inactive/cached memory back to the system (runs macOS `purge`; needs
+    /// admin — uses sudo if not already root). Harmless: it flushes disk caches
+    /// and returns purgeable pages to the free pool, no data is lost.
+    FreeMemory,
     /// Reclaim space by moving items to the Trash (reversible). Prints a report
     /// first; pass `--yes` to actually move them.
     Clean {
@@ -201,6 +205,9 @@ pub enum CleanCmd {
         /// Clean across your whole home instead of one folder.
         #[arg(long)]
         global: bool,
+        /// Only include artifacts at least this many bytes (skip small ones).
+        #[arg(long, default_value_t = 0)]
+        min_size: u64,
         /// Move them to the Trash (otherwise just report).
         #[arg(long)]
         yes: bool,
@@ -231,6 +238,9 @@ pub enum ScanCmd {
         /// Scan your whole home instead of one folder.
         #[arg(long)]
         global: bool,
+        /// Only show artifacts at least this many bytes (filter out small ones).
+        #[arg(long, default_value_t = 0)]
+        min_size: u64,
     },
 }
 

@@ -10,8 +10,8 @@
 //!     (`tabibu doctor`, `tabibu status`) — Tabibu means "doctor" in Swahili.
 //!
 //! Roadmap (grounded on existing core crates; see docs/tabibu-cli.md + todo.md):
-//!   implemented — status, doctor, trash, slim, privacy, space, flush-dns,
-//!                 scan (large/dupes/junk/malware/dev-artifacts),
+//!   implemented — status, doctor, trash, slim, privacy, space, flush-dns, free-memory,
+//!                 scan (large/dupes/junk/malware/dev-artifacts [--min-size]),
 //!                 clean (junk/caches/logs/all/dev-artifacts; report-first → Trash),
 //!                 brew (status/clean/autoremove) + docker (status/prune),
 //!                 report-first → delegated to brew/docker;
@@ -77,6 +77,7 @@ fn main() {
         Command::Space { path, depth } => cmd_space(cli.json, path, cfg.depth(depth)),
         Command::Scan { what } => cmd_scan(cli.json, what, &cfg),
         Command::FlushDns => cmd_flush_dns(cli.json),
+        Command::FreeMemory => cmd_free_memory(cli.json),
         Command::Clean { what } => cmd_clean(cli.json, what),
         Command::Brew { cmd } => cmd_brew(cli.json, cmd),
         Command::Docker { cmd } => cmd_docker(cli.json, cmd),
@@ -496,12 +497,17 @@ fn cmd_scan(json: bool, what: ScanCmd, cfg: &config::Config) -> i32 {
             }
             0
         }
-        ScanCmd::DevArtifacts { path, global } => {
+        ScanCmd::DevArtifacts {
+            path,
+            global,
+            min_size,
+        } => {
             let roots = devscan_roots(path.as_deref(), global);
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_default();
-            let arts = tabibu_devscan::scan(&roots, &home, &CancelToken::new());
+            let mut arts = tabibu_devscan::scan(&roots, &home, &CancelToken::new());
+            arts.retain(|a| a.size_bytes >= min_size);
             if json {
                 print_json(&serde_json::to_value(&arts).unwrap_or(serde_json::Value::Null));
                 return 0;
@@ -606,12 +612,18 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
             };
             clean_items(json, &ctx, items, yes)
         }
-        CleanCmd::DevArtifacts { path, global, yes } => {
+        CleanCmd::DevArtifacts {
+            path,
+            global,
+            min_size,
+            yes,
+        } => {
             let roots = devscan_roots(path.as_deref(), global);
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_default();
-            let arts = tabibu_devscan::scan(&roots, &home, &CancelToken::new());
+            let mut arts = tabibu_devscan::scan(&roots, &home, &CancelToken::new());
+            arts.retain(|a| a.size_bytes >= min_size);
             if !yes {
                 if json {
                     print_json(&serde_json::to_value(&arts).unwrap_or(serde_json::Value::Null));
@@ -836,6 +848,68 @@ fn cmd_flush_dns(json: bool) -> i32 {
         eprintln!("flush-dns: failed — run `sudo tabibu flush-dns`, or grant the admin prompt.");
     }
     i32::from(!ok)
+}
+
+/// Current used/total system memory, from a fresh one-shot sample (memory is a
+/// snapshot, so a single refresh is accurate — unlike CPU%, which needs a delta).
+fn memory_used_total() -> (u64, u64) {
+    let mut sampler = Sampler::new();
+    let s = sampler.sample(0, TopBy::Cpu);
+    (s.used_memory_bytes, s.total_memory_bytes)
+}
+
+/// `free-memory` — run macOS `purge` to return inactive/cached memory to the
+/// free pool. Harmless (flushes disk caches; no data loss). Needs root, so uses
+/// `sudo` when not already root. Reports the measured before/after delta.
+fn cmd_free_memory(json: bool) -> i32 {
+    let (before, total) = memory_used_total();
+    let is_root = std::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .is_some_and(|s| s.trim() == "0");
+    let status = if is_root {
+        std::process::Command::new("/usr/sbin/purge").status()
+    } else {
+        std::process::Command::new("/usr/bin/sudo")
+            .arg("/usr/sbin/purge")
+            .status()
+    };
+    let ok = status.is_ok_and(|s| s.success());
+    if !ok {
+        if json {
+            print_json(&serde_json::json!({ "freed": false }));
+        } else {
+            eprintln!(
+                "free-memory: failed — run `sudo tabibu free-memory`, or grant the admin prompt."
+            );
+        }
+        return 1;
+    }
+    let (after, _) = memory_used_total();
+    let freed = before.saturating_sub(after);
+    if json {
+        print_json(&serde_json::json!({
+            "freed": true,
+            "freed_bytes": freed,
+            "before_used_bytes": before,
+            "after_used_bytes": after,
+            "total_bytes": total,
+        }));
+    } else {
+        println!(
+            "Freed {} — memory used {} → {} of {}.",
+            human_bytes(freed),
+            human_bytes(before),
+            human_bytes(after),
+            human_bytes(total)
+        );
+        if freed == 0 {
+            println!("(Nothing purgeable right now — macOS already had it optimized.)");
+        }
+    }
+    0
 }
 
 /// `brew status|clean|autoremove`. Status is read-only. Clean/autoremove report
@@ -1503,7 +1577,20 @@ mod tests {
             Command::Scan {
                 what: ScanCmd::DevArtifacts {
                     global: true,
-                    path: None
+                    path: None,
+                    min_size: 0,
+                }
+            }
+        ));
+        // --min-size is parsed for dev-artifacts.
+        let c = Cli::try_parse_from(["tabibu", "scan", "dev-artifacts", "--min-size", "1048576"])
+            .unwrap();
+        assert!(matches!(
+            c.command,
+            Command::Scan {
+                what: ScanCmd::DevArtifacts {
+                    min_size: 1_048_576,
+                    ..
                 }
             }
         ));

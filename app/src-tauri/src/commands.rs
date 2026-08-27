@@ -500,6 +500,38 @@ pub fn flush_dns() -> Result<(), String> {
     run_admin_shell("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder")
 }
 
+#[derive(Serialize)]
+pub struct FreeMemoryResult {
+    pub freed_bytes: u64,
+    pub before_used_bytes: u64,
+    pub after_used_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Free inactive/cached memory via macOS `purge` (one admin prompt). Harmless:
+/// it flushes disk caches and returns purgeable pages to the free pool — no data
+/// is lost (caches re-read from disk). Reports the measured before/after delta.
+#[tauri::command(async)]
+pub fn free_memory() -> Result<FreeMemoryResult, String> {
+    let (before, total) = mem_used_total();
+    run_admin_shell("/usr/sbin/purge")?;
+    let (after, _) = mem_used_total();
+    Ok(FreeMemoryResult {
+        freed_bytes: before.saturating_sub(after),
+        before_used_bytes: before,
+        after_used_bytes: after,
+        total_bytes: total,
+    })
+}
+
+/// One-shot used/total system memory (a fresh sampler — memory is a snapshot, so
+/// no CPU-style delta is needed, and this avoids disturbing the shared sampler).
+fn mem_used_total() -> (u64, u64) {
+    let mut s = Sampler::new();
+    let snap = s.sample(0, TopBy::Cpu);
+    (snap.used_memory_bytes, snap.total_memory_bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Proactive alerts (Trash-large / memory-pressure) — enable + snooze prefs.
 // ---------------------------------------------------------------------------

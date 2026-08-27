@@ -127,6 +127,7 @@ fn main() {
             commands::trash_size,
             commands::empty_trash,
             commands::flush_dns,
+            commands::free_memory,
             commands::get_alert_prefs,
             commands::set_alert_enabled,
             commands::snooze_alert,
