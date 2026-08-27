@@ -134,14 +134,40 @@ then add it to the GitHub repo as the secret **`SALAMA_COOLIFY_WEBHOOK`** (and
 **`SALAMA_COOLIFY_TOKEN`** if your Coolify webhook needs a bearer token). Every
 push to `main` that touches `salama-web/` will then redeploy.
 
+## Troubleshooting — dashboard / provisioning shows **502**
+
+A `502` (or `503`/`504`) means Coolify's proxy reached the route but got nothing
+back from the container — a **deployment** problem, not your password (a wrong
+password is `401`). Both the web dashboard and the app's Provision will `502`
+until it's fixed. Work through these on the server / in Coolify:
+
+1. **Is the container running & healthy?**
+   `docker ps | grep salama-vpn` and
+   `docker inspect --format '{{.State.Status}} / {{.State.Health.Status}}' salama-vpn`.
+   If it's `restarting` or `unhealthy`, read **`docker logs salama-vpn`** — a
+   crash-loop (e.g. a malformed `PASSWORD_HASH`, or a required env like `WG_HOST`
+   missing) is the usual cause. Fix the env and redeploy.
+2. **Does the domain route to the right port?** Coolify must send the service's
+   domain to container port **`51821`** (the web UI). In Coolify → the resource →
+   the `salama-vpn` service → set its domain and confirm the port is `51821`. A
+   default/guessed port (80, 3000, …) with nothing listening there → `502`.
+3. **Does the web UI answer inside the container?**
+   `docker exec salama-vpn wget -qO- http://127.0.0.1:51821/ | head -c1` should
+   print without error. If it does but the public URL still `502`s, it's the
+   proxy/port mapping (step 2), not the app.
+
+The healthcheck now tracks **only the web UI** (not the WireGuard tunnel), so a
+tunnel that can't come up on your host no longer marks the container unhealthy
+and 502s the dashboard — you can always reach the panel to diagnose.
+
 ## Operate
 
 - **Logs:** Coolify → the resource → Logs (or `docker logs salama-vpn`).
-- **Health:** the container's healthcheck goes `healthy` only when **both** the
-  WireGuard tunnel (`wg show`) **and** the admin web UI/API (HTTP on `51821`) are
-  serving — so Coolify's deploy status reflects the whole app, not just the
-  tunnel. A crashed web UI shows unhealthy and Coolify's restart policy recovers
-  it. Check with `docker inspect --format '{{.State.Health.Status}}' salama-vpn`.
+- **Health:** the healthcheck goes `healthy` when the admin web UI answers on
+  `51821` (what Coolify proxies). It deliberately does **not** require the
+  WireGuard tunnel — a tunnel problem must never take the dashboard offline.
+  Check with `docker inspect --format '{{.State.Health.Status}}' salama-vpn`;
+  check the tunnel separately with `docker exec salama-vpn wg show`.
 - **Update:** re-pull `ghcr.io/wg-easy/wg-easy:14` and redeploy (pinned tag — no surprise upgrades).
 - **Reputation:** datacenter IPs often trip CAPTCHAs / streaming blocks — that's
   the IP range, not this config.

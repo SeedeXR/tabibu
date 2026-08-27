@@ -1348,15 +1348,21 @@ fn vpn_provision_inner(
             if why.is_empty() { String::new() } else { format!(" ({why})") }
         ));
     }
-    let code = String::from_utf8_lossy(&login.stdout);
-    match code.trim() {
+    let code_raw = String::from_utf8_lossy(&login.stdout);
+    let code = code_raw.trim();
+    match code {
         "200" | "204" => {} // logged in
         "401" | "403" => {
             return Err("Login rejected by the server (401). Either the admin password is wrong, or the server's PASSWORD_HASH is corrupted — regenerate it with ./salama-web/gen-password.sh and redeploy (see docs/account-system.md). Enter the PLAIN password you chose, not the hash.".into());
         }
-        other => {
+        "502" | "503" | "504" => {
             return Err(format!(
-                "Unexpected response (HTTP {other}) from {base}/api/session — is this your salama-web (wg-easy) server URL?"
+                "The server's proxy answered HTTP {code} — it's reachable, but the wg-easy app behind it isn't responding. This is a DEPLOYMENT problem, not your password. On the server / in Coolify: check the container is running and healthy, that its domain routes to container port 51821, and read its logs (`docker logs salama-vpn`). The web dashboard will 502 too until this is fixed. See salama-web/README.md → 'Dashboard shows 502'."
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "Unexpected response (HTTP {code}) from {base}/api/session — is this your salama-web (wg-easy) server URL?"
             ));
         }
     }
