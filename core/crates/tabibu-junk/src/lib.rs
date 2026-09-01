@@ -300,6 +300,20 @@ pub fn trash_total_size(dirs: &[PathBuf], cancel: &CancelToken) -> u64 {
         .sum()
 }
 
+/// Whether the trash dirs can actually be READ. macOS gates `~/.Trash` behind
+/// Full Disk Access, so without it `read_dir` fails with `PermissionDenied` and
+/// the Trash silently *looks* empty (size 0, "nothing to empty"). Returns
+/// `false` when a dir that exists cannot be read — the signal to tell the user
+/// to grant Full Disk Access. A missing dir is fine (no trash there).
+#[must_use]
+pub fn trash_accessible(dirs: &[PathBuf]) -> bool {
+    !dirs.iter().any(|d| {
+        fs::read_dir(d)
+            .err()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    })
+}
+
 /// PERMANENTLY delete every top-level entry in each trash directory (the OS
 /// "Empty Trash"). Sizes each entry first so the caller can report bytes freed.
 /// Best-effort and irreversible: a failed delete is recorded and the rest
@@ -717,7 +731,29 @@ impl Scanner for LogScanner {
 
 #[cfg(test)]
 mod unit_tests {
-    use super::looks_like_bundle_id;
+    use super::{looks_like_bundle_id, trash_accessible};
+
+    #[test]
+    #[cfg(unix)]
+    fn trash_accessible_flags_permission_denied_not_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let readable = base.path().join("readable");
+        std::fs::create_dir(&readable).unwrap();
+        let missing = base.path().join("missing");
+        // Readable dir + a missing dir → accessible (missing is not a permission
+        // problem, just nothing there).
+        assert!(trash_accessible(&[readable.clone(), missing]));
+
+        // A dir with no read/exec permission → NOT accessible (the ~/.Trash-
+        // without-Full-Disk-Access case: reads fail with PermissionDenied).
+        let locked = base.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(!trash_accessible(&[readable, locked.clone()]));
+        // Restore perms so the tempdir can be cleaned up.
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700));
+    }
 
     #[test]
     fn bundle_id_heuristic() {

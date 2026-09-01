@@ -290,6 +290,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         let mut mem_alert_armed = true;
         let mut therm_alert_armed = true;
         let mut trash_alert_armed = true;
+        let mut process_ram_alert_armed = true;
         let mut tick: u32 = 0;
         loop {
             if PAUSED.load(Ordering::Relaxed) {
@@ -301,7 +302,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 }
             } else {
                 was_paused = false;
-                let snap = sampler.sample(1, tabibu_monitor::TopBy::Cpu);
+                // Order by memory: the tooltip only needs cpu_percent/mem_pct
+                // (system-wide, order-independent), and this hands the per-app-RAM
+                // check below the top-memory process WITHOUT a second sweep.
+                let snap = sampler.sample(1, tabibu_monitor::TopBy::Memory);
                 let mem_pct = if snap.total_memory_bytes > 0 {
                     (snap.used_memory_bytes as f64 / snap.total_memory_bytes as f64 * 100.0).round()
                         as u32
@@ -388,6 +392,33 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                         );
                     } else if t.pressure == "Nominal" {
                         therm_alert_armed = true;
+                    }
+                }
+
+                // A single app hogging RAM (≥ 2 GB) → notify once; re-arm when it
+                // drops below 80% of the line. Checked every 60th tick (≈5 min),
+                // reading the top-memory process from THIS tick's sample.
+                if tick % 60 == 0 {
+                    if let Some(top) = snap.top_processes.first() {
+                        if top.memory_bytes >= crate::alerts::PROCESS_RAM_ALERT_BYTES
+                            && process_ram_alert_armed
+                            && crate::alerts::process_ram_active()
+                        {
+                            process_ram_alert_armed = false;
+                            notify(
+                                &handle,
+                                "An app is using a lot of memory",
+                                &format!(
+                                    "{} is using {:.1} GB of RAM. Open Tabibu \
+                                     from the menu bar → Memory to review or quit it.",
+                                    top.name,
+                                    top.memory_bytes as f64 / 1_000_000_000.0
+                                ),
+                            );
+                        } else if top.memory_bytes < crate::alerts::PROCESS_RAM_ALERT_BYTES * 8 / 10
+                        {
+                            process_ram_alert_armed = true;
+                        }
                     }
                 }
                 tick = tick.wrapping_add(1);

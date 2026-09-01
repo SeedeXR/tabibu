@@ -439,6 +439,37 @@ fn resign_adhoc(app: &Path) -> Result<(), String> {
     }
 }
 
+/// Display name for a `.app` bundle (`Foo.app` → `Foo`).
+fn app_display_name(app: &Path) -> String {
+    app.file_name()
+        .map(|n| n.to_string_lossy().trim_end_matches(".app").to_owned())
+        .unwrap_or_default()
+}
+
+/// Whether we can write where thinning actually writes — `Contents/MacOS` (the
+/// executables it rewrites), falling back to the bundle root. Root-writable but
+/// `Contents`-root-owned bundles (a real case for some `/Applications` apps)
+/// correctly probe as NOT writable. Probes by creating+removing a dotfile;
+/// scoped to `Contents/MacOS` so it never touches the bundle root's signature.
+fn bundle_writable(app: &Path) -> bool {
+    let dir = {
+        let macos = app.join("Contents/MacOS");
+        if macos.is_dir() {
+            macos
+        } else {
+            app.to_path_buf()
+        }
+    };
+    let probe = dir.join(".tabibu-write-probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Thin every fat Mach-O in `app` down to this Mac's native slice, then ad-hoc
 /// re-sign the bundle. Irreversible (the other architecture is discarded);
 /// callers must confirm, and warn hard for signed apps (see [`strip_safety`]).
@@ -448,6 +479,24 @@ fn resign_adhoc(app: &Path) -> Result<(), String> {
 /// actually happened even on a partial failure.
 #[must_use]
 pub fn strip_app(app: &Path) -> StripResult {
+    // Fail fast with a clear, actionable reason if the bundle isn't writable —
+    // otherwise every file just errors "Permission denied" one by one and the
+    // user is told "nothing thinned" with no idea why (a common case for apps in
+    // /Applications owned by root or another admin).
+    if !bundle_writable(app) {
+        return StripResult {
+            app: app_display_name(app),
+            reclaimed_bytes: 0,
+            files_thinned: 0,
+            resigned: false,
+            errors: vec![format!(
+                "\u{201c}{}\u{201d} isn't writable, so it can't be thinned. Run Tabibu \
+                 from an admin account, or copy the app to a folder you own (e.g. \
+                 ~/Applications) and thin the copy.",
+                app_display_name(app)
+            )],
+        };
+    }
     let native = native_cpu_type();
     let mut files: Vec<PathBuf> = Vec::new();
     walk_files(app, &CancelToken::new(), &mut |p| files.push(p.to_owned()));
@@ -480,10 +529,7 @@ pub fn strip_app(app: &Path) -> StripResult {
     };
 
     StripResult {
-        app: app
-            .file_name()
-            .map(|n| n.to_string_lossy().trim_end_matches(".app").to_owned())
-            .unwrap_or_default(),
+        app: app_display_name(app),
         reclaimed_bytes: reclaimed,
         files_thinned: thinned,
         resigned,
@@ -495,6 +541,27 @@ pub fn strip_app(app: &Path) -> StripResult {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    #[cfg(unix)]
+    fn strip_refuses_non_writable_bundle_with_a_clear_message() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let app = base.path().join("Foo.app");
+        std::fs::create_dir(&app).unwrap();
+        // Read+execute but NOT writable — the /Applications-owned-by-root case.
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let r = strip_app(&app);
+        assert_eq!(r.reclaimed_bytes, 0);
+        assert_eq!(r.files_thinned, 0);
+        assert!(
+            r.errors.iter().any(|e| e.contains("isn't writable")),
+            "expected a clear not-writable error, got {:?}",
+            r.errors
+        );
+        let _ = std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755));
+    }
 
     /// Write a minimal 32-bit fat binary with the given `(cpu_type, size)`
     /// slices. Slice payloads are zero-filled so offset+size stay within file.

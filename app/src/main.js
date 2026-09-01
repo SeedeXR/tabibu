@@ -658,6 +658,12 @@ async function doEmptyTrash() {
   let res;
   try { res = await invoke("empty_trash"); }
   catch (e) { return uiToast(`Empty Trash failed: ${e}`, { danger: true }); }
+  // A "freed 0" with no access is really a Full Disk Access problem, not an
+  // empty Trash — macOS gates ~/.Trash behind it.
+  if (res.full_disk_access === false && res.deleted_items === 0) {
+    uiToast("Can't read the Trash — grant Tabibu Full Disk Access in System Settings → Privacy & Security, then Relaunch.", { danger: true });
+    return render();
+  }
   const failed = res.errors && res.errors.length;
   uiToast(failed
     ? `Freed ${fmtBytes(res.freed_bytes)} — ${res.errors.length} item(s) couldn't be deleted`
@@ -676,7 +682,8 @@ function fdaNotice() {
   return h("div", { class: "notice" }, icon("lock-keyhole"),
     h("div", { class: "body" },
       h("h3", {}, "Grant Full Disk Access once for complete results"),
-      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security), and there's no per-folder shortcut. Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access, then Relaunch — macOS only applies the change when the app restarts."),
+      h("p", {}, "macOS gates other apps' containers, Safari/Mail data, the Trash, and many caches behind Full Disk Access. This one toggle is the universal grant — Tabibu can't enable it for you (Apple security). Turn Tabibu on in System Settings → Privacy & Security → Full Disk Access, then Relaunch (macOS applies it only on restart)."),
+      h("p", { class: "dim", style: "font-size:11.5px;margin-top:6px" }, "Just updated Tabibu? macOS may treat the new build as a different app, so an existing grant can stop counting. If it still says limited after a relaunch, remove the Tabibu entry in that list with the “–” button and add Tabibu again."),
       h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
         h("button", { class: "primary", onClick: openFdaSettings }, "Open Privacy Settings"),
         h("button", { onClick: relaunchApp }, "Relaunch Tabibu"),
@@ -2096,6 +2103,7 @@ async function settingsView() {
       loginSw),
     alertRow("trash", "Trash-is-large alert", "Notifies you when the Trash grows past 2 GB, so you can empty it."),
     alertRow("memory", "Memory-pressure alert", "Notifies you when RAM is nearly full, so you can quit a heavy app."),
+    alertRow("process_ram", "App-using-lots-of-RAM alert", "Notifies you when a single app is using more than 2 GB of RAM, so you can review or quit it."),
     h("div", { class: "setting" },
       h("div", { class: "body" },
         h("h3", {}, "Notifications"),

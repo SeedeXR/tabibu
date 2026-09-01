@@ -35,9 +35,26 @@ echo "▶ building Tabibu v$VER — $LABEL"
 npx tauri build ${BUILD[@]+"${BUILD[@]}"}
 
 bundle="$ROOT/app/src-tauri/target/$SUB"
+
+# Stable local signing: if you've created the self-signed identity (once, via
+# scripts/dev-sign.sh), re-sign the built app with it so macOS keeps Full Disk
+# Access + Notification grants across rebuilds. No Apple account needed; this
+# only affects this Mac. Otherwise the app stays ad-hoc signed.
+APP="$(find "$bundle/macos" -maxdepth 1 -name '*.app' 2>/dev/null | head -1)"
+if [ -n "$APP" ] && security find-identity -v -p codesigning 2>/dev/null | grep -qF "Tabibu Local Signing"; then
+  "$ROOT/scripts/dev-sign.sh" "$APP" || true
+  SIGNED=1
+fi
+
 echo
 echo "✓ Tabibu v$VER built — $LABEL"
-[ -d "$bundle/macos" ] && find "$bundle/macos" -maxdepth 1 -name "*.app" -exec echo "  app: {}" \;
-[ -d "$bundle/dmg" ]   && find "$bundle/dmg"   -maxdepth 1 -name "*.dmg" -exec echo "  dmg: {}" \;
+[ -n "$APP" ] && echo "  app: $APP"
+[ -d "$bundle/dmg" ] && find "$bundle/dmg" -maxdepth 1 -name "*.dmg" -exec echo "  dmg: {}" \;
 echo
-echo "Unsigned (no Developer ID yet): open via right-click → Open on other Macs."
+if [ "${SIGNED:-0}" = 1 ]; then
+  echo "Signed with your local identity — a granted Full Disk Access survives rebuilds."
+else
+  echo "Ad-hoc signed (no Developer ID). Tip: run ./scripts/dev-sign.sh once, then rebuild —"
+  echo "Full Disk Access & notifications then survive rebuilds (no Apple account needed)."
+fi
+echo "On other Macs it's still unsigned: open via right-click → Open."

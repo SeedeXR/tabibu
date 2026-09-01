@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 pub const FOREVER: u64 = u64::MAX;
 /// The Trash-size threshold the alert fires above.
 pub const TRASH_ALERT_BYTES: u64 = 2 * 1000 * 1000 * 1000; // 2 GB (decimal, matches Finder)
+/// A single process using at least this much RAM fires the "app using a lot of
+/// memory" alert.
+pub const PROCESS_RAM_ALERT_BYTES: u64 = 2 * 1000 * 1000 * 1000; // 2 GB
 
 /// One alert's user preference.
 #[derive(Clone, Serialize, Deserialize)]
@@ -44,6 +47,9 @@ pub struct AlertPrefs {
     pub trash: AlertSetting,
     #[serde(default)]
     pub memory: AlertSetting,
+    /// "A single app is using a lot of RAM" (≥ [`PROCESS_RAM_ALERT_BYTES`]).
+    #[serde(default)]
+    pub process_ram: AlertSetting,
 }
 
 /// Whether an alert may fire now: enabled AND not currently snoozed.
@@ -98,6 +104,10 @@ pub fn trash_active() -> bool {
 #[must_use]
 pub fn memory_active() -> bool {
     is_active(&lock().memory, now_secs())
+}
+#[must_use]
+pub fn process_ram_active() -> bool {
+    is_active(&lock().process_ram, now_secs())
 }
 
 /// The JSON file backing the prefs.
@@ -205,6 +215,18 @@ mod tests {
         let p = read_prefs(dir.path());
         assert!(p.trash.enabled && p.memory.enabled);
         assert!(p.trash.snooze_until.is_none() && p.memory.snooze_until.is_none());
+    }
+
+    #[test]
+    fn all_alert_kinds_default_on_and_active() {
+        // Regression: every alert — including the new per-app-RAM one — defaults
+        // enabled and is allowed to fire, and the 2 GB thresholds are set.
+        let p = AlertPrefs::default();
+        for s in [&p.trash, &p.memory, &p.process_ram] {
+            assert!(s.enabled && is_active(s, now_secs()));
+        }
+        assert_eq!(TRASH_ALERT_BYTES, 2_000_000_000);
+        assert_eq!(PROCESS_RAM_ALERT_BYTES, 2_000_000_000);
     }
 
     #[test]

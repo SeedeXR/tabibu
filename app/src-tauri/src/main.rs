@@ -36,6 +36,17 @@ fn main() {
                 alerts::load(&dir);
                 vpn::load(&dir);
             }
+            // Ask for notification permission up front — macOS silently DROPS
+            // notifications from an app that has never been authorized, which is
+            // why the Trash / memory / RAM alerts appeared to "not work". This
+            // prompts once; macOS remembers the answer.
+            {
+                use tauri_plugin_notification::{NotificationExt, PermissionState};
+                let n = app.notification();
+                if !matches!(n.permission_state(), Ok(PermissionState::Granted)) {
+                    let _ = n.request_permission();
+                }
+            }
             // A login (LaunchAgent) start passes `--from-autostart`; start
             // quietly in the menu bar then (Accessory, dashboard hidden) so we
             // don't pop a 1120x740 window on every login. A manual open has no

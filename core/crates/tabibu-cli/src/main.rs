@@ -190,14 +190,30 @@ fn cmd_status(json: bool, full: bool) -> i32 {
 
 fn cmd_trash(json: bool, cmd: TrashCmd) -> i32 {
     let dirs = trash_dirs();
+    // macOS gates ~/.Trash behind Full Disk Access, so an un-granted process
+    // sees an empty, un-emptyable Trash. Warn (once, to stderr) so the user
+    // knows WHY, instead of silently reporting 0.
+    let gated = !tabibu_junk::trash_accessible(&dirs);
+    if gated {
+        eprintln!(
+            "⚠ Can't read the Trash — macOS needs Full Disk Access. Grant it in \
+             System Settings → Privacy & Security → Full Disk Access (for your \
+             terminal), or run `sudo tabibu trash …`. Figures below may be incomplete."
+        );
+    }
     match cmd {
         TrashCmd::Status => {
             let bytes = tabibu_junk::trash_total_size(&dirs, &CancelToken::new());
             if json {
-                print_json(&serde_json::json!({ "trash_bytes": bytes }));
+                print_json(
+                    &serde_json::json!({ "trash_bytes": bytes, "full_disk_access": !gated }),
+                );
             } else {
                 println!("Trash: {}", human_bytes(bytes));
             }
+            // `status` printed a value — exit 0 even when gated (the FDA gate is
+            // reported via the stderr warning + the `full_disk_access` JSON
+            // field, so scripts checking `$?` for "command ran" aren't broken).
             0
         }
         TrashCmd::Empty { yes } => {

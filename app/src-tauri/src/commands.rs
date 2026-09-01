@@ -478,17 +478,24 @@ pub struct EmptyTrashResult {
     pub freed_bytes: u64,
     pub deleted_items: u32,
     pub errors: Vec<String>,
+    /// False when `~/.Trash` couldn't be read (needs Full Disk Access) — the UI
+    /// uses this to explain a "freed 0" that's really a permission problem, not
+    /// an empty Trash.
+    pub full_disk_access: bool,
 }
 
 /// PERMANENTLY empty the Trash (all of it, incl. per-volume trashes). Destructive
 /// and irreversible — the UI confirms first. Returns bytes/items freed.
 #[tauri::command(async)]
 pub fn empty_trash() -> EmptyTrashResult {
-    let o = tabibu_junk::empty_trash_dirs(&trash_dirs());
+    let dirs = trash_dirs();
+    let full_disk_access = tabibu_junk::trash_accessible(&dirs);
+    let o = tabibu_junk::empty_trash_dirs(&dirs);
     EmptyTrashResult {
         freed_bytes: o.freed_bytes,
         deleted_items: o.deleted_items,
         errors: o.errors,
+        full_disk_access,
     }
 }
 
@@ -564,6 +571,7 @@ pub fn set_alert_enabled(
         let s = match kind.as_str() {
             "trash" => &mut p.trash,
             "memory" => &mut p.memory,
+            "process_ram" => &mut p.process_ram,
             _ => return,
         };
         s.enabled = enabled;
@@ -586,6 +594,7 @@ pub fn snooze_alert(
     crate::alerts::update(&alerts_config_dir(&app), |p| match kind.as_str() {
         "trash" => p.trash.snooze_until = until,
         "memory" => p.memory.snooze_until = until,
+        "process_ram" => p.process_ram.snooze_until = until,
         _ => {}
     })
 }

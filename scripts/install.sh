@@ -9,6 +9,11 @@
 #   ./scripts/install.sh --native     # app for this Mac's arch only (faster)
 #   ./scripts/install.sh --debug      # quick unoptimized build of both
 #   ./scripts/install.sh --no-install # build everything, install nothing (just report paths)
+#   ./scripts/install.sh --no-sign    # skip the stable local code-signing (ad-hoc only)
+#
+# By default it also creates (once) a LOCAL self-signed code-signing identity and
+# signs the app with it, so Full Disk Access + Notification grants survive future
+# rebuilds — no Apple account, not notarization, this Mac only (see dev-sign.sh).
 #
 # Override install locations with env vars (handy for testing):
 #   APPDIR=/Applications  BINDIR=/usr/local/bin  MANDIR=/usr/local/share/man/man1
@@ -21,13 +26,15 @@ ROOT="$PWD"
 
 MODE="universal"
 INSTALL=1
+SIGN=1
 for a in "$@"; do
   case "$a" in
     --no-install)          INSTALL=0 ;;
+    --no-sign)             SIGN=0 ;;
     --debug|--native)      MODE="$a" ;;
     universal)             MODE="universal" ;;
-    -h|--help)             sed -n '2,20p' "$0"; exit 0 ;;
-    *) echo "unknown option: $a (try --native, --debug, --no-install)"; exit 1 ;;
+    -h|--help)             sed -n '2,21p' "$0"; exit 0 ;;
+    *) echo "unknown option: $a (try --native, --debug, --no-install, --no-sign)"; exit 1 ;;
   esac
 done
 
@@ -41,6 +48,15 @@ esac
 APPDIR="${APPDIR:-/Applications}"
 BINDIR="${BINDIR:-/usr/local/bin}"
 MANDIR="${MANDIR:-/usr/local/share/man/man1}"
+
+# ---- stable local signing (once) -----------------------------------------
+# Ensure the self-signed identity exists BEFORE the build, so build-app.sh signs
+# the app with it (giving a code identity that's constant across rebuilds, so a
+# Full Disk Access grant sticks). Skipped with --no-sign; failure is non-fatal
+# (falls back to ad-hoc).
+if [ "$SIGN" = 1 ]; then
+  ./scripts/dev-sign.sh || echo "  (couldn't set up local signing — continuing ad-hoc)"
+fi
 
 # ---- build ---------------------------------------------------------------
 # The desktop app (stamps VERSION, builds the bundled helpers, runs tauri build).
@@ -94,4 +110,9 @@ echo "  ✓ $MANDIR/tabibu.1"
 
 echo
 echo "Done. Try:  tabibu doctor    ·    man tabibu    ·    open -a Tabibu"
-echo "(App is unsigned — first launch: right-click → Open.)"
+echo "(First launch: right-click → Open.)"
+if [ "$SIGN" = 1 ]; then
+  echo "Signed with your local identity — grant Full Disk Access once and it survives rebuilds."
+else
+  echo "Ad-hoc build (--no-sign): Full Disk Access won't persist across rebuilds."
+fi

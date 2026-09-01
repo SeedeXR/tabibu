@@ -125,6 +125,25 @@ cargo build --release -p tabibu-cli      # binary at core/target/release/tabibu
 cp target/release/tabibu /usr/local/bin/ # optional: put it on PATH
 ```
 
+### Full Disk Access that survives rebuilds (no Apple account)
+
+An unsigned macOS app gets a *different* code identity on every rebuild, so a
+granted Full Disk Access (needed to read/empty the Trash and scan other apps'
+data) and Notification permission are silently dropped each time you update.
+
+**`./scripts/install.sh` handles this automatically** — it creates a **local
+self-signed code-signing identity** once and signs the app with it, giving a
+code identity that's *constant* across rebuilds. Not notarization, no Developer
+account, only affects this Mac. So:
+
+```bash
+./scripts/install.sh         # builds, signs with the stable local identity, installs
+```
+
+Then grant Full Disk Access once in System Settings and it keeps working across
+future rebuilds. Opt out with `./scripts/install.sh --no-sign` (ad-hoc only);
+`./scripts/dev-sign.sh --remove` deletes the identity + its keychain.
+
 ## Man page
 
 A `tabibu.1` man page is generated from the clap definition at build time (via
