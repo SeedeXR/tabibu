@@ -197,6 +197,10 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     // reclaim trash arbitrary external-drive files (the denylist has no
     // /Volumes coverage); narrowing to the trash dirs keeps the boundary tight.
     allowed_roots.extend(per_volume_trash_roots());
+    // Sandboxed-app cache dirs (~/Library/Containers/<id>/Data/Library/Caches and
+    // group containers) — the EXACT Caches subdirs `ContainerCacheScanner` emits,
+    // so reclaim permits those and nothing else under the containers.
+    allowed_roots.extend(tabibu_junk::container_cache_roots(&home));
     allowed_roots.extend(extra_roots.iter().map(PathBuf::from));
 
     ScanCtx {

@@ -370,6 +370,7 @@ fn registry_exposes_all_scanners() {
         [
             "trash",
             "user_cache",
+            "container_cache",
             "dev_cache",
             "temp",
             "log",

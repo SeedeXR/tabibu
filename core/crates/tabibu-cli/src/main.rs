@@ -820,6 +820,9 @@ fn junk_ctx() -> ScanCtx {
             uid,
         ));
     }
+    // Sandboxed-app cache dirs (the exact Caches subdirs ContainerCacheScanner
+    // emits) so reclaim permits them — nothing else under the containers.
+    roots.extend(tabibu_junk::container_cache_roots(&home));
     ScanCtx {
         home,
         allowed_roots: roots,

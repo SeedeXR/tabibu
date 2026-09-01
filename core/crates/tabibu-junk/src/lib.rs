@@ -1,8 +1,10 @@
 //! tabibu-junk — read-only scanners for reclaimable junk on macOS.
 //!
-//! Five scanners cover the classic cleanup buckets: Trash contents, per-app
-//! user caches (with a running-process guard), developer tool caches,
-//! stale temporary files, and old log files. All scanners derive their roots
+//! Six scanners cover the classic cleanup buckets: Trash contents, per-app
+//! user caches (`~/Library/Caches`, with a running-process guard), sandboxed
+//! app caches (`~/Library/Containers/*/Data/Library/Caches` + group containers),
+//! developer tool caches, stale temporary files, and old log files. All scanners
+//! derive their roots
 //! from [`ScanCtx::home`] (never from environment variables), never mutate
 //! the filesystem, skip entries they cannot read instead of failing, and
 //! honour cooperative cancellation at every directory boundary.
@@ -90,6 +92,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
     vec![
         Box::new(TrashScanner::new()),
         Box::new(UserCacheScanner),
+        Box::new(ContainerCacheScanner),
         Box::new(DevCacheScanner),
         Box::new(TempScanner::new()),
         Box::new(LogScanner),
@@ -491,6 +494,132 @@ impl Scanner for UserCacheScanner {
 }
 
 // ---------------------------------------------------------------------------
+// ContainerCacheScanner — sandboxed-app caches
+// ---------------------------------------------------------------------------
+
+/// The `Caches` directory of every sandboxed-app container and group container
+/// that exists — the sandboxed equivalent of `~/Library/Caches/<app>`, which
+/// `UserCacheScanner` alone misses (App Store apps and many others put their
+/// caches here, not in `~/Library/Caches`).
+///
+/// Returns ONLY the `Caches` subdir of each container — NEVER the container's
+/// `Data` (which holds the app's real user data). Reading inside a container is
+/// gated by Full Disk Access, so without it `is_dir` fails and the list is
+/// empty (the caches are unreadable anyway). Ctx builders add these to
+/// `allowed_roots` so `reclaim` permits exactly these cache dirs and nothing
+/// else under the containers.
+#[must_use]
+pub fn container_cache_roots(home: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // Per-app: ~/Library/Containers/<bundle-id>/Data/Library/Caches
+    if let Ok(entries) = fs::read_dir(home.join("Library/Containers")) {
+        for e in entries.flatten() {
+            let c = e.path().join("Data/Library/Caches");
+            if c.is_dir() {
+                out.push(c);
+            }
+        }
+    }
+    // Shared: ~/Library/Group Containers/<group-id>/Library/Caches
+    if let Ok(entries) = fs::read_dir(home.join("Library/Group Containers")) {
+        for e in entries.flatten() {
+            let c = e.path().join("Library/Caches");
+            if c.is_dir() {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// From a container `Caches` path, recover the container id and whether it's a
+/// group container — used for the running-process guard and the reason text.
+fn container_id_and_group(cache_path: &Path) -> Option<(String, bool)> {
+    let comps: Vec<_> = cache_path.components().collect();
+    comps.iter().enumerate().find_map(|(i, c)| {
+        let seg = c.as_os_str().to_string_lossy();
+        let is_group = seg == "Group Containers";
+        (is_group || seg == "Containers").then(|| {
+            let id = comps.get(i + 1)?.as_os_str().to_string_lossy().into_owned();
+            Some((id, is_group))
+        })?
+    })
+}
+
+/// Sweeps the `Caches` dir of each sandboxed / group container. A per-app cache
+/// whose app is currently running is skipped (running-process guard, as for
+/// `~/Library/Caches`). Group-container caches are `Review` (ownership is shared,
+/// not a single app).
+pub struct ContainerCacheScanner;
+
+impl Scanner for ContainerCacheScanner {
+    fn id(&self) -> &'static str {
+        "container_cache"
+    }
+
+    fn scan(
+        &self,
+        ctx: &ScanCtx,
+        cancel: &CancelToken,
+        sink: &mut dyn FnMut(CleanupItem),
+    ) -> Result<(), ScanError> {
+        if cancel.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        // Phase 1: candidates + tier/reason (running guard), no sizing yet.
+        let mut candidates: Vec<CacheCandidate> = Vec::new();
+        for path in container_cache_roots(&ctx.home) {
+            if cancel.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            let Some((id, is_group)) = container_id_and_group(&path) else {
+                continue;
+            };
+            let (tier, reason) = if is_group {
+                (
+                    SafetyTier::Review,
+                    format!("Shared (group) cache for {id} — review before removing"),
+                )
+            } else if belongs_to_running(&id, &ctx.running_bundle_ids) {
+                continue; // running-process guard
+            } else if looks_like_bundle_id(&id) {
+                (
+                    SafetyTier::Safe,
+                    format!("Cache for {id} (sandboxed app, not running)"),
+                )
+            } else {
+                (
+                    SafetyTier::Review,
+                    format!("Sandboxed cache \"{id}\" — owning app not identified"),
+                )
+            };
+            candidates.push(CacheCandidate { path, tier, reason });
+        }
+
+        // Phase 2: size concurrently.
+        let sized: Vec<(CacheCandidate, u64)> = candidates
+            .into_par_iter()
+            .map(|c| -> Result<(CacheCandidate, u64), ScanError> {
+                let size = dir_size(&c.path, cancel)?;
+                Ok((c, size))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Phase 3: emit.
+        for (c, size) in sized {
+            sink(CleanupItem::new(
+                c.path,
+                Category::UserCache,
+                size,
+                c.tier,
+                c.reason,
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DevCacheScanner
 // ---------------------------------------------------------------------------
 
@@ -753,6 +882,90 @@ mod unit_tests {
         assert!(!trash_accessible(&[readable, locked.clone()]));
         // Restore perms so the tempdir can be cleaned up.
         let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700));
+    }
+
+    #[test]
+    fn container_cache_roots_are_only_caches_never_app_data() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mk = |p: &str| {
+            let f = h.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"x").unwrap();
+        };
+        mk("Library/Containers/com.foo.bar/Data/Library/Caches/c1");
+        // Real app DATA next to the cache — MUST NOT be returned as a root.
+        mk("Library/Containers/com.foo.bar/Data/Library/Application Support/db");
+        mk("Library/Group Containers/GRP.com.foo/Library/Caches/g1");
+
+        let roots = super::container_cache_roots(h);
+        assert!(roots
+            .iter()
+            .any(|r| r.ends_with("Containers/com.foo.bar/Data/Library/Caches")));
+        assert!(roots
+            .iter()
+            .any(|r| r.ends_with("Group Containers/GRP.com.foo/Library/Caches")));
+        assert!(
+            !roots
+                .iter()
+                .any(|r| r.to_string_lossy().contains("Application Support")),
+            "only Caches subdirs — never the container's app data"
+        );
+    }
+
+    #[test]
+    fn container_scanner_sweeps_caches_running_guard_and_tiers() {
+        use super::*;
+        use std::collections::HashSet;
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mk = |p: &str| {
+            let f = h.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"data").unwrap();
+        };
+        mk("Library/Containers/com.foo.bar/Data/Library/Caches/c1"); // not running → Safe
+        mk("Library/Containers/com.run.ning/Data/Library/Caches/c2"); // running → skipped
+        mk("Library/Group Containers/GRP.com.foo/Library/Caches/g1"); // group → Review
+                                                                      // App data alongside a cache — a regression guard that it's never emitted.
+        mk("Library/Containers/com.foo.bar/Data/Library/Application Support/db");
+
+        let ctx = ScanCtx {
+            home: h.to_path_buf(),
+            allowed_roots: vec![h.to_path_buf()],
+            running_bundle_ids: HashSet::from(["com.run.ning".to_string()]),
+            full_disk_access: true,
+        };
+        let mut items = Vec::new();
+        ContainerCacheScanner
+            .scan(&ctx, &CancelToken::new(), &mut |i| items.push(i))
+            .unwrap();
+        let has = |needle: &str| {
+            items
+                .iter()
+                .any(|i| i.path.to_string_lossy().contains(needle))
+        };
+        assert!(
+            has("com.foo.bar/Data/Library/Caches"),
+            "non-running cache swept"
+        );
+        assert!(!has("com.run.ning"), "running app's cache is skipped");
+        assert!(has("GRP.com.foo/Library/Caches"), "group cache swept");
+        assert!(
+            items.iter().all(|i| i.path.ends_with("Caches")),
+            "ONLY Caches dirs are emitted — never app data"
+        );
+        assert!(!has("Application Support"));
+        let foo = items
+            .iter()
+            .find(|i| i.path.to_string_lossy().contains("com.foo.bar"))
+            .unwrap();
+        assert_eq!(foo.tier, SafetyTier::Safe);
+        let grp = items
+            .iter()
+            .find(|i| i.path.to_string_lossy().contains("GRP.com.foo"))
+            .unwrap();
+        assert_eq!(grp.tier, SafetyTier::Review);
     }
 
     #[test]
