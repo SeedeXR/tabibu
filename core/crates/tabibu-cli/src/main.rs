@@ -823,6 +823,9 @@ fn junk_ctx() -> ScanCtx {
     // Sandboxed-app cache dirs (the exact Caches subdirs ContainerCacheScanner
     // emits) so reclaim permits them — nothing else under the containers.
     roots.extend(tabibu_junk::container_cache_roots(&home));
+    // Shared world-writable temp dirs (/private/tmp, /private/var/tmp) so
+    // reclaim permits the user-owned stale entries TempScanner emits there.
+    roots.extend(tabibu_junk::shared_temp_roots());
     ScanCtx {
         home,
         allowed_roots: roots,

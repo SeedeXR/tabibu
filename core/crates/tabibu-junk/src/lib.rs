@@ -667,28 +667,65 @@ impl Scanner for DevCacheScanner {
 // TempScanner
 // ---------------------------------------------------------------------------
 
+/// World-writable shared temp dirs on macOS worth sweeping for the *user's own*
+/// stale files: `/private/tmp` (the `/tmp` alias — reachable in Finder via
+/// ⇧⌘G) and `/private/var/tmp` (`/var/tmp`, which persists across reboots).
+/// Fixed list — the scanner and the reclaim allowed-roots both use it so they
+/// never drift. These live under `/private`, which the denylist already permits
+/// (only `/private/var/db` etc. are denied); `normalize` maps the `/tmp`↔
+/// `/private/tmp` symlink aliases so an allowed root matches either spelling.
+#[must_use]
+pub fn shared_temp_roots() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/private/var/tmp"),
+    ]
+}
+
 /// Finds stale (mtime older than 7 days) files directly under
-/// `~/Library/Caches/TemporaryItems`, plus stale top-level entries of the
-/// system temp directory — but only when that directory resolves into
-/// `/var/folders` (the macOS per-user confined temp area).
-#[derive(Debug, Default)]
+/// `~/Library/Caches/TemporaryItems`, stale top-level entries of the system
+/// temp directory (only when it resolves into `/var/folders`, the per-user
+/// confined area), and stale *user-owned* top-level entries of the shared
+/// world-writable temp dirs ([`shared_temp_roots`]).
+#[derive(Debug)]
 pub struct TempScanner {
     system_temp: Option<PathBuf>,
+    shared_roots: Vec<PathBuf>,
+}
+
+impl Default for TempScanner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TempScanner {
-    /// Scanner using [`std::env::temp_dir`] as the system temp directory.
+    /// Scanner using [`std::env::temp_dir`] and the real [`shared_temp_roots`].
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            system_temp: None,
+            shared_roots: shared_temp_roots(),
+        }
     }
 
-    /// Scanner with an explicit system temp directory (used by tests to stay
-    /// inside fixture roots).
+    /// Scanner with an explicit system temp directory and NO shared roots (used
+    /// by tests to stay inside fixture roots).
     #[must_use]
     pub fn with_system_temp(system_temp: PathBuf) -> Self {
         Self {
             system_temp: Some(system_temp),
+            shared_roots: Vec::new(),
+        }
+    }
+
+    /// Scanner with an explicit system temp dir AND explicit shared roots (used
+    /// by tests to exercise the shared-temp sweep inside fixtures).
+    #[must_use]
+    pub fn with_roots(system_temp: PathBuf, shared_roots: Vec<PathBuf>) -> Self {
+        Self {
+            system_temp: Some(system_temp),
+            shared_roots,
         }
     }
 }
@@ -737,40 +774,93 @@ impl Scanner for TempScanner {
         }
 
         // 2. Stale top-level entries of the system temp directory, only when
-        //    it canonicalizes into /var/folders.
+        //    it canonicalizes into /var/folders (the per-user confined area, so
+        //    no ownership filter needed).
         let system_temp = self.system_temp.clone().unwrap_or_else(std::env::temp_dir);
-        let Ok(canonical) = system_temp.canonicalize() else {
-            return Ok(());
-        };
-        if !is_var_folders(&canonical) {
-            return Ok(());
-        }
-        if let Ok(entries) = fs::read_dir(&canonical) {
-            for entry in entries.flatten() {
-                if cancel.is_cancelled() {
-                    return Err(ScanError::Cancelled);
-                }
-                let Ok(meta) = entry.metadata() else { continue };
-                if !is_older_than(&meta, SEVEN_DAYS, now) {
-                    continue;
-                }
-                let path = entry.path();
-                let size = if meta.is_dir() {
-                    dir_size(&path, cancel)?
-                } else {
-                    meta.len()
-                };
-                sink(CleanupItem::new(
-                    path,
-                    Category::Temp,
-                    size,
-                    SafetyTier::Review,
+        if let Ok(canonical) = system_temp.canonicalize() {
+            if is_var_folders(&canonical) {
+                scan_temp_dir(
+                    &canonical,
                     "System temp item not modified in over 7 days",
-                ));
+                    None,
+                    cancel,
+                    now,
+                    sink,
+                )?;
+            }
+        }
+
+        // 3. Stale entries of the world-writable shared temp dirs (/private/tmp,
+        //    /private/var/tmp). These are shared by all users and system
+        //    processes, so we emit ONLY entries owned by this user — never
+        //    root's or another user's files (which reclaim couldn't trash
+        //    anyway). If the user's uid can't be determined, skip them entirely.
+        let owner_uid = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&ctx.home).ok().map(|m| m.uid())
+        };
+        if let Some(uid) = owner_uid {
+            for root in &self.shared_roots {
+                if let Ok(canonical) = root.canonicalize() {
+                    scan_temp_dir(
+                        &canonical,
+                        "Shared temp item not modified in over 7 days",
+                        Some(uid),
+                        cancel,
+                        now,
+                        sink,
+                    )?;
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Emit stale (>7 days) top-level entries of `dir` as Review [`Category::Temp`]
+/// items. When `owner_uid` is `Some`, only entries owned by that uid are
+/// emitted — the safety guard for world-writable shared temp dirs, where other
+/// users' and root's files must never be offered for removal.
+fn scan_temp_dir(
+    dir: &Path,
+    reason: &'static str,
+    owner_uid: Option<u32>,
+    cancel: &CancelToken,
+    now: SystemTime,
+    sink: &mut dyn FnMut(CleanupItem),
+) -> Result<(), ScanError> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        if cancel.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        // DirEntry::metadata does not follow symlinks, so a symlink in /tmp is
+        // sized/owned as the link itself and never traversed.
+        let Ok(meta) = entry.metadata() else { continue };
+        if !is_older_than(&meta, SEVEN_DAYS, now) {
+            continue;
+        }
+        if owner_uid.is_some_and(|uid| meta.uid() != uid) {
+            continue;
+        }
+        let path = entry.path();
+        let size = if meta.is_dir() {
+            dir_size(&path, cancel)?
+        } else {
+            meta.len()
+        };
+        sink(CleanupItem::new(
+            path,
+            Category::Temp,
+            size,
+            SafetyTier::Review,
+            reason,
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

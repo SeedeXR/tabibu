@@ -282,6 +282,35 @@ fn temp_reports_only_stale_entries() {
 }
 
 #[test]
+fn temp_sweeps_shared_dirs_for_stale_user_files() {
+    let home = tempfile::tempdir().unwrap();
+    // Stand-in for /private/tmp: a fixture we own.
+    let shared = tempfile::tempdir().unwrap();
+    let stale = shared.path().join("old-cache");
+    write_file(&stale, b"garbage!!"); // 9 B
+    set_age_days(&stale, 9);
+    write_file(&shared.path().join("fresh-cache"), b"live"); // fresh → skipped
+    let missing = shared.path().join("does-not-exist"); // absent root → ignored
+
+    // Empty var/folders fixture for the system-temp branch so it emits nothing.
+    let sys = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(home.path());
+    let scanner = TempScanner::with_roots(
+        sys.path().to_path_buf(),
+        vec![shared.path().to_path_buf(), missing],
+    );
+    let items = run(&scanner, &ctx);
+
+    assert_eq!(items.len(), 1, "only the stale, user-owned shared entry");
+    let canonical = shared.path().canonicalize().unwrap();
+    let it = &items[0];
+    assert_eq!(it.path, canonical.join("old-cache"));
+    assert_eq!(it.category, Category::Temp);
+    assert_eq!(it.tier, SafetyTier::Review);
+    assert_eq!(it.size_bytes, 9);
+}
+
+#[test]
 fn temp_skips_system_dir_outside_var_folders() {
     let home = tempfile::tempdir().unwrap();
 
