@@ -32,7 +32,18 @@ cd app
 
 echo "▶ building Tabibu v$VER — $LABEL"
 # `${BUILD[@]+...}` so an empty array (--native) doesn't trip `set -u` on bash 3.2.
+# Fail-soft: `tauri build` bundles the .app BEFORE the DMG, and DMG bundling
+# (bundle_dmg.sh) can fail on its own (e.g. a stale mounted volume) — that must
+# NOT skip the stable re-sign below, or the app ships ad-hoc and loses Full Disk
+# Access. We tolerate a non-zero exit ONLY if this run wrote a FRESH bundle; a
+# real compile failure leaves a stale/absent bundle and must still fail hard
+# (else we'd sign and ship a stale app). `ref` marks the build start for the
+# freshness test (find -newer, robust to bundle-dir mtime semantics).
+ref="$(mktemp)"; trap 'rm -f "$ref"' EXIT
+set +e
 npx tauri build ${BUILD[@]+"${BUILD[@]}"}
+build_rc=$?
+set -e
 
 bundle="$ROOT/app/src-tauri/target/$SUB"
 
@@ -41,6 +52,16 @@ bundle="$ROOT/app/src-tauri/target/$SUB"
 # Access + Notification grants across rebuilds. No Apple account needed; this
 # only affects this Mac. Otherwise the app stays ad-hoc signed.
 APP="$(find "$bundle/macos" -maxdepth 1 -name '*.app' 2>/dev/null | head -1)"
+if [ -n "$APP" ] && [ -z "$(find "$APP" -newer "$ref" -print -quit 2>/dev/null)" ]; then
+  APP=""   # stale bundle from a prior build — this run wrote nothing into it
+fi
+if [ -z "$APP" ]; then
+  echo "✗ tauri build failed (exit $build_rc): no fresh .app was produced." >&2
+  exit "$build_rc"
+fi
+if [ "$build_rc" -ne 0 ]; then
+  echo "⚠ tauri build exited $build_rc (likely DMG bundling) — a fresh .app was produced; signing it and continuing."
+fi
 if [ -n "$APP" ] && security find-identity -v -p codesigning 2>/dev/null | grep -qF "Tabibu Local Signing"; then
   "$ROOT/scripts/dev-sign.sh" "$APP" || true
   SIGNED=1

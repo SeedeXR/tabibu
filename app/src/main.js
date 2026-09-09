@@ -2119,7 +2119,7 @@ async function settingsView() {
 // =====================================================================
 // Universal Binaries — READ-ONLY report (detect + report; user decides)
 // =====================================================================
-const uniState = { phase: "idle", report: null, error: null, filter: "all" };
+const uniState = { phase: "idle", report: null, error: null, filter: "all", minSize: 0 };
 async function universalView() {
   setTitle("Universal Binaries", []);
   const u = uniState;
@@ -2134,7 +2134,7 @@ async function universalView() {
 }
 async function runUniversalScan() {
   const u = uniState;
-  u.phase = "scanning"; u.filter = "all"; render();
+  u.phase = "scanning"; u.filter = "all"; u.minSize = 0; render();
   try {
     u.report = await invoke("scan_universal");
     u.phase = "done";
@@ -2199,11 +2199,24 @@ function universalReport(rep) {
       onClick: () => { uniState.filter = id; render(); } },
       id === "all" ? label : `${label} (${counts[id]})`));
   }
-  wrap.append(h("div", { class: "filter-row" }, h("span", { class: "flabel" }, "Safety"), seg));
+  // Size filter — big binaries are the ones worth stripping; hide the small fry.
+  const THRESHOLDS = [["All sizes", 0], ["≥ 10 MB", 1e7], ["≥ 50 MB", 5e7], ["≥ 100 MB", 1e8], ["≥ 500 MB", 5e8]];
+  const sizeSel = h("select", { style: "font-size:12px;padding:3px 6px" });
+  for (const [label, v] of THRESHOLDS) {
+    const opt = h("option", { value: String(v) }, label);
+    if (v === uniState.minSize) opt.selected = "selected";
+    sizeSel.append(opt);
+  }
+  sizeSel.addEventListener("change", () => { uniState.minSize = Number(sizeSel.value); render(); });
+  wrap.append(h("div", { class: "filter-row" },
+    h("span", { class: "flabel" }, "Safety"), seg,
+    h("span", { class: "flabel", style: "margin-left:16px" }, "Size"), sizeSel));
 
-  const shown = uniState.filter === "all" ? rep.apps : rep.apps.filter((a) => a.category === uniState.filter);
+  const shown = rep.apps.filter((a) =>
+    (uniState.filter === "all" || a.category === uniState.filter)
+    && Number(a.reclaimable_bytes) >= uniState.minSize);
   const list = h("div", { class: "list" });
-  if (!shown.length) list.append(h("div", { class: "dim", style: "padding:20px 24px;font-size:12px" }, "No apps in this category."));
+  if (!shown.length) list.append(h("div", { class: "dim", style: "padding:20px 24px;font-size:12px" }, "No apps match these filters."));
   for (const a of shown) {
     const chips = a.arches.map((x) => h("span", { class: "btag" + (x === rep.native_arch ? " safe" : "") }, x));
     const actions = a.stripped
