@@ -201,6 +201,9 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     // group containers) — the EXACT Caches subdirs `ContainerCacheScanner` emits,
     // so reclaim permits those and nothing else under the containers.
     allowed_roots.extend(tabibu_junk::container_cache_roots(&home));
+    // Shared world-writable temp dirs (/private/tmp, /private/var/tmp) so
+    // reclaim permits the user-owned stale entries TempScanner emits there.
+    allowed_roots.extend(tabibu_junk::shared_temp_roots());
     allowed_roots.extend(extra_roots.iter().map(PathBuf::from));
 
     ScanCtx {
