@@ -16,7 +16,10 @@ description = "Tabibu — macOS optimization tool (Tauri shell)"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
+# 2.12 bumps tray-icon→0.25 / muda→0.20, which fix the macOS 26/27 (Tahoe)
+# menu-bar tray regressions: left-clicks swallowed by the menu, and the status
+# item failing to appear. Don't drop below 2.12 or the tray breaks on Tahoe.
+tauri = { version = "2.12", features = ["tray-icon", "macos-private-api", "image-png"] }
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
