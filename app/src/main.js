@@ -926,6 +926,10 @@ const spaceState = { phase: "idle", root: null, expanded: new Set(), sel: new Ma
 // Physical (on-disk) size of a node — the du-style number. Falls back to logical
 // only if an older payload lacks alloc_bytes. The whole view sizes/sorts on this.
 const szOf = (n) => Number(n.alloc_bytes ?? n.size_bytes) || 0;
+// Whole-disk root. The size_tree command skips the macOS firmlink-duplicate /
+// synthetic mounts itself (tabibu_walk::macos_disk_excludes), so a "/" scan shows
+// real usage without double-counting the data volume.
+const DISK_ROOT = "/";
 
 function spaceView() {
   setTitle("Space Analyzer", []);
@@ -950,7 +954,7 @@ function startSpaceScan() {
   const s = spaceState;
   s.phase = "scanning"; s.error = null; s.expanded = new Set(); s.sel.clear(); s.root = null;
   spaceView();
-  invoke("size_tree", { root: state.home, maxDepth: 1 })
+  invoke("size_tree", { root: DISK_ROOT, maxDepth: 1 })
     .then((root) => { s.root = root; s.phase = "browse"; })
     .catch((e) => { s.error = String(e); })
     .finally(() => { if (state.current === "space") spaceView(); });
@@ -1018,10 +1022,11 @@ function spaceTree() {
   // that equivalent to everything)
   const top = spaceTopKids();
   const allSel = spaceTopAllSelected();
+  const rootName = root.path === "/" ? "Macintosh HD" : (root.path.split("/").pop() || root.path);
   wrap.append(h("div", { class: "notice", style: "margin:16px 24px 0;align-items:center" },
     icon("folder-search"),
     h("div", { class: "body", style: "margin:0" },
-      h("h3", {}, (root.path.split("/").pop() || root.path) + " (Home)"),
+      h("h3", {}, rootName),
       h("p", { style: "margin:0" }, `${fmtBytes(total)} on disk · ${Number(root.count).toLocaleString()} items`)),
     h("div", { style: "flex:1" }),
     h("button", { onClick: startSpaceScan }, "Rescan"),
@@ -1116,21 +1121,30 @@ async function doSpaceRemove() {
   const s = spaceState;
   const { paths, bytes, items } = spaceSelTotals(); // de-duped, physical bytes
   if (!paths.length) return;
+  // Flag anything outside your home folder (/Applications, /Library, other users…)
+  // so a whole-disk selection can't be trashed thinking it's ordinary junk.
+  const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
+  const outside = paths.filter((p) => !underHome(p));
+  const warn = outside.length
+    ? `\n\n⚠️ ${outside.length} of these are OUTSIDE your home folder (e.g. ${displayPath(outside[0])}) — system, app, or other-user locations. Only move them if you're sure.`
+    : "";
   const ok = await uiConfirm(
-    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?\n\nReversible — everything goes to the Trash, restore it anytime.`,
+    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?${warn}\n\nReversible — everything goes to the Trash, restore it anytime.`,
     { danger: true, okLabel: "Move to Trash" });
   if (!ok) return;
   // Category DevCache so reclaim's user-data override lets explicit picks inside
   // Documents/Desktop/etc. go to the Trash (the user asked for no protection).
   // reclaim still forces action=Trash (reversible) and still refuses true system
-  // paths — which a home-rooted walk never reaches anyway.
+  // paths (/System, /usr/bin, …) via the engine denylist.
   const items2 = paths.map((p) => ({
     path: p, category: "DevCache", size_bytes: (s.sel.get(p) || {}).bytes || 0,
     tier: "Review", reason: "Selected in Space Analyzer", selected: true, action: "Trash",
   }));
   s.phase = "reclaiming"; spaceView();
   try {
-    s.report = await invoke("reclaim", { items: items2, extraRoots: [state.home] });
+    // Whole-disk scope: reclaim honors "/" here and the engine denylist still
+    // blocks true system paths; DevCache + Trash lets user-data picks through.
+    s.report = await invoke("reclaim", { items: items2, extraRoots: [DISK_ROOT] });
     // Freed = physical bytes of the items that actually trashed (outcomes with no
     // error), consistent with the on-disk sizes shown during selection.
     const outs = s.report.outcomes || [];

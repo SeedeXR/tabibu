@@ -29,6 +29,7 @@
 //! The [`CancelToken`] is checked at every directory boundary and a
 //! cancelled walk returns [`WalkError::Cancelled`] promptly.
 
+use std::collections::HashSet;
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 
@@ -104,6 +105,50 @@ pub fn size_tree(
     cancel: &CancelToken,
     max_depth: Option<usize>,
 ) -> Result<DirNode, WalkError> {
+    size_tree_ex(root, cancel, max_depth, &HashSet::new())
+}
+
+/// The single source of truth for paths a macOS disk walk should always skip, so
+/// a whole-disk (`/`) scan reflects real usage instead of double-counting.
+/// Firmlinks make `/Users`, `/Applications`, `/Library`, … the SAME data as
+/// `/System/Volumes/Data`, so counting both doubles the volume — skip the raw
+/// Data mount (and its sibling synthetic mounts). Also skip other volumes, device
+/// nodes, transient indexes, and the swap store (not a cleanable file). Harmless
+/// for a home-folder scan (none of these appear under `~`). Apply it in every
+/// `size_tree` call so sub-folder expansions stay consistent with the root total.
+#[must_use]
+pub fn macos_disk_excludes() -> HashSet<PathBuf> {
+    [
+        "/System/Volumes",
+        "/Volumes",
+        "/dev",
+        "/private/var/vm",
+        "/.vol",
+        "/.fseventsd",
+        "/.Spotlight-V100",
+        "/.DocumentRevisions-V100",
+        "/.TemporaryItems",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// Like [`size_tree`], but skips every path in `exclude` (exact absolute-path
+/// match) anywhere in the walk. Used for a whole-disk (`/`) scan on macOS to
+/// drop the firmlink duplicate `/System/Volumes/Data` (its contents are already
+/// counted via `/Users`, `/Applications`, … firmlinks) plus other mounts and
+/// pseudo-filesystems, so the total reflects real usage instead of double-counting.
+///
+/// # Errors
+///
+/// Same as [`size_tree`].
+pub fn size_tree_ex(
+    root: &Path,
+    cancel: &CancelToken,
+    max_depth: Option<usize>,
+    exclude: &HashSet<PathBuf>,
+) -> Result<DirNode, WalkError> {
     let meta = fs::symlink_metadata(root).map_err(|source| WalkError::Root {
         path: root.to_path_buf(),
         source,
@@ -121,7 +166,7 @@ pub fn size_tree(
     if cancel.is_cancelled() {
         return Err(WalkError::Cancelled);
     }
-    let entries = read_entries(root).map_err(|source| WalkError::Root {
+    let entries = read_entries(root, exclude).map_err(|source| WalkError::Root {
         path: root.to_path_buf(),
         source,
     })?;
@@ -132,6 +177,7 @@ pub fn size_tree(
         0,
         max_depth,
         cancel,
+        exclude,
     )
 }
 
@@ -164,11 +210,17 @@ fn alloc_of(meta: &Metadata) -> u64 {
 /// Reads a directory, returning the path and `symlink_metadata` of each
 /// entry. Entries whose metadata cannot be read are skipped; an error is
 /// returned only if the directory itself cannot be opened.
-fn read_entries(dir: &Path) -> std::io::Result<Vec<(PathBuf, Metadata)>> {
+fn read_entries(
+    dir: &Path,
+    exclude: &HashSet<PathBuf>,
+) -> std::io::Result<Vec<(PathBuf, Metadata)>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
+        if exclude.contains(&path) {
+            continue; // e.g. the /System/Volumes/Data firmlink duplicate on a / scan
+        }
         let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
@@ -188,12 +240,20 @@ fn build_children(
     depth: usize,
     max_depth: Option<usize>,
     cancel: &CancelToken,
+    exclude: &HashSet<PathBuf>,
 ) -> Result<DirNode, WalkError> {
     let mut children = entries
         .into_par_iter()
         .map(|(child_path, meta)| {
             if meta.is_dir() {
-                build_dir(child_path, alloc_of(&meta), depth + 1, max_depth, cancel)
+                build_dir(
+                    child_path,
+                    alloc_of(&meta),
+                    depth + 1,
+                    max_depth,
+                    cancel,
+                    exclude,
+                )
             } else {
                 Ok(DirNode {
                     path: child_path,
@@ -242,12 +302,13 @@ fn build_dir(
     depth: usize,
     max_depth: Option<usize>,
     cancel: &CancelToken,
+    exclude: &HashSet<PathBuf>,
 ) -> Result<DirNode, WalkError> {
     if cancel.is_cancelled() {
         return Err(WalkError::Cancelled);
     }
-    let entries = read_entries(&path).unwrap_or_default();
-    build_children(path, own_alloc, entries, depth, max_depth, cancel)
+    let entries = read_entries(&path, exclude).unwrap_or_default();
+    build_children(path, own_alloc, entries, depth, max_depth, cancel, exclude)
 }
 
 #[cfg(test)]

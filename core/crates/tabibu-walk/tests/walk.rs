@@ -7,7 +7,9 @@ use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
-use tabibu_walk::{dir_size, size_tree, CancelToken, DirNode, WalkError};
+use std::collections::HashSet;
+
+use tabibu_walk::{dir_size, size_tree, size_tree_ex, CancelToken, DirNode, WalkError};
 
 fn write_file(path: &Path, len: usize) {
     let mut file = File::create(path).unwrap();
@@ -86,6 +88,25 @@ fn size_tree_matches_sequential_reference() {
     assert!(node.is_dir);
     assert_sorted_desc(&node);
     assert_matches_reference(&node);
+}
+
+#[test]
+fn exclude_skips_paths_anywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(&dir.path().join("keep.bin"), 1000);
+    let skip = dir.path().join("skipme");
+    fs::create_dir(&skip).unwrap();
+    write_file(&skip.join("big.bin"), 50_000);
+    let excl: HashSet<_> = [skip.clone()].into_iter().collect();
+    let node = size_tree_ex(dir.path(), &CancelToken::new(), None, &excl).unwrap();
+    assert!(
+        node.children.iter().all(|c| c.path != skip),
+        "excluded dir must not appear as a child"
+    );
+    assert_eq!(
+        node.size_bytes, 1000,
+        "excluded subtree must not be counted"
+    );
 }
 
 #[test]

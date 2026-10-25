@@ -183,17 +183,21 @@ pub fn reclaim(
     //   1. Force every action to Trash. The scanners only ever emit Trash, so
     //      a Delete (permanent `remove_dir_all`) or Truncate could only come
     //      from abuse — coercing to Trash keeps reclaim always reversible.
-    //   2. Only honor extra_roots inside the user's home. Every real caller
-    //      passes [], [home] or [home/Library]; dropping anything outside home
-    //      stops the allowed-root set being widened to other volumes or "/".
-    // (The engine denylist still rejects protected/`..`/system paths on top.)
+    //   2. Only honor extra_roots inside the user's home, OR the whole-disk root
+    //      "/" that the Space Analyzer passes for a full-disk cleanup. Anything
+    //      else (another volume, an arbitrary absolute dir) is dropped. Even with
+    //      "/", the engine DENYLIST remains the hard guard: `/System`, `/usr/bin`,
+    //      `/private/var/db`, path traversal and the home/volume roots themselves
+    //      can never be trashed; user-data dirs (Documents/Desktop/…) only go when
+    //      the item is a `DevCache` Trash (the explicit-pick override). Everything
+    //      is still a reversible Trash move.
     for item in &mut items {
         item.selected = true;
         item.action = tabibu_engine::ReclaimAction::Trash;
     }
     let safe_roots: Vec<String> = extra_roots
         .into_iter()
-        .filter(|r| std::path::Path::new(r).starts_with(&home))
+        .filter(|r| r == "/" || std::path::Path::new(r).starts_with(&home))
         .collect();
     let ctx = system::default_scan_ctx(&safe_roots);
     engine_reclaim(&ctx, &items, std::path::Path::new(&system::undo_dir()))
@@ -278,8 +282,16 @@ pub fn size_tree(root: String, max_depth: Option<usize>) -> Result<DirNode, Stri
     // Registered like the other long sync ops so Stop / navigating away
     // (cancel_sync) can abort a huge walk instead of letting it run to the end.
     let cancel = begin_sync_op();
-    tabibu_walk::size_tree(std::path::Path::new(&root), &cancel, max_depth)
-        .map_err(|e| e.to_string())
+    // Always skip the firmlink-duplicate / synthetic mounts (walk crate owns the
+    // list) so a whole-disk ("/") scan isn't double-counted; harmless for a
+    // home-folder scan since none of those paths live under ~.
+    tabibu_walk::size_tree_ex(
+        std::path::Path::new(&root),
+        &cancel,
+        max_depth,
+        &tabibu_walk::macos_disk_excludes(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

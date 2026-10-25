@@ -312,10 +312,14 @@ fn cmd_slim(json: bool, app: Option<String>, yes: bool) -> i32 {
 }
 
 fn cmd_space(json: bool, path: String, depth: usize) -> i32 {
-    match tabibu_walk::size_tree(
+    // Always skip the firmlink-duplicate / synthetic mounts (shared list in
+    // tabibu-walk) so a whole-disk ("/") scan isn't double-counted; harmless for
+    // a home/sub-folder scan.
+    match tabibu_walk::size_tree_ex(
         std::path::Path::new(&path),
         &CancelToken::new(),
         Some(depth),
+        &tabibu_walk::macos_disk_excludes(),
     ) {
         Ok(node) => {
             if json {
