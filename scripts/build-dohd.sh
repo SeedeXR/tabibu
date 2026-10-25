@@ -13,6 +13,9 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || tr
 ( cd core && cargo build -p tabibu-dohd --release \
     --target aarch64-apple-darwin --target x86_64-apple-darwin )
 
+# Remove any prior output first: the macOS 26 (Tahoe) lipo refuses to overwrite
+# an existing -output file (errno 17 EEXIST), unlike older versions.
+rm -f "$ROOT/app/src-tauri/bin/tabibu-dohd"
 lipo -create \
   "$ROOT/core/target/aarch64-apple-darwin/release/tabibu-dohd" \
   "$ROOT/core/target/x86_64-apple-darwin/release/tabibu-dohd" \

@@ -34,6 +34,9 @@ for pair in "aarch64-apple-darwin:arm" "x86_64-apple-darwin:x86"; do
     --target "$target" --root "$tmp/$slot" >/dev/null
 done
 
+# Remove any (non-universal) prior output: macOS 26 lipo won't overwrite an
+# existing -output file (errno 17 EEXIST).
+rm -f "$ROOT/app/src-tauri/bin/tabibu-wg"
 lipo -create \
   "$tmp/arm/bin/boringtun-cli" \
   "$tmp/x86/bin/boringtun-cli" \
