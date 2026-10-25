@@ -139,6 +139,7 @@ const NAV = [
   ]},
   { section: "Cleanup", items: [
     { id: "junk", title: "Junk", icon: "trash-2" },
+    { id: "space", title: "Space Analyzer", icon: "folder-search" },
     { id: "dupes", title: "Duplicates", icon: "copy" },
     { id: "large", title: "Large & Old", icon: "files" },
   ]},
@@ -163,7 +164,7 @@ const NAV = [
 // Per-view accent (honest theming, inspired by CleanMyMac's section colors).
 const THEME = {
   dashboard: "#14b8a6", smart: "#8b5cf6", junk: "#16a34a", dupes: "#3b82f6",
-  large: "#0ea5e9", uninstall: "#6366f1", brew: "#d97706", docker: "#2496ed", universal: "#0891b2", startup: "#f59e0b", disk: "#a855f7",
+  large: "#0ea5e9", space: "#8b5cf6", uninstall: "#6366f1", brew: "#d97706", docker: "#2496ed", universal: "#0891b2", startup: "#f59e0b", disk: "#a855f7",
   memory: "#f97316", battery: "#22c55e", network: "#0284c7", security: "#ec4899", settings: "#64748b",
 };
 // Hero copy + sub-features per scan view.
@@ -909,6 +910,233 @@ function treemap(node) {
   });
   if (!kids.length) box.append(h("div", { class: "center" }, h("p", { class: "dim" }, "This folder is empty or unreadable.")));
   return box;
+}
+
+// =====================================================================
+// Space Analyzer — drill-down disk explorer with reversible removal
+// =====================================================================
+// Protected-path detection MIRRORS core/crates/tabibu-engine/src/denylist.rs so
+// the UI shows protected items non-selectable. The backend `reclaim` is the real
+// guard (it re-checks every path and skips denied ones); this is clarity +
+// defense-in-depth. Keep both lists in sync if denylist.rs changes.
+const PROTECTED_HOME = ["Documents", "Desktop", "Pictures", "Movies", "Music",
+  "Library/Mail", "Library/Messages", "Library/Mobile Documents", "Library/Photos",
+  "Library/Keychains", "Library/Application Support/MobileSync"];
+const PROTECTED_ABS = ["/System", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib",
+  "/usr/libexec", "/usr/share", "/usr/standalone", "/private/var/db", "/Library/Apple"];
+function isProtected(p) {
+  // Fail safe: if home is unknown (system_info failed at boot), the home-relative
+  // guards below can't match, so protect everything rather than silently offering
+  // personal folders. (The backend reclaim denylist still guards regardless.)
+  if (!p || !state.home || p === "/" || p === state.home) return true;
+  const under = (base) => p === base || p.startsWith(base + "/");
+  if (PROTECTED_ABS.some(under)) return true;
+  if (state.home && PROTECTED_HOME.some((rel) => under(state.home + "/" + rel))) return true;
+  return false;
+}
+
+const spaceState = { stack: [], cache: {}, sel: new Map(), error: null, phase: "browse", report: null };
+
+function spaceView() {
+  setTitle("Space Analyzer", []);
+  const s = spaceState;
+  if (s.phase === "reclaiming") return setView(centeredSpinner("Moving selected items to the Trash…"));
+  if (s.phase === "done") return setView(spaceResult());
+  if (s.error) {
+    return setView(centered("circle-alert", "Couldn't read that folder", s.error, "Back", () => {
+      s.error = null;
+      if (s.stack.length > 1) { s.stack.pop(); } else { s.stack = []; }
+      spaceView();
+    }));
+  }
+  if (!s.stack.length) { goSpace(state.home); return; } // kicks off the initial home walk
+  const path = s.stack[s.stack.length - 1];
+  const node = s.cache[path];
+  if (!node) return setView(cancellableSpinner(`Measuring ${path.split("/").pop() || path}…`));
+  setView(spaceBrowser(node));
+}
+
+// Fetch a folder (full recursive child sizes) and cache it. maxDepth 2 so the
+// fetch also carries each child's own children — we cache those by path too, so
+// drilling one level down is instant (no re-walk). Only drilling deeper refetches.
+const spaceInflight = new Set();
+async function ensureFolder(path) {
+  const s = spaceState;
+  if (s.cache[path] || spaceInflight.has(path)) return;
+  spaceInflight.add(path);
+  if (state.current === "space") spaceView(); // show the spinner while walking
+  try {
+    const node = await invoke("size_tree", { root: path, maxDepth: 2 });
+    s.cache[path] = node;
+    for (const ch of node.children || []) if (ch.is_dir) s.cache[ch.path] = ch;
+  } catch (e) { s.error = String(e); }
+  finally { spaceInflight.delete(path); }
+  if (state.current === "space") spaceView();
+}
+function goSpace(path) {
+  const s = spaceState;
+  s.error = null;
+  s.stack.push(path);
+  ensureFolder(path); // fetches if needed, re-renders when the walk lands
+  spaceView();        // render now: cached → the folder, uncached → the spinner
+}
+function spaceCrumbTo(idx) {
+  spaceState.stack = spaceState.stack.slice(0, idx + 1);
+  spaceView();
+}
+
+// Selected paths with nested descendants removed: if a folder AND something
+// inside it are both selected (possible across drill navigation), keep only the
+// folder. Trashing the folder removes the child too — otherwise we'd double-count
+// bytes/files and the child's reclaim would fail once its parent is already gone.
+function prunedSelection() {
+  const paths = [...spaceState.sel.keys()].sort(); // ancestors sort before their descendants
+  const kept = [];
+  for (const p of paths) {
+    if (!kept.some((k) => p === k || p.startsWith(k + "/"))) kept.push(p);
+  }
+  return kept;
+}
+function visibleSelectable(node) { return (node.children || []).filter((c) => !isProtected(c.path)); }
+function allVisibleSelected(node) {
+  const v = visibleSelectable(node);
+  return v.length > 0 && v.every((c) => spaceState.sel.has(c.path));
+}
+function toggleSel(c) {
+  const s = spaceState;
+  if (s.sel.has(c.path)) s.sel.delete(c.path);
+  else s.sel.set(c.path, { size_bytes: Number(c.size_bytes) || 0, count: Number(c.count) || 0 });
+  spaceView();
+}
+function selectAllVisible(node) {
+  const s = spaceState;
+  const v = visibleSelectable(node);
+  if (allVisibleSelected(node)) v.forEach((c) => s.sel.delete(c.path));
+  else v.forEach((c) => s.sel.set(c.path, { size_bytes: Number(c.size_bytes) || 0, count: Number(c.count) || 0 }));
+  spaceView();
+}
+
+function spaceBrowser(node) {
+  const s = spaceState;
+  const wrap = h("div", { class: "review" });
+
+  // breadcrumb (Home ▸ Library ▸ …)
+  const crumbs = h("div", { class: "crumbs" });
+  s.stack.forEach((p, idx) => {
+    if (idx) crumbs.append(icon("chevron-right"));
+    const last = idx === s.stack.length - 1;
+    const name = idx === 0 ? "Home" : (p.split("/").pop() || p);
+    crumbs.append(h("span", { class: "c" + (last ? " last" : ""),
+      onClick: last ? undefined : () => spaceCrumbTo(idx) }, name));
+  });
+  wrap.append(crumbs);
+
+  // summary card
+  const total = Number(node.size_bytes) || 0;
+  wrap.append(h("div", { class: "notice", style: "margin:4px 24px 0;align-items:center" },
+    icon("folder-search"),
+    h("div", { class: "body", style: "margin:0" },
+      h("h3", {}, node.path.split("/").pop() || node.path),
+      h("p", { style: "margin:0" }, `${fmtBytes(total)} · ${Number(node.count).toLocaleString()} items`)),
+    h("div", { style: "flex:1" }),
+    visibleSelectable(node).length
+      ? h("button", { onClick: () => selectAllVisible(node) }, allVisibleSelected(node) ? "Deselect all" : "Select all")
+      : null));
+
+  // list (children already sorted largest-first by the walk)
+  const kids = node.children || [];
+  const list = h("div", { class: "list" });
+  if (!kids.length) {
+    list.append(h("div", { class: "dim", style: "padding:24px;text-align:center" }, "This folder is empty or unreadable."));
+  }
+  for (const c of kids) list.append(spaceRow(c, total));
+  wrap.append(list);
+
+  wrap.append(spaceFooter());
+  return wrap;
+}
+
+function spaceRow(c, parentTotal) {
+  const s = spaceState;
+  const prot = isProtected(c.path);
+  const canDrill = c.is_dir && Number(c.size_bytes) > 0;
+  const frac = parentTotal > 0 ? Number(c.size_bytes) / parentTotal : 0;
+  const name = c.path.split("/").pop() || c.path;
+
+  const first = prot
+    ? icon("lock-keyhole", "prot-lock")
+    : h("input", { type: "checkbox", checked: s.sel.has(c.path) ? "" : null,
+        onClick: (e) => { e.stopPropagation(); toggleSel(c); } });
+  const sub = prot ? "Protected — remove in Finder"
+    : (c.is_dir ? `${Number(c.count).toLocaleString()} items` : "File");
+
+  return h("div", {
+    class: "item" + (prot ? " prot" : "") + (canDrill ? " drill" : ""),
+    onClick: canDrill ? () => goSpace(c.path) : undefined,
+  },
+    first,
+    icon(c.is_dir ? "folder" : "file", "ficon"),
+    h("div", { class: "path" },
+      h("div", { class: "nm", title: displayPath(c.path) }, name),
+      h("div", { class: "reason" }, sub)),
+    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}%` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%` })),
+    h("span", { class: "isize" }, fmtBytes(c.size_bytes)),
+    revealBtn(c.path),
+    canDrill ? icon("chevron-right", "drillchev") : h("span", { class: "drillchev" }));
+}
+
+function spaceFooter() {
+  const s = spaceState;
+  const paths = prunedSelection();
+  let bytes = 0, items = 0;
+  for (const p of paths) { const v = s.sel.get(p) || {}; bytes += v.size_bytes || 0; items += 1 + (v.count || 0); }
+  const n = paths.length;
+  return h("div", { class: "reclaim-bar" },
+    h("div", {}, n
+      ? `${n} selected · ${fmtBytes(bytes)} · ${items.toLocaleString()} files`
+      : h("span", { class: "dim" }, "Select folders or files to remove — protected items are locked.")),
+    h("div", { style: "flex:1" }),
+    n ? h("button", { onClick: () => { s.sel.clear(); spaceView(); } }, "Clear") : null,
+    h("button", { class: "danger", disabled: n ? null : "", onClick: doSpaceRemove }, "Review and Remove"));
+}
+
+async function doSpaceRemove() {
+  const s = spaceState;
+  const paths = prunedSelection(); // drop nested descendants — no double-count, no failed re-trash
+  if (!paths.length) return;
+  let bytes = 0, items = 0;
+  for (const p of paths) { const v = s.sel.get(p) || {}; bytes += v.size_bytes || 0; items += 1 + (v.count || 0); }
+  const ok = await uiConfirm(
+    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?\n\nReversible — restore from the Trash. Protected system and personal folders are skipped automatically.`,
+    { danger: true, okLabel: "Move to Trash" });
+  if (!ok) return;
+  // Build reclaim items. Category LargeOldFile (NOT DevCache — that would trigger
+  // the user-data override); reclaim forces action=Trash + selected and re-checks
+  // the denylist, so protected paths are reported skipped, never trashed.
+  const items2 = paths.map((p) => ({
+    path: p, category: "LargeOldFile", size_bytes: (s.sel.get(p) || {}).size_bytes || 0,
+    tier: "Review", reason: "Selected in Space Analyzer", selected: true, action: "Trash",
+  }));
+  s.phase = "reclaiming"; spaceView();
+  try {
+    s.report = await invoke("reclaim", { items: items2, extraRoots: [state.home] });
+    s.phase = "done";
+    s.cache = {}; s.sel.clear(); // sizes changed — refetch on return
+  } catch (e) { s.error = String(e); s.phase = "browse"; }
+  spaceView();
+}
+
+function spaceResult() {
+  const r = spaceState.report || {};
+  const c = h("div", { class: "center" }, icon("folder-search", "glyph"),
+    h("h2", {}, "Removal complete"),
+    h("p", {}, `${fmtBytes(r.reclaimed_bytes || 0)} moved to the Trash`
+      + (r.succeeded != null ? ` · ${r.succeeded} item${r.succeeded === 1 ? "" : "s"}` : "")
+      + (r.failed ? ` · ${r.failed} skipped` : "")));
+  const sb = skippedBox(r, "Skipped (protected, left untouched):");
+  if (sb) c.append(sb);
+  c.append(h("button", { class: "primary", onClick: () => { spaceState.phase = "browse"; spaceState.stack = []; spaceState.cache = {}; spaceView(); } }, "Done"));
+  return c;
 }
 
 // =====================================================================
@@ -2358,6 +2586,7 @@ function render() {
   if (["smart", "junk", "large"].includes(id)) return scanView(id);
   if (id === "dupes") return duplicatesView();
   if (id === "disk") return diskView();
+  if (id === "space") return spaceView();
   if (id === "memory") return memoryView();
   if (id === "battery") return batteryView();
   if (id === "network") return networkView();

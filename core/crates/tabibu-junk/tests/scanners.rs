@@ -400,6 +400,7 @@ fn registry_exposes_all_scanners() {
             "trash",
             "user_cache",
             "container_cache",
+            "app_support_cache",
             "dev_cache",
             "temp",
             "log",

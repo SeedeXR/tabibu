@@ -204,6 +204,11 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     // Shared world-writable temp dirs (/private/tmp, /private/var/tmp) so
     // reclaim permits the user-owned stale entries TempScanner emits there.
     allowed_roots.extend(tabibu_junk::shared_temp_roots());
+    // Chromium/Electron cache leaves under ~/Library/Application Support (the
+    // EXACT dirs AppSupportCacheScanner emits) + the Go module cache — so reclaim
+    // permits those and nothing else under Application Support / ~/go.
+    allowed_roots.extend(tabibu_junk::app_support_cache_roots(&home));
+    allowed_roots.push(home.join("go/pkg/mod"));
     allowed_roots.extend(extra_roots.iter().map(PathBuf::from));
 
     ScanCtx {

@@ -61,6 +61,11 @@ pub struct DirNode {
     /// Total size in bytes. For directories this is the aggregate of all
     /// descendants, including those pruned by `max_depth`.
     pub size_bytes: u64,
+    /// Number of descendant entries (files + subdirectories) under this node,
+    /// counting the whole subtree even where `max_depth` pruned the retained
+    /// children. 0 for a file. Powers the "N items" counts in the UI and the
+    /// removal summary. Aggregated like `size_bytes`, independent of pruning.
+    pub count: u64,
     /// `true` if this node is a directory.
     pub is_dir: bool,
     /// Child nodes, sorted by `size_bytes` descending. Empty for files,
@@ -95,6 +100,7 @@ pub fn size_tree(
         return Ok(DirNode {
             path: root.to_path_buf(),
             size_bytes: meta.len(),
+            count: 0,
             is_dir: false,
             children: Vec::new(),
         });
@@ -155,6 +161,7 @@ fn build_children(
                 Ok(DirNode {
                     path: child_path,
                     size_bytes: meta.len(),
+                    count: 0,
                     is_dir: false,
                     children: Vec::new(),
                 })
@@ -162,6 +169,9 @@ fn build_children(
         })
         .collect::<Result<Vec<_>, WalkError>>()?;
     let size_bytes = children.iter().map(|c| c.size_bytes).sum();
+    // Every child is one entry; each adds its own subtree's entries too. Summed
+    // before any `max_depth` pruning so the count reflects the whole subtree.
+    let count = children.len() as u64 + children.iter().map(|c| c.count).sum::<u64>();
     children.sort_unstable_by_key(|c| std::cmp::Reverse(c.size_bytes));
     if max_depth.is_some_and(|m| depth >= m) {
         children.clear();
@@ -169,6 +179,7 @@ fn build_children(
     Ok(DirNode {
         path,
         size_bytes,
+        count,
         is_dir: true,
         children,
     })
@@ -221,6 +232,26 @@ mod tests {
         let sizes: Vec<u64> = node.children.iter().map(|c| c.size_bytes).collect();
         assert_eq!(sizes, vec![1000, 100, 10]);
         assert_eq!(node.size_bytes, 1110);
+        assert_eq!(node.count, 3, "three files = three descendant entries");
+        assert!(
+            node.children.iter().all(|c| c.count == 0),
+            "files have no descendants"
+        );
+    }
+
+    #[test]
+    fn count_aggregates_nested_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        write_file(&dir.path().join("top.bin"), 1);
+        write_file(&sub.join("a.bin"), 1);
+        write_file(&sub.join("b.bin"), 1);
+        // entries: top.bin, sub, sub/a.bin, sub/b.bin = 4
+        let node = size_tree(dir.path(), &CancelToken::new(), None).unwrap();
+        assert_eq!(node.count, 4);
+        let sub_node = node.children.iter().find(|c| c.is_dir).unwrap();
+        assert_eq!(sub_node.count, 2);
     }
 
     #[test]
@@ -236,11 +267,13 @@ mod tests {
         let node = DirNode {
             path: PathBuf::from("/tmp/x"),
             size_bytes: 7,
+            count: 0,
             is_dir: true,
             children: Vec::new(),
         };
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains("\"size_bytes\":7"));
+        assert!(json.contains("\"count\":0"));
         assert!(json.contains("\"is_dir\":true"));
     }
 }

@@ -345,12 +345,22 @@ fn print_tree(node: &tabibu_walk::DirNode, indent: usize) {
             |n| n.to_string_lossy().into_owned(),
         );
         let slash = if child.is_dir { "/" } else { "" };
+        let items = if child.is_dir {
+            format!(
+                "  ({} item{})",
+                child.count,
+                if child.count == 1 { "" } else { "s" }
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "{:>9}  {}{}{}",
+            "{:>9}  {}{}{}{}",
             human_bytes(child.size_bytes),
             "  ".repeat(indent),
             name,
-            slash
+            slash,
+            items
         );
         print_tree(child, indent + 1);
     }
@@ -826,6 +836,10 @@ fn junk_ctx() -> ScanCtx {
     // Shared world-writable temp dirs (/private/tmp, /private/var/tmp) so
     // reclaim permits the user-owned stale entries TempScanner emits there.
     roots.extend(tabibu_junk::shared_temp_roots());
+    // Chromium/Electron cache leaves under ~/Library/Application Support + the Go
+    // module cache — reclaim permits exactly these, matching the app ctx.
+    roots.extend(tabibu_junk::app_support_cache_roots(&home));
+    roots.push(home.join("go/pkg/mod"));
     ScanCtx {
         home,
         allowed_roots: roots,

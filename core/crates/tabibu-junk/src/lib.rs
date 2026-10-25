@@ -11,7 +11,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 use rayon::prelude::*;
 use tabibu_engine::{CancelToken, Category, CleanupItem, SafetyTier, ScanCtx, ScanError, Scanner};
@@ -81,6 +82,11 @@ const DEV_CACHE_TARGETS: &[(&str, SafetyTier, &str)] = &[
         SafetyTier::Review,
         "Gradle build & dependency cache — rebuilt/re-downloaded on next build",
     ),
+    (
+        "go/pkg/mod",
+        SafetyTier::Review,
+        "Go module cache — modules are re-downloaded on demand (go clean -modcache)",
+    ),
 ];
 
 pub mod large_old;
@@ -93,6 +99,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(TrashScanner::new()),
         Box::new(UserCacheScanner),
         Box::new(ContainerCacheScanner),
+        Box::new(AppSupportCacheScanner),
         Box::new(DevCacheScanner),
         Box::new(TempScanner::new()),
         Box::new(LogScanner),
@@ -620,6 +627,160 @@ impl Scanner for ContainerCacheScanner {
 }
 
 // ---------------------------------------------------------------------------
+// AppSupportCacheScanner — Chromium/Electron caches under Application Support
+// ---------------------------------------------------------------------------
+
+/// Cache directory basenames used by Chromium- and Electron-based apps (Chrome,
+/// Brave, Edge, Vivaldi, Opera, Slack, Discord, VS Code, …). These live under
+/// `~/Library/Application Support/<app>/…`, OUTSIDE `~/Library/Caches` and the
+/// sandbox containers, so the other cache scanners miss them entirely — often
+/// the largest reclaimable caches on a disk. Each is disposable and regenerated
+/// on next launch. Matched by EXACT basename so app *data* dirs (Local Storage,
+/// Session Storage, blob_storage, IndexedDB, Spotify's PersistentCache) are
+/// never caught.
+const CHROMIUM_CACHE_LEAVES: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "GrShaderCache",
+    "Component Cache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "CacheStorage", // under Service Worker/
+    "ScriptCache",  // under Service Worker/
+];
+
+/// Max directory depth searched below each Application Support app dir for a
+/// cache leaf (`Google/Chrome/Default/Cache` = depth 3; a Service Worker leaf =
+/// depth 4). Bounded so the search stays shallow and fast.
+const APP_SUPPORT_MAX_DEPTH: usize = 4;
+
+/// Recursively collect cache-leaf dirs under `dir`. A matched leaf is pushed and
+/// NOT descended into (so we never walk the cache's own contents here); other
+/// dirs are followed until [`APP_SUPPORT_MAX_DEPTH`]. Symlinks are not followed.
+fn collect_cache_leaves(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        if CHROMIUM_CACHE_LEAVES.contains(&name.to_string_lossy().as_ref()) {
+            out.push(entry.path());
+        } else if depth < APP_SUPPORT_MAX_DEPTH {
+            collect_cache_leaves(&entry.path(), depth + 1, out);
+        }
+    }
+}
+
+fn compute_app_support_cache_roots(home: &Path) -> Vec<PathBuf> {
+    let base = home.join("Library/Application Support");
+    let Ok(entries) = fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            collect_cache_leaves(&entry.path(), 1, &mut out);
+        }
+    }
+    out
+}
+
+/// Short-lived memo of the last scan's result, keyed by home. The depth-4 walk
+/// (~0.4s on a full Application Support) is called up to three times per cleanup
+/// cycle — twice building a scan ctx + inside the scanner, plus every `reclaim`
+/// rebuilds the ctx — so without this each one re-walks. A stale entry only
+/// means a just-created cache leaf isn't permitted until the TTL lapses, or a
+/// just-deleted one lingers as a no-op allowed root; both are harmless.
+/// ponytail: process-global memo, 15s TTL — fine for this read-mostly list.
+static APP_SUPPORT_CACHE_MEMO: Mutex<Option<(PathBuf, Instant, Vec<PathBuf>)>> = Mutex::new(None);
+
+/// Chromium/Electron cache-leaf directories under `~/Library/Application
+/// Support`. Shared by [`AppSupportCacheScanner`] and the reclaim allowed-roots
+/// so they never drift: reclaim permits EXACTLY these leaves and nothing else
+/// under Application Support — each app's real data stays outside the boundary.
+/// Memoized (see [`APP_SUPPORT_CACHE_MEMO`]) to avoid re-walking on each call.
+#[must_use]
+pub fn app_support_cache_roots(home: &Path) -> Vec<PathBuf> {
+    const TTL: Duration = Duration::from_secs(15);
+    if let Ok(guard) = APP_SUPPORT_CACHE_MEMO.lock() {
+        if let Some((h, at, roots)) = guard.as_ref() {
+            if h == home && at.elapsed() < TTL {
+                return roots.clone();
+            }
+        }
+    }
+    let roots = compute_app_support_cache_roots(home);
+    if let Ok(mut guard) = APP_SUPPORT_CACHE_MEMO.lock() {
+        *guard = Some((home.to_path_buf(), Instant::now(), roots.clone()));
+    }
+    roots
+}
+
+/// The Application Support app/vendor dir a cache leaf belongs to (the segment
+/// right after `Application Support`) — for the reason text.
+fn app_support_owner(path: &Path, home: &Path) -> String {
+    let base = home.join("Library/Application Support");
+    path.strip_prefix(&base)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_else(|| "an app".to_string())
+}
+
+/// Sweeps Chromium/Electron cache leaves under `~/Library/Application Support`.
+/// ALL `Review` tier: these apps hold the cache open while running, so clearing
+/// a live app reclaims nothing and can corrupt its profile — the user should
+/// quit the app first. Surfaced for review, never auto-selected.
+pub struct AppSupportCacheScanner;
+
+impl Scanner for AppSupportCacheScanner {
+    fn id(&self) -> &'static str {
+        "app_support_cache"
+    }
+
+    fn scan(
+        &self,
+        ctx: &ScanCtx,
+        cancel: &CancelToken,
+        sink: &mut dyn FnMut(CleanupItem),
+    ) -> Result<(), ScanError> {
+        if cancel.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        let candidates = app_support_cache_roots(&ctx.home);
+        // Size concurrently (dir_size is itself parallel); short-circuit on cancel.
+        let sized: Vec<(PathBuf, u64)> = candidates
+            .into_par_iter()
+            .map(|p| -> Result<(PathBuf, u64), ScanError> {
+                let size = dir_size(&p, cancel)?;
+                Ok((p, size))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (path, size) in sized {
+            let owner = app_support_owner(&path, &ctx.home);
+            let leaf = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            sink(CleanupItem::new(
+                path,
+                Category::UserCache,
+                size,
+                SafetyTier::Review,
+                format!("{owner} cache ({leaf}) — quit {owner} first; regenerates on next launch"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DevCacheScanner
 // ---------------------------------------------------------------------------
 
@@ -1001,6 +1162,52 @@ mod unit_tests {
                 .any(|r| r.to_string_lossy().contains("Application Support")),
             "only Caches subdirs — never the container's app data"
         );
+    }
+
+    #[test]
+    fn app_support_cache_roots_finds_chromium_leaves_never_data() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mk = |p: &str| {
+            let f = h.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"x").unwrap();
+        };
+        // Chromium/Electron cache leaves at various depths.
+        mk("Library/Application Support/Google/Chrome/Default/Cache/data_0");
+        mk("Library/Application Support/Google/Chrome/Default/Code Cache/js/x");
+        mk("Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage/y");
+        mk("Library/Application Support/Slack/GPUCache/z");
+        // App DATA that must NEVER be matched.
+        mk("Library/Application Support/Google/Chrome/Default/Local Storage/leveldb/d");
+        mk("Library/Application Support/Spotify/PersistentCache/Storage/s");
+
+        let roots = super::app_support_cache_roots(h);
+        let has = |suffix: &str| roots.iter().any(|r| r.ends_with(suffix));
+        assert!(has("Google/Chrome/Default/Cache"), "HTTP Cache leaf found");
+        assert!(
+            has("Google/Chrome/Default/Code Cache"),
+            "Code Cache leaf found"
+        );
+        assert!(
+            has("Google/Chrome/Default/Service Worker/CacheStorage"),
+            "Service Worker CacheStorage leaf found (deepest level)"
+        );
+        assert!(has("Slack/GPUCache"), "Electron app leaf found");
+        assert!(
+            !roots
+                .iter()
+                .any(|r| r.to_string_lossy().contains("Local Storage")),
+            "Local Storage (data) must be excluded"
+        );
+        assert!(
+            !roots
+                .iter()
+                .any(|r| r.to_string_lossy().contains("PersistentCache")),
+            "Spotify PersistentCache (offline media) must be excluded"
+        );
+        // A matched leaf is never descended into (one "Cache", not nested dupes).
+        assert_eq!(roots.iter().filter(|r| r.ends_with("Cache")).count(), 1);
     }
 
     #[test]
