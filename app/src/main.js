@@ -913,29 +913,16 @@ function treemap(node) {
 }
 
 // =====================================================================
-// Space Analyzer — drill-down disk explorer with reversible removal
+// Space Analyzer — nested disk explorer with reversible removal
 // =====================================================================
-// Protected-path detection MIRRORS core/crates/tabibu-engine/src/denylist.rs so
-// the UI shows protected items non-selectable. The backend `reclaim` is the real
-// guard (it re-checks every path and skips denied ones); this is clarity +
-// defense-in-depth. Keep both lists in sync if denylist.rs changes.
-const PROTECTED_HOME = ["Documents", "Desktop", "Pictures", "Movies", "Music",
-  "Library/Mail", "Library/Messages", "Library/Mobile Documents", "Library/Photos",
-  "Library/Keychains", "Library/Application Support/MobileSync"];
-const PROTECTED_ABS = ["/System", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib",
-  "/usr/libexec", "/usr/share", "/usr/standalone", "/private/var/db", "/Library/Apple"];
-function isProtected(p) {
-  // Fail safe: if home is unknown (system_info failed at boot), the home-relative
-  // guards below can't match, so protect everything rather than silently offering
-  // personal folders. (The backend reclaim denylist still guards regardless.)
-  if (!p || !state.home || p === "/" || p === state.home) return true;
-  const under = (base) => p === base || p.startsWith(base + "/");
-  if (PROTECTED_ABS.some(under)) return true;
-  if (state.home && PROTECTED_HOME.some((rel) => under(state.home + "/" + rel))) return true;
-  return false;
-}
-
-const spaceState = { stack: [], cache: {}, sel: new Map(), error: null, phase: "idle", report: null, freedBytes: 0 };
+// A fully expandable tree rooted at the home folder: open any folder in place to
+// see what's nested inside, and move ANYTHING to the Trash (reversible). Nothing
+// is locked — every folder and file is viewable and removable, to match a
+// dedicated disk-space tool. Sizes are real on-disk usage (alloc_bytes, du-style),
+// never inflated logical size. The backend `reclaim` still routes through the
+// Trash (reversible) and refuses only true system paths, which are unreachable
+// from a home-rooted walk anyway.
+const spaceState = { phase: "idle", root: null, expanded: new Set(), sel: new Map(), error: null, report: null, freedBytes: 0 };
 // Physical (on-disk) size of a node — the du-style number. Falls back to logical
 // only if an older payload lacks alloc_bytes. The whole view sizes/sorts on this.
 const szOf = (n) => Number(n.alloc_bytes ?? n.size_bytes) || 0;
@@ -945,59 +932,52 @@ function spaceView() {
   const s = spaceState;
   if (s.phase === "idle") {
     return setView(heroLanding("folder-search", "Space Analyzer",
-      "See exactly what's filling your disk. Drill from your home folder into the biggest folders, then move what you don't need to the Trash (reversible). Sizes are real on-disk usage, not inflated logical size.",
-      ["Visual map of the biggest folders", "Drill in to any depth", "Protected folders are locked"],
-      () => { s.phase = "browse"; s.stack = []; s.cache = {}; s.sel.clear(); goSpace(state.home); }));
+      "See exactly what's filling your disk. Open any folder in place to see what's nested inside, then move whatever you don't need to the Trash (reversible). Sizes are real on-disk usage, not inflated logical size.",
+      ["Nested, expand-in-place tree", "Every folder viewable and removable", "Real on-disk sizes (du-style)"],
+      startSpaceScan));
   }
+  // Error is checked BEFORE the busy phases so a failed scan isn't trapped behind
+  // the scanning spinner (phase stays "scanning" on a rejected walk).
+  if (s.error) return setView(centered("circle-alert", "Couldn't read your home folder", s.error, "Back", () => { s.phase = "idle"; s.error = null; spaceView(); }));
+  if (s.phase === "scanning") return setView(cancellableSpinner("Measuring your home folder…"));
   if (s.phase === "reclaiming") return setView(centeredSpinner("Moving selected items to the Trash…"));
   if (s.phase === "done") return setView(spaceResult());
-  if (s.error) {
-    return setView(centered("circle-alert", "Couldn't read that folder", s.error, "Back", () => {
-      s.error = null;
-      if (s.stack.length > 1) { s.stack.pop(); } else { s.stack = []; }
-      spaceView();
-    }));
-  }
-  if (!s.stack.length) { goSpace(state.home); return; } // kicks off the initial home walk
-  const path = s.stack[s.stack.length - 1];
-  const node = s.cache[path];
-  if (!node) return setView(cancellableSpinner(`Measuring ${path.split("/").pop() || path}…`));
-  setView(spaceBrowser(node));
+  if (!s.root) { s.phase = "idle"; return spaceView(); } // defensive: nothing to show → landing
+  setView(spaceTree());
 }
 
-// Fetch a folder (full recursive child sizes) and cache it. maxDepth 2 so the
-// fetch also carries each child's own children — we cache those by path too, so
-// drilling one level down is instant (no re-walk). Only drilling deeper refetches.
-const spaceInflight = new Set();
-async function ensureFolder(path) {
+function startSpaceScan() {
   const s = spaceState;
-  if (s.cache[path] || spaceInflight.has(path)) return;
-  spaceInflight.add(path);
-  if (state.current === "space") spaceView(); // show the spinner while walking
-  try {
-    const node = await invoke("size_tree", { root: path, maxDepth: 2 });
-    s.cache[path] = node;
-    for (const ch of node.children || []) if (ch.is_dir) s.cache[ch.path] = ch;
-  } catch (e) { s.error = String(e); }
-  finally { spaceInflight.delete(path); }
-  if (state.current === "space") spaceView();
-}
-function goSpace(path) {
-  const s = spaceState;
-  s.error = null;
-  s.stack.push(path);
-  ensureFolder(path); // fetches if needed, re-renders when the walk lands
-  spaceView();        // render now: cached → the folder, uncached → the spinner
-}
-function spaceCrumbTo(idx) {
-  spaceState.stack = spaceState.stack.slice(0, idx + 1);
+  s.phase = "scanning"; s.error = null; s.expanded = new Set(); s.sel.clear(); s.root = null;
   spaceView();
+  invoke("size_tree", { root: state.home, maxDepth: 1 })
+    .then((root) => { s.root = root; s.phase = "browse"; })
+    .catch((e) => { s.error = String(e); })
+    .finally(() => { if (state.current === "space") spaceView(); });
+}
+
+// Expand/collapse a folder in place; lazy-load its children on first expand.
+// ponytail: each expand re-walks that subtree to size its children (bounded per
+// folder, cached in-node after). Fine interactively; deepen the initial fetch
+// only if expansion feels slow.
+const spaceInflight = new Set();
+function toggleExpand(node) {
+  const s = spaceState;
+  if (s.expanded.has(node.path)) { s.expanded.delete(node.path); spaceView(); return; }
+  s.expanded.add(node.path);
+  if (node._loaded || (node.children && node.children.length) || spaceInflight.has(node.path)) { spaceView(); return; }
+  spaceInflight.add(node.path);
+  spaceView();
+  invoke("size_tree", { root: node.path, maxDepth: 1 })
+    .then((fresh) => { node.children = fresh.children || []; node._loaded = true; node._error = null; })
+    .catch((e) => { node.children = []; node._loaded = true; node._error = String(e); }) // surfaced as an error row, not a silent empty
+    .finally(() => { spaceInflight.delete(node.path); if (state.current === "space") spaceView(); });
 }
 
 // Selected paths with nested descendants removed: if a folder AND something
-// inside it are both selected (possible across drill navigation), keep only the
-// folder. Trashing the folder removes the child too — otherwise we'd double-count
-// bytes/files and the child's reclaim would fail once its parent is already gone.
+// nested inside it are both selected, keep only the folder. Trashing the folder
+// removes the child too — otherwise we'd double-count and the child's reclaim
+// would fail once its parent is already gone.
 function prunedSelection() {
   const paths = [...spaceState.sel.keys()].sort(); // ancestors sort before their descendants
   const kept = [];
@@ -1006,11 +986,6 @@ function prunedSelection() {
   }
   return kept;
 }
-function visibleSelectable(node) { return (node.children || []).filter((c) => !isProtected(c.path)); }
-function allVisibleSelected(node) {
-  const v = visibleSelectable(node);
-  return v.length > 0 && v.every((c) => spaceState.sel.has(c.path));
-}
 const selEntry = (c) => ({ bytes: szOf(c), count: Number(c.count) || 0 });
 function toggleSel(c) {
   const s = spaceState;
@@ -1018,110 +993,101 @@ function toggleSel(c) {
   else s.sel.set(c.path, selEntry(c));
   spaceView();
 }
-function selectAllVisible(node) {
+// Top-level children + whether all are selected — one derivation, used by both
+// the header button and the toggle so their state can't drift.
+const spaceTopKids = () => (spaceState.root && spaceState.root.children) || [];
+const spaceTopAllSelected = () => {
+  const t = spaceTopKids();
+  return t.length > 0 && t.every((c) => spaceState.sel.has(c.path));
+};
+function selectAllTop() {
   const s = spaceState;
-  const v = visibleSelectable(node);
-  if (allVisibleSelected(node)) v.forEach((c) => s.sel.delete(c.path));
-  else v.forEach((c) => s.sel.set(c.path, selEntry(c)));
+  const top = spaceTopKids();
+  if (spaceTopAllSelected()) top.forEach((c) => s.sel.delete(c.path));
+  else top.forEach((c) => s.sel.set(c.path, selEntry(c)));
   spaceView();
 }
 
-function spaceBrowser(node) {
+function spaceTree() {
   const s = spaceState;
+  const root = s.root;
+  const total = szOf(root);
   const wrap = h("div", { class: "review" });
 
-  // breadcrumb (Home ▸ Library ▸ …)
-  const crumbs = h("div", { class: "crumbs" });
-  s.stack.forEach((p, idx) => {
-    if (idx) crumbs.append(icon("chevron-right"));
-    const last = idx === s.stack.length - 1;
-    const name = idx === 0 ? "Home" : (p.split("/").pop() || p);
-    crumbs.append(h("span", { class: "c" + (last ? " last" : ""),
-      onClick: last ? undefined : () => spaceCrumbTo(idx) }, name));
-  });
-  wrap.append(crumbs);
-
-  // summary card — physical on-disk size (du-style), not inflated logical size
-  const total = szOf(node);
-  wrap.append(h("div", { class: "notice", style: "margin:4px 24px 0;align-items:center" },
+  // header: home summary + rescan + select-all (top level; prunedSelection makes
+  // that equivalent to everything)
+  const top = spaceTopKids();
+  const allSel = spaceTopAllSelected();
+  wrap.append(h("div", { class: "notice", style: "margin:16px 24px 0;align-items:center" },
     icon("folder-search"),
     h("div", { class: "body", style: "margin:0" },
-      h("h3", {}, node.path.split("/").pop() || node.path),
-      h("p", { style: "margin:0" }, `${fmtBytes(total)} on disk · ${Number(node.count).toLocaleString()} items`)),
+      h("h3", {}, (root.path.split("/").pop() || root.path) + " (Home)"),
+      h("p", { style: "margin:0" }, `${fmtBytes(total)} on disk · ${Number(root.count).toLocaleString()} items`)),
     h("div", { style: "flex:1" }),
-    visibleSelectable(node).length
-      ? h("button", { onClick: () => selectAllVisible(node) }, allVisibleSelected(node) ? "Deselect all" : "Select all")
-      : null));
+    h("button", { onClick: startSpaceScan }, "Rescan"),
+    top.length ? h("button", { style: "margin-left:8px", onClick: selectAllTop }, allSel ? "Deselect all" : "Select all") : null));
 
-  // bubble map — the biggest folders at a glance; click a bubble to drill in
-  const bubbles = spaceBubbles(node, total);
-  if (bubbles) wrap.append(bubbles);
-
-  // list (children already sorted largest-first by the walk)
-  const kids = node.children || [];
+  // nested list — depth-first over expanded branches
   const list = h("div", { class: "list" });
-  if (!kids.length) {
-    list.append(h("div", { class: "dim", style: "padding:24px;text-align:center" }, "This folder is empty or unreadable."));
-  }
-  for (const c of kids) list.append(spaceRow(c, total));
+  const rows = [];
+  flattenTree(root, 0, total, rows);
+  if (!rows.length) list.append(h("div", { class: "dim", style: "padding:24px;text-align:center" }, "This folder is empty or unreadable."));
+  for (const r of rows) list.append(r);
   wrap.append(list);
 
   wrap.append(spaceFooter());
   return wrap;
 }
 
-// Circle-map of a folder's biggest children: bubble area ∝ on-disk size, click to
-// drill. Purely visual navigation — selection stays in the list below.
-function spaceBubbles(node, total) {
-  const kids = (node.children || []).filter((c) => szOf(c) > 0).slice(0, 14);
-  if (kids.length < 2) return null; // one bubble is not a map
-  const max = szOf(kids[0]) || 1; // kids are sorted by alloc, so this is the max
-  const box = h("div", { class: "bubbles" });
-  kids.forEach((c, i) => {
-    // diameter ∝ sqrt(size) so AREA tracks size; clamped to a legible 46–176px.
-    const d = Math.round(46 + Math.sqrt(Math.min(szOf(c) / max, 1)) * 130);
-    const canDrill = c.is_dir && szOf(c) > 0;
-    const prot = isProtected(c.path);
-    const share = total > 0 ? (szOf(c) / total) * 100 : 0;
-    box.append(h("div", {
-      class: "bubble" + (canDrill ? " drill" : "") + (prot ? " prot" : ""),
-      style: `width:${d}px;height:${d}px;--bh:${(262 + i * 20) % 360}`,
-      title: `${displayPath(c.path)} — ${fmtBytes(szOf(c))} (${share.toFixed(1)}%)`,
-      onClick: canDrill ? () => goSpace(c.path) : undefined,
-    },
-      d > 66 ? h("div", { class: "bn" }, c.path.split("/").pop() || c.path) : null,
-      d > 54 ? h("div", { class: "bs" }, fmtBytes(szOf(c))) : null));
-  });
-  return box;
+// Flatten expanded branches into rows (children already sorted largest-first).
+// An expanded folder that failed to read shows an error row instead of looking
+// deceptively empty (the tool exists to surface disk usage, not hide it).
+function flattenTree(node, depth, total, out) {
+  for (const c of node.children || []) {
+    out.push(spaceRow(c, depth, total));
+    if (!spaceState.expanded.has(c.path)) continue;
+    if (c.children && c.children.length) flattenTree(c, depth + 1, total, out);
+    else if (c._error) out.push(spaceErrorRow(depth + 1));
+  }
 }
 
-function spaceRow(c, parentTotal) {
+function spaceErrorRow(depth) {
+  return h("div", { class: "item", style: `padding-left:${14 + depth * 20}px` },
+    h("span", { class: "disc placeholder" }),
+    icon("circle-alert", "ficon"),
+    h("div", { class: "path" },
+      h("div", { class: "reason" }, "Couldn't read this folder — it may need Full Disk Access.")));
+}
+
+function spaceRow(c, depth, total) {
   const s = spaceState;
-  const prot = isProtected(c.path);
-  const canDrill = c.is_dir && szOf(c) > 0;
-  const frac = parentTotal > 0 ? szOf(c) / parentTotal : 0;
+  const expandable = c.is_dir && szOf(c) > 0;
+  const open = s.expanded.has(c.path);
+  const loading = spaceInflight.has(c.path);
+  const frac = total > 0 ? szOf(c) / total : 0;
   const name = c.path.split("/").pop() || c.path;
 
-  const first = prot
-    ? icon("lock-keyhole", "prot-lock")
-    : h("input", { type: "checkbox", checked: s.sel.has(c.path) ? "" : null,
-        onClick: (e) => { e.stopPropagation(); toggleSel(c); } });
-  const sub = prot ? "Protected — remove in Finder"
-    : (c.is_dir ? `${Number(c.count).toLocaleString()} items` : "File");
+  const disclosure = expandable
+    ? h("span", { class: "disc" + (open ? " open" : "") + (loading ? " loading" : ""),
+        onClick: (e) => { e.stopPropagation(); toggleExpand(c); } },
+        icon("chevron-right"))
+    : h("span", { class: "disc placeholder" });
 
   return h("div", {
-    class: "item" + (prot ? " prot" : "") + (canDrill ? " drill" : ""),
-    onClick: canDrill ? () => goSpace(c.path) : undefined,
+    class: "item" + (expandable ? " drill" : ""),
+    style: `padding-left:${14 + depth * 20}px`,
+    onClick: expandable ? () => toggleExpand(c) : undefined,
   },
-    first,
+    disclosure,
+    h("input", { type: "checkbox", checked: s.sel.has(c.path) ? "" : null,
+      onClick: (e) => { e.stopPropagation(); toggleSel(c); } }),
     icon(c.is_dir ? "folder" : "file", "ficon"),
     h("div", { class: "path" },
       h("div", { class: "nm", title: displayPath(c.path) }, name),
-      h("div", { class: "reason" }, sub)),
-    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}%` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%` })),
+      h("div", { class: "reason" }, c.is_dir ? `${Number(c.count).toLocaleString()} items` : "File")),
+    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of home` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%` })),
     h("span", { class: "isize" }, fmtBytes(szOf(c))),
-    revealBtn(c.path),
-    canDrill ? icon("chevron-right", "drillchev") : h("span", { class: "drillchev" }));
+    revealBtn(c.path));
 }
 
 // Totals over the de-duplicated selection, using physical on-disk bytes.
@@ -1140,7 +1106,7 @@ function spaceFooter() {
   return h("div", { class: "reclaim-bar" },
     h("div", {}, n
       ? `${n} selected · ${fmtBytes(bytes)} · ${items.toLocaleString()} files`
-      : h("span", { class: "dim" }, "Select folders or files to remove — protected items are locked.")),
+      : h("span", { class: "dim" }, "Open folders to explore; tick anything to remove it (reversible).")),
     h("div", { style: "flex:1" }),
     n ? h("button", { onClick: () => { s.sel.clear(); spaceView(); } }, "Clear") : null,
     h("button", { class: "danger", disabled: n ? null : "", onClick: doSpaceRemove }, "Review and Remove"));
@@ -1151,29 +1117,29 @@ async function doSpaceRemove() {
   const { paths, bytes, items } = spaceSelTotals(); // de-duped, physical bytes
   if (!paths.length) return;
   const ok = await uiConfirm(
-    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?\n\nReversible — restore from the Trash. Protected system and personal folders are skipped automatically.`,
+    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?\n\nReversible — everything goes to the Trash, restore it anytime.`,
     { danger: true, okLabel: "Move to Trash" });
   if (!ok) return;
-  // Build reclaim items. Category LargeOldFile (NOT DevCache — that would trigger
-  // the user-data override); reclaim forces action=Trash + selected and re-checks
-  // the denylist, so protected paths are reported skipped, never trashed.
+  // Category DevCache so reclaim's user-data override lets explicit picks inside
+  // Documents/Desktop/etc. go to the Trash (the user asked for no protection).
+  // reclaim still forces action=Trash (reversible) and still refuses true system
+  // paths — which a home-rooted walk never reaches anyway.
   const items2 = paths.map((p) => ({
-    path: p, category: "LargeOldFile", size_bytes: (s.sel.get(p) || {}).bytes || 0,
+    path: p, category: "DevCache", size_bytes: (s.sel.get(p) || {}).bytes || 0,
     tier: "Review", reason: "Selected in Space Analyzer", selected: true, action: "Trash",
   }));
   s.phase = "reclaiming"; spaceView();
   try {
     s.report = await invoke("reclaim", { items: items2, extraRoots: [state.home] });
     // Freed = physical bytes of the items that actually trashed (outcomes with no
-    // error), so the completion total is consistent with the on-disk sizes shown
-    // during selection — not reclaim's own re-measured logical tally.
+    // error), consistent with the on-disk sizes shown during selection.
     const outs = s.report.outcomes || [];
     const okPaths = new Set(outs.filter((o) => !o.error).map((o) => o.path));
     s.freedBytes = outs.length
       ? paths.reduce((a, p) => a + (okPaths.has(p) ? (s.sel.get(p) || {}).bytes || 0 : 0), 0)
       : bytes;
     s.phase = "done";
-    s.cache = {}; s.sel.clear(); // sizes changed — refetch on return
+    s.sel.clear();
   } catch (e) { s.error = String(e); s.phase = "browse"; }
   spaceView();
 }
@@ -1185,10 +1151,10 @@ function spaceResult() {
     h("p", {}, `${fmtBytes(spaceState.freedBytes || 0)} moved to the Trash`
       + (r.succeeded != null ? ` · ${r.succeeded} item${r.succeeded === 1 ? "" : "s"}` : "")
       + (r.failed ? ` · ${r.failed} skipped` : "")));
-  const sb = skippedBox(r, "Skipped (protected, left untouched):");
+  const sb = skippedBox(r, "Skipped (left untouched):");
   if (sb) c.append(sb);
-  // Back to the scan landing — the user re-scans explicitly rather than auto-walking.
-  c.append(h("button", { class: "primary", onClick: () => { spaceState.phase = "idle"; spaceState.stack = []; spaceState.cache = {}; spaceView(); } }, "Done"));
+  // Back to the scan landing — the user re-scans explicitly.
+  c.append(h("button", { class: "primary", onClick: () => { spaceState.phase = "idle"; spaceState.root = null; spaceState.expanded = new Set(); spaceView(); } }, "Done"));
   return c;
 }
 
