@@ -50,11 +50,13 @@ fn build_fixture(root: &Path) {
 }
 
 fn assert_sorted_desc(node: &DirNode) {
+    // Children are sorted by physical alloc_bytes descending (the number callers
+    // display), with size_bytes only as a tiebreak.
     assert!(
         node.children
             .windows(2)
-            .all(|w| w[0].size_bytes >= w[1].size_bytes),
-        "children of {} not sorted descending",
+            .all(|w| w[0].alloc_bytes >= w[1].alloc_bytes),
+        "children of {} not sorted by alloc_bytes descending",
         node.path.display()
     );
     for child in &node.children {

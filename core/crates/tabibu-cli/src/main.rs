@@ -322,9 +322,11 @@ fn cmd_space(json: bool, path: String, depth: usize) -> i32 {
                 print_json(&serde_json::to_value(&node).unwrap_or(serde_json::Value::Null));
                 return 0;
             }
+            // Physical (du-style) size — what's actually on disk. Logical
+            // size_bytes is still in the --json output for callers that want it.
             println!(
                 "{:>9}  {}",
-                human_bytes(node.size_bytes),
+                human_bytes(node.alloc_bytes),
                 node.path.display()
             );
             print_tree(&node, 1);
@@ -356,7 +358,7 @@ fn print_tree(node: &tabibu_walk::DirNode, indent: usize) {
         };
         println!(
             "{:>9}  {}{}{}{}",
-            human_bytes(child.size_bytes),
+            human_bytes(child.alloc_bytes),
             "  ".repeat(indent),
             name,
             slash,

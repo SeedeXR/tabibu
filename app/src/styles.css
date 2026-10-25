@@ -238,6 +238,26 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .szbar { width: 72px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; flex: none; }
 .szbar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 
+/* ---------- Space Analyzer bubble map ---------- */
+.bubbles {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 14px; padding: 20px var(--space-xl) 10px;
+}
+.bubble {
+  box-sizing: border-box; border-radius: 50%; padding: 6px; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; color: #fff; line-height: 1.15;
+  background: radial-gradient(circle at 32% 26%,
+    hsl(var(--bh) 85% 74%), hsl(var(--bh) 70% 54%) 68%, hsl(var(--bh) 72% 45%));
+  box-shadow: 0 7px 20px -8px hsl(var(--bh) 60% 40% / 0.65), inset 0 1px 2px rgba(255,255,255,0.45);
+  transition: transform var(--dur-fast);
+}
+.bubble.drill { cursor: pointer; }
+.bubble.drill:hover { transform: scale(1.06); }
+.bubble.prot { filter: grayscale(0.55) brightness(0.82); }
+.bubble .bn { font-size: 11px; font-weight: 600; max-width: 94%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble .bs { font-size: 10px; opacity: 0.92; }
+
 /* ---------- Reclaim bar ---------- */
 .reclaim-bar {
   display: flex; align-items: center; gap: var(--space-m);

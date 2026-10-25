@@ -58,9 +58,19 @@ pub enum WalkError {
 pub struct DirNode {
     /// Path of this entry.
     pub path: PathBuf,
-    /// Total size in bytes. For directories this is the aggregate of all
-    /// descendants, including those pruned by `max_depth`.
+    /// Total LOGICAL size in bytes (sum of file `len()`). For directories this
+    /// is the aggregate of all descendants, including those pruned by
+    /// `max_depth`. Matches Finder's "Get Info" folder size, but can far exceed
+    /// real disk usage (sparse files, APFS clones, iCloud dataless placeholders
+    /// all report full length) — for "what's using my disk" use `alloc_bytes`.
     pub size_bytes: u64,
+    /// Total PHYSICAL size in bytes actually allocated on disk (sum of
+    /// `st_blocks * 512`), the `du`-style number. This is what a space/disk view
+    /// should show — it reflects real consumption and won't exceed the volume
+    /// (sparse/clone/dataless files allocate few or no blocks). Aggregated like
+    /// `size_bytes`. (Hardlinks are not de-duplicated, so it can still read a few
+    /// percent above `du` on hardlink-heavy trees.)
+    pub alloc_bytes: u64,
     /// Number of descendant entries (files + subdirectories) under this node,
     /// counting the whole subtree even where `max_depth` pruned the retained
     /// children. 0 for a file. Powers the "N items" counts in the UI and the
@@ -68,14 +78,16 @@ pub struct DirNode {
     pub count: u64,
     /// `true` if this node is a directory.
     pub is_dir: bool,
-    /// Child nodes, sorted by `size_bytes` descending. Empty for files,
-    /// for unreadable directories, and for directories beyond `max_depth`.
+    /// Child nodes, sorted by `alloc_bytes` (physical) descending — the order
+    /// callers display. Empty for files, unreadable directories, and directories
+    /// beyond `max_depth`.
     pub children: Vec<DirNode>,
 }
 
 /// Builds a size tree rooted at `root` using parallel traversal.
 ///
-/// Children of every directory are sorted by `size_bytes` descending.
+/// Children of every directory are sorted by `alloc_bytes` (physical, du-style)
+/// descending — the order callers display.
 /// `max_depth` bounds the depth of *retained* nodes, counting the root as
 /// depth 0: with `Some(0)` the root has no children, with `Some(1)` only
 /// the root's direct children are kept, and so on. Sizes beyond the cutoff
@@ -100,6 +112,7 @@ pub fn size_tree(
         return Ok(DirNode {
             path: root.to_path_buf(),
             size_bytes: meta.len(),
+            alloc_bytes: alloc_of(&meta),
             count: 0,
             is_dir: false,
             children: Vec::new(),
@@ -112,7 +125,14 @@ pub fn size_tree(
         path: root.to_path_buf(),
         source,
     })?;
-    build_children(root.to_path_buf(), entries, 0, max_depth, cancel)
+    build_children(
+        root.to_path_buf(),
+        alloc_of(&meta),
+        entries,
+        0,
+        max_depth,
+        cancel,
+    )
 }
 
 /// Returns the total size in bytes of everything under `root`.
@@ -125,6 +145,20 @@ pub fn size_tree(
 /// [`WalkError::Root`] if `root` itself cannot be read.
 pub fn dir_size(root: &Path, cancel: &CancelToken) -> Result<u64, WalkError> {
     size_tree(root, cancel, Some(0)).map(|node| node.size_bytes)
+}
+
+/// Physical bytes a file occupies on disk — `st_blocks` are 512-byte units, the
+/// `du`-style measure. Near-0 for sparse, APFS-cloned, or iCloud-dataless files
+/// whose `len()` reports full logical size, so summing this gives a disk total
+/// that reflects real consumption instead of exceeding the volume.
+#[cfg(unix)]
+fn alloc_of(meta: &Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.blocks().saturating_mul(512)
+}
+#[cfg(not(unix))]
+fn alloc_of(meta: &Metadata) -> u64 {
+    meta.len()
 }
 
 /// Reads a directory, returning the path and `symlink_metadata` of each
@@ -144,9 +178,12 @@ fn read_entries(dir: &Path) -> std::io::Result<Vec<(PathBuf, Metadata)>> {
 }
 
 /// Builds the [`DirNode`] for a directory at `depth` whose entries have
-/// already been read. Children are processed in parallel.
+/// already been read. `own_alloc` is the directory inode's own allocated bytes
+/// (so `alloc_bytes` counts the directory itself, like `du`, not just its
+/// contents). Children are processed in parallel.
 fn build_children(
     path: PathBuf,
+    own_alloc: u64,
     entries: Vec<(PathBuf, Metadata)>,
     depth: usize,
     max_depth: Option<usize>,
@@ -156,11 +193,12 @@ fn build_children(
         .into_par_iter()
         .map(|(child_path, meta)| {
             if meta.is_dir() {
-                build_dir(child_path, depth + 1, max_depth, cancel)
+                build_dir(child_path, alloc_of(&meta), depth + 1, max_depth, cancel)
             } else {
                 Ok(DirNode {
                     path: child_path,
                     size_bytes: meta.len(),
+                    alloc_bytes: alloc_of(&meta),
                     count: 0,
                     is_dir: false,
                     children: Vec::new(),
@@ -169,16 +207,26 @@ fn build_children(
         })
         .collect::<Result<Vec<_>, WalkError>>()?;
     let size_bytes = children.iter().map(|c| c.size_bytes).sum();
+    let alloc_bytes = own_alloc + children.iter().map(|c| c.alloc_bytes).sum::<u64>();
     // Every child is one entry; each adds its own subtree's entries too. Summed
     // before any `max_depth` pruning so the count reflects the whole subtree.
     let count = children.len() as u64 + children.iter().map(|c| c.count).sum::<u64>();
-    children.sort_unstable_by_key(|c| std::cmp::Reverse(c.size_bytes));
+    // Sort by PHYSICAL size — that's what callers display/scale on (the space
+    // view, treemap, bubbles, CLI tree), so rows stay largest-first by the number
+    // actually shown. Logical size breaks ties for a stable order.
+    children.sort_unstable_by_key(|c| {
+        (
+            std::cmp::Reverse(c.alloc_bytes),
+            std::cmp::Reverse(c.size_bytes),
+        )
+    });
     if max_depth.is_some_and(|m| depth >= m) {
         children.clear();
     }
     Ok(DirNode {
         path,
         size_bytes,
+        alloc_bytes,
         count,
         is_dir: true,
         children,
@@ -186,9 +234,11 @@ fn build_children(
 }
 
 /// Recursive worker for [`size_tree`] below the root: unreadable
-/// directories yield an empty node instead of an error.
+/// directories yield an empty node instead of an error. `own_alloc` is this
+/// directory inode's own allocated bytes, forwarded to [`build_children`].
 fn build_dir(
     path: PathBuf,
+    own_alloc: u64,
     depth: usize,
     max_depth: Option<usize>,
     cancel: &CancelToken,
@@ -197,7 +247,7 @@ fn build_dir(
         return Err(WalkError::Cancelled);
     }
     let entries = read_entries(&path).unwrap_or_default();
-    build_children(path, entries, depth, max_depth, cancel)
+    build_children(path, own_alloc, entries, depth, max_depth, cancel)
 }
 
 #[cfg(test)]
@@ -237,6 +287,13 @@ mod tests {
             node.children.iter().all(|c| c.count == 0),
             "files have no descendants"
         );
+        // alloc_bytes is st_blocks*512 (du-style) — block-aligned, the number a
+        // disk view should show instead of logical size_bytes.
+        assert_eq!(
+            node.alloc_bytes % 512,
+            0,
+            "allocated size is 512-block aligned"
+        );
     }
 
     #[test]
@@ -267,12 +324,14 @@ mod tests {
         let node = DirNode {
             path: PathBuf::from("/tmp/x"),
             size_bytes: 7,
+            alloc_bytes: 4096,
             count: 0,
             is_dir: true,
             children: Vec::new(),
         };
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains("\"size_bytes\":7"));
+        assert!(json.contains("\"alloc_bytes\":4096"));
         assert!(json.contains("\"count\":0"));
         assert!(json.contains("\"is_dir\":true"));
     }
