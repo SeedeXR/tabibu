@@ -12,17 +12,20 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, Vec2,
 };
 use tabibu_engine::{CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx};
+use tabibu_monitor::{Sampler, SystemSample, TopBy};
 use tabibu_walk::DirNode;
 
 // ---------------------------------------------------------------------------
@@ -214,6 +217,53 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// RAM is measured in BINARY (1 GiB = 1024³) but labelled in GB, so 16 GiB of
+/// physical memory reads "16 GB" (matches the webview build + Activity Monitor).
+/// Used for system memory and swap only — file/disk sizes stay decimal.
+fn fmt_ram(n: u64) -> String {
+    let mut v = n as f64;
+    if v < 1024.0 {
+        return format!("{n} B");
+    }
+    let units = ["KB", "MB", "GB", "TB"];
+    let mut i = 0;
+    loop {
+        v /= 1024.0;
+        if v < 1023.5 || i == units.len() - 1 {
+            break;
+        }
+        i += 1;
+    }
+    if v < 10.0 {
+        format!("{v:.1} {}", units[i])
+    } else {
+        format!("{v:.0} {}", units[i])
+    }
+}
+
+/// A circular progress ring (CPU dial): a faint full-circle track with a
+/// foreground arc covering `frac` of the circle, starting at 12 o'clock.
+fn draw_ring(ui: &egui::Ui, center: Pos2, radius: f32, frac: f32, color: Color32, track: Color32) {
+    let painter = ui.painter();
+    let thickness = 6.0_f32;
+    painter.circle_stroke(center, radius, Stroke::new(thickness, track));
+    let frac = frac.clamp(0.0, 1.0);
+    if frac <= 0.0 {
+        return;
+    }
+    let steps = (frac * 96.0).ceil().max(1.0) as usize;
+    let start = -std::f32::consts::FRAC_PI_2; // 12 o'clock
+    let mut pts = Vec::with_capacity(steps + 1);
+    for k in 0..=steps {
+        let t = start + (k as f32 / steps as f32) * frac * std::f32::consts::TAU;
+        pts.push(Pos2::new(
+            center.x + radius * t.cos(),
+            center.y + radius * t.sin(),
+        ));
+    }
+    painter.add(Shape::line(pts, Stroke::new(thickness, color)));
+}
+
 /// Safety-tier accent (green = safe, amber = review, red = risky) — matches the
 /// webview build's tier colouring in the Junk/Smart cleanup view.
 fn tier_color(t: SafetyTier) -> Color32 {
@@ -252,6 +302,32 @@ fn cat_label(c: Category) -> &'static str {
 enum View {
     Space,
     Junk,
+    Memory,
+}
+
+/// Live Memory & CPU monitor state. A background `Sampler` thread pushes a fresh
+/// `SystemSample` on an interval (CPU deltas need spaced refreshes — see
+/// `tabibu_monitor::Sampler`); the UI shows the latest + a short CPU history.
+struct MonitorState {
+    rx: Option<Receiver<SystemSample>>,
+    latest: Option<SystemSample>,
+    /// Shared with the sampler thread so the By CPU / By Memory toggle re-sorts
+    /// the top-process list at the source.
+    by_cpu: Arc<AtomicBool>,
+    cpu_hist: VecDeque<f32>,
+    started: bool,
+}
+
+impl Default for MonitorState {
+    fn default() -> Self {
+        Self {
+            rx: None,
+            latest: None,
+            by_cpu: Arc::new(AtomicBool::new(true)),
+            cpu_hist: VecDeque::new(),
+            started: false,
+        }
+    }
 }
 
 enum JunkPhase {
@@ -318,6 +394,7 @@ struct TabibuApp {
     scan_rx: Option<Receiver<Result<DirNode, String>>>,
     del_rx: Option<Receiver<(u64, usize)>>,
     junk: JunkState,
+    monitor: MonitorState,
 }
 
 impl Default for TabibuApp {
@@ -332,6 +409,7 @@ impl Default for TabibuApp {
             scan_rx: None,
             del_rx: None,
             junk: JunkState::default(),
+            monitor: MonitorState::default(),
         }
     }
 }
@@ -459,6 +537,34 @@ impl TabibuApp {
             let _ = tx.send((freed, n));
         });
     }
+
+    /// Start the live sampler thread once. It owns a long-lived `Sampler` (CPU
+    /// deltas need a persistent `System`) and pushes a sample every ~1.2 s; it
+    /// exits when the receiver is dropped (app close).
+    fn ensure_monitor(&mut self) {
+        if self.monitor.started {
+            return;
+        }
+        self.monitor.started = true;
+        let (tx, rx) = channel();
+        self.monitor.rx = Some(rx);
+        let by_cpu = self.monitor.by_cpu.clone();
+        thread::spawn(move || {
+            let mut sampler = Sampler::new();
+            loop {
+                let by = if by_cpu.load(Ordering::Relaxed) {
+                    TopBy::Cpu
+                } else {
+                    TopBy::Memory
+                };
+                let sample = sampler.sample(40, by);
+                if tx.send(sample).is_err() {
+                    break; // UI gone
+                }
+                thread::sleep(Duration::from_millis(1200));
+            }
+        });
+    }
 }
 
 /// Drop nested descendants of a selected folder: trashing the folder removes the
@@ -569,6 +675,21 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        // Drain live monitor samples (keep only the newest; track a short CPU
+        // history for the sparkline).
+        if let Some(rx) = &self.monitor.rx {
+            while let Ok(s) = rx.try_recv() {
+                self.monitor.cpu_hist.push_back(s.cpu_percent.min(100.0));
+                while self.monitor.cpu_hist.len() > 60 {
+                    self.monitor.cpu_hist.pop_front();
+                }
+                self.monitor.latest = Some(s);
+            }
+        }
+        if self.view == View::Memory {
+            self.ensure_monitor();
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -590,6 +711,9 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Junk", self.view == View::Junk) {
                     self.view = View::Junk;
                 }
+                if nav_item(ui, "Memory & CPU", self.view == View::Memory) {
+                    self.view = View::Memory;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -608,6 +732,7 @@ impl eframe::App for TabibuApp {
                 Phase::Browse => self.ui_tree(ui),
             },
             View::Junk => self.ui_junk(ui),
+            View::Memory => self.ui_memory(ui),
         });
     }
 }
@@ -892,6 +1017,149 @@ impl TabibuApp {
                 }
             });
         });
+    }
+
+    fn ui_memory(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        // Orange — matches the webview build's Memory & CPU accent.
+        let accent = Color32::from_rgb(0xf9, 0x73, 0x16);
+
+        let Some(s) = self.monitor.latest.clone() else {
+            self.ui_center(ui, "Sampling system activity…", true);
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Memory & CPU").size(16.0).strong());
+        });
+        ui.add_space(8.0);
+
+        // CPU dial + memory/swap stats.
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(130.0, 118.0), Sense::hover());
+            let center = Pos2::new(rect.center().x, rect.min.y + 50.0);
+            draw_ring(ui, center, 40.0, s.cpu_percent / 100.0, accent, p.track);
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                format!("{}%", s.cpu_percent.round() as i64),
+                FontId::proportional(20.0),
+                p.text,
+            );
+            ui.painter().text(
+                Pos2::new(center.x, rect.max.y - 4.0),
+                egui::Align2::CENTER_BOTTOM,
+                "CPU",
+                FontId::proportional(12.0),
+                p.text_dim,
+            );
+
+            ui.add_space(16.0);
+            let mem_frac = s.used_memory_bytes as f32 / s.total_memory_bytes.max(1) as f32;
+            ui.vertical(|ui| {
+                ui.add_space(20.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Memory  {} / {}",
+                        fmt_ram(s.used_memory_bytes),
+                        fmt_ram(s.total_memory_bytes)
+                    ))
+                    .strong(),
+                );
+                ui.add_space(6.0);
+                let (bar, _) = ui.allocate_exact_size(Vec2::new(360.0, 8.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(bar, CornerRadius::same(4), p.track);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        bar.min,
+                        Vec2::new(bar.width() * mem_frac.clamp(0.0, 1.0), bar.height()),
+                    ),
+                    CornerRadius::same(4),
+                    accent,
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(format!("Swap used  {}", fmt_ram(s.used_swap_bytes)))
+                        .color(p.text_dim),
+                );
+            });
+        });
+
+        // Live CPU history sparkline.
+        let hist: Vec<f32> = self.monitor.cpu_hist.iter().copied().collect();
+        if hist.len() >= 2 {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let w = (ui.available_width() - 8.0).max(60.0);
+                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(strip, CornerRadius::same(4), p.bg_elev);
+                let dx = strip.width() / (hist.len() as f32 - 1.0);
+                let pts: Vec<Pos2> = hist
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        Pos2::new(
+                            strip.min.x + i as f32 * dx,
+                            strip.max.y - (v / 100.0).clamp(0.0, 1.0) * strip.height(),
+                        )
+                    })
+                    .collect();
+                ui.painter()
+                    .add(Shape::line(pts, Stroke::new(1.5_f32, accent)));
+            });
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+
+        // Top processes + sort toggle.
+        let by_cpu = self.monitor.by_cpu.load(Ordering::Relaxed);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Top processes").strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                if ui.selectable_label(!by_cpu, "By Memory").clicked() {
+                    self.monitor.by_cpu.store(false, Ordering::Relaxed);
+                }
+                if ui.selectable_label(by_cpu, "By CPU").clicked() {
+                    self.monitor.by_cpu.store(true, Ordering::Relaxed);
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for proc in &s.top_processes {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(proc.name.as_str());
+                        if proc.is_translated == Some(true) {
+                            ui.label(RichText::new("Rosetta").size(10.0).color(accent));
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(fmt_bytes(proc.memory_bytes))
+                                    .monospace()
+                                    .color(p.text_dim),
+                            );
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new(format!("{}%", proc.cpu_percent.round() as i64))
+                                    .monospace(),
+                            );
+                        });
+                    });
+                }
+            });
     }
 
     fn ui_tree(&mut self, ui: &mut egui::Ui) {
@@ -1185,9 +1453,13 @@ fn main() -> eframe::Result<()> {
             }
             // Test seam: `TABIBU_VIEW=junk` opens the Junk view and kicks off a
             // scan (for headless screenshots of the cleanup UI).
-            if std::env::var("TABIBU_VIEW").as_deref() == Ok("junk") {
-                app.view = View::Junk;
-                app.start_junk_scan();
+            match std::env::var("TABIBU_VIEW").as_deref() {
+                Ok("junk") => {
+                    app.view = View::Junk;
+                    app.start_junk_scan();
+                }
+                Ok("memory") => app.view = View::Memory,
+                _ => {}
             }
             Ok(Box::new(app))
         }),

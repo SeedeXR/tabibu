@@ -3531,6 +3531,7 @@ dependencies = [
  "eframe",
  "tabibu-engine",
  "tabibu-junk",
+ "tabibu-monitor",
  "tabibu-sys",
  "tabibu-walk",
 ]
