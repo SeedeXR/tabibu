@@ -579,7 +579,7 @@ impl TabibuApp {
                     let indent = 16.0;
                     let left = rect.min.x + 14.0;
                     let col = |j: usize| left + (j as f32) * indent + 7.0;
-                    let gst = Stroke::new(1.0, p.border);
+                    let gst = Stroke::new(1.0_f32, p.border);
                     if r.depth >= 1 {
                         // vertical lines for ancestors (above the immediate parent)
                         // that still have following siblings
