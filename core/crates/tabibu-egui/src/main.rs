@@ -547,6 +547,35 @@ fn cleanup_review_ui(
     action
 }
 
+/// A labelled ring "card" for the Dashboard: title above, a progress ring with a
+/// big value centred, and a sublabel below.
+fn ring_card(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    title: &str,
+    frac: f32,
+    big: &str,
+    sub: &str,
+    color: Color32,
+) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new(title).color(p.text_dim).size(12.0));
+        ui.add_space(4.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, 120.0), Sense::hover());
+        let c = rect.center();
+        draw_ring(ui, c, 46.0, frac, color, p.track);
+        ui.painter().text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            big,
+            FontId::proportional(22.0),
+            p.text,
+        );
+        ui.add_space(4.0);
+        ui.label(RichText::new(sub).color(p.text_dim).size(11.0));
+    });
+}
+
 /// An app bundle's display name: the file stem without the `.app` extension.
 fn app_display_name(app: &Path) -> String {
     app.file_stem()
@@ -573,6 +602,8 @@ fn docker_kind_label(kind: &str) -> &str {
 /// progresses (Dashboard, Duplicates, …).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Dash,
+    Smart,
     Space,
     Junk,
     Large,
@@ -814,6 +845,7 @@ struct TabibuApp {
     large: JunkState,
     security: JunkState,
     dev: JunkState,
+    smart: JunkState,
     monitor: MonitorState,
     dupes: DupesState,
     net: NetState,
@@ -830,7 +862,7 @@ impl Default for TabibuApp {
     fn default() -> Self {
         Self {
             dark: true,
-            view: View::Space,
+            view: View::Dash,
             phase: Phase::Idle,
             root: None,
             expanded: HashSet::new(),
@@ -841,6 +873,7 @@ impl Default for TabibuApp {
             large: JunkState::default(),
             security: JunkState::default(),
             dev: JunkState::default(),
+            smart: JunkState::default(),
             monitor: MonitorState::default(),
             dupes: DupesState::default(),
             net: NetState::default(),
@@ -1015,6 +1048,54 @@ impl TabibuApp {
         self.large.del_rx = Some(rx);
         thread::spawn(move || {
             let ctx = tabibu_sys::default_scan_ctx(&[]);
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
+            let _ = tx.send((freed, n));
+        });
+    }
+
+    /// Smart Scan: junk + malware scanners together (allowed-roots = `/`), one
+    /// combined review. The deep "one scan across everything" entry point.
+    fn start_smart_scan(&mut self) {
+        self.smart.phase = JunkPhase::Scanning;
+        self.smart.items.clear();
+        let (tx, rx) = channel();
+        self.smart.scan_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = reclaim_anywhere_ctx();
+            let cancel = CancelToken::new();
+            let scanners: Vec<Box<dyn Scanner>> = tabibu_junk::scanners()
+                .into_iter()
+                .chain(tabibu_malware::scanners())
+                .collect();
+            let collected: Mutex<Vec<CleanupItem>> = Mutex::new(Vec::new());
+            let _ = tabibu_engine::smart_scan(&scanners, &ctx, &cancel, &|it| {
+                collected.lock().expect("smart sink poisoned").push(it);
+            });
+            let mut items = collected.into_inner().expect("smart sink poisoned");
+            items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+            let _ = tx.send(items);
+        });
+    }
+
+    fn start_smart_delete(&mut self) {
+        let items: Vec<CleanupItem> = self
+            .smart
+            .items
+            .iter()
+            .filter(|i| i.selected)
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.smart.phase = JunkPhase::Deleting;
+        let (tx, rx) = channel();
+        self.smart.del_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = reclaim_anywhere_ctx();
             let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
                 .map(|r| r.reclaimed_bytes)
                 .unwrap_or(0);
@@ -1509,6 +1590,23 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(rx) = &self.smart.scan_rx {
+            if let Ok(items) = rx.try_recv() {
+                self.smart.scan_rx = None;
+                self.smart.items = items;
+                self.smart.phase = JunkPhase::Review;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.smart.del_rx {
+            if let Ok((freed, items)) = rx.try_recv() {
+                self.smart.del_rx = None;
+                self.smart.phase = JunkPhase::Done { freed, items };
+            } else {
+                ctx.request_repaint();
+            }
+        }
         if let Some(rx) = &self.security.scan_rx {
             if let Ok(items) = rx.try_recv() {
                 self.security.scan_rx = None;
@@ -1564,6 +1662,11 @@ impl eframe::App for TabibuApp {
         }
         if self.view == View::Memory {
             self.ensure_monitor();
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        if self.view == View::Dash {
+            self.ensure_monitor();
+            self.ensure_disk();
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         if let Some(rx) = &self.dupes.scan_rx {
@@ -1725,6 +1828,12 @@ impl eframe::App for TabibuApp {
                 ui.add_space(6.0);
                 ui.label(RichText::new("Tabibu").size(18.0).strong());
                 ui.add_space(14.0);
+                if nav_item(ui, "Dashboard", self.view == View::Dash) {
+                    self.view = View::Dash;
+                }
+                if nav_item(ui, "Smart Scan", self.view == View::Smart) {
+                    self.view = View::Smart;
+                }
                 if nav_item(ui, "Space Analyzer", self.view == View::Space) {
                     self.view = View::Space;
                 }
@@ -1776,6 +1885,8 @@ impl eframe::App for TabibuApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
+            View::Dash => self.ui_dash(ui),
+            View::Smart => self.ui_smart(ui),
             View::Space => match &self.phase {
                 Phase::Idle => self.ui_landing(ui),
                 Phase::Scanning => self.ui_center(ui, "Measuring your whole disk…", true),
@@ -2323,6 +2434,152 @@ impl TabibuApp {
                 );
             });
         });
+    }
+
+    fn ui_dash(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Dashboard").size(16.0).strong());
+            ui.label(RichText::new("· system health at a glance").color(p.text_dim));
+        });
+        ui.add_space(14.0);
+
+        let cpu = self.monitor.latest.as_ref().map_or(0.0, |s| s.cpu_percent);
+        let (mu, mt) = self
+            .monitor
+            .latest
+            .as_ref()
+            .map_or((0, 0), |s| (s.used_memory_bytes, s.total_memory_bytes));
+        let mem_frac = if mt > 0 { mu as f32 / mt as f32 } else { 0.0 };
+        let (du, dt, dfree) = self.disk.data.map_or((0, 0, 0), |d| {
+            (
+                d.total_bytes.saturating_sub(d.available_bytes),
+                d.total_bytes,
+                d.available_bytes,
+            )
+        });
+        let disk_frac = if dt > 0 { du as f32 / dt as f32 } else { 0.0 };
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ring_card(
+                ui,
+                &p,
+                "CPU",
+                cpu / 100.0,
+                &format!("{}%", cpu.round() as i64),
+                "live",
+                Color32::from_rgb(0xf9, 0x73, 0x16),
+            );
+            ui.add_space(20.0);
+            ring_card(
+                ui,
+                &p,
+                "Memory",
+                mem_frac,
+                &format!("{}%", (mem_frac * 100.0).round() as i64),
+                &format!("{} / {}", fmt_ram(mu), fmt_ram(mt)),
+                Color32::from_rgb(0x10, 0xb9, 0x81),
+            );
+            ui.add_space(20.0);
+            ring_card(
+                ui,
+                &p,
+                "Disk",
+                disk_frac,
+                &format!("{}%", (disk_frac * 100.0).round() as i64),
+                &format!("{} free", fmt_bytes(dfree)),
+                Color32::from_rgb(0xa8, 0x55, 0xf7),
+            );
+        });
+
+        // Live CPU history.
+        let hist: Vec<f32> = self.monitor.cpu_hist.iter().copied().collect();
+        if hist.len() >= 2 {
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let w = (ui.available_width() - 8.0).max(60.0);
+                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 56.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(strip, CornerRadius::same(8), p.bg_elev);
+                draw_sparkline(ui, strip, &hist, 100.0, Color32::from_rgb(0xf9, 0x73, 0x16));
+            });
+        }
+
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Run a Smart Scan to find reclaimable space across your Mac.")
+                    .color(p.text_dim),
+            );
+        });
+    }
+
+    fn ui_smart(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x8b, 0x5c, 0xf6); // violet — webview smart accent
+        match &self.smart.phase {
+            JunkPhase::Idle => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(RichText::new("Smart Scan").size(26.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "One deep scan across caches, temporary files, logs, large & old \
+                             files and threats. Nothing is removed until you review and choose — \
+                             everything goes to the Trash, reversible.",
+                        )
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(20.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Scan").size(15.0).color(Color32::WHITE),
+                            )
+                            .fill(accent),
+                        )
+                        .clicked()
+                    {
+                        self.start_smart_scan();
+                    }
+                });
+            }
+            JunkPhase::Scanning => self.ui_center(ui, "Running a full smart scan…", true),
+            JunkPhase::Deleting => self.ui_center(ui, "Moving selected items to the Trash…", true),
+            JunkPhase::Done { freed, items } => {
+                let (freed, items) = (*freed, *items);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} moved to the Trash · {items} item(s)",
+                            fmt_bytes(freed)
+                        ))
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(16.0);
+                    if ui.button("Rescan").clicked() {
+                        self.start_smart_scan();
+                    }
+                });
+            }
+            JunkPhase::Review => {
+                let act = cleanup_review_ui(ui, self.dark, "Smart Scan", &mut self.smart.items);
+                if act.rescan {
+                    self.start_smart_scan();
+                }
+                if act.trash {
+                    self.start_smart_delete();
+                }
+            }
+        }
     }
 
     fn ui_uninstall(&mut self, ui: &mut egui::Ui) {
@@ -3471,6 +3728,11 @@ fn main() -> eframe::Result<()> {
             // Test seam: `TABIBU_VIEW=junk` opens the Junk view and kicks off a
             // scan (for headless screenshots of the cleanup UI).
             match std::env::var("TABIBU_VIEW").as_deref() {
+                Ok("dash") => app.view = View::Dash,
+                Ok("smart") => {
+                    app.view = View::Smart;
+                    app.start_smart_scan();
+                }
                 Ok("junk") => {
                     app.view = View::Junk;
                     app.start_junk_scan();
