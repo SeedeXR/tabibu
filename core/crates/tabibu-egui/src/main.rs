@@ -547,6 +547,13 @@ fn cleanup_review_ui(
     action
 }
 
+/// An app bundle's display name: the file stem without the `.app` extension.
+fn app_display_name(app: &Path) -> String {
+    app.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| app.to_string_lossy().into_owned())
+}
+
 /// Human label for a `docker system df` artifact kind.
 fn docker_kind_label(kind: &str) -> &str {
     match kind {
@@ -580,6 +587,8 @@ enum View {
     Disk,
     Universal,
     Brew,
+    Uninstall,
+    Settings,
 }
 
 enum ConnPhase {
@@ -667,6 +676,18 @@ struct BrewState {
     rx: Option<Receiver<Option<tabibu_brew::Report>>>,
     started: bool,
     loaded: bool,
+}
+
+/// Installed-apps list + per-app uninstall (app bundle + leftovers → Trash).
+#[derive(Default)]
+struct UninstallState {
+    apps: Vec<(PathBuf, String)>, // (app path, bundle id)
+    rx: Option<Receiver<Vec<(PathBuf, String)>>>,
+    started: bool,
+    loaded: bool,
+    busy: Option<PathBuf>,
+    action_rx: Option<Receiver<(String, u64, usize)>>, // (name, freed, item count)
+    last: Option<(String, u64, usize)>,
 }
 
 enum DupePhase {
@@ -802,6 +823,7 @@ struct TabibuApp {
     disk: DiskState,
     universal: UniversalState,
     brew: BrewState,
+    uninstall: UninstallState,
 }
 
 impl Default for TabibuApp {
@@ -828,6 +850,7 @@ impl Default for TabibuApp {
             disk: DiskState::default(),
             universal: UniversalState::default(),
             brew: BrewState::default(),
+            uninstall: UninstallState::default(),
         }
     }
 }
@@ -1261,6 +1284,62 @@ impl TabibuApp {
         });
     }
 
+    /// Load the installed-apps list once (/Applications + ~/Applications).
+    fn ensure_uninstall(&mut self) {
+        if self.uninstall.started {
+            return;
+        }
+        self.uninstall.started = true;
+        let (tx, rx) = channel();
+        self.uninstall.rx = Some(rx);
+        thread::spawn(move || {
+            let home = tabibu_sys::home_dir();
+            let roots = vec![PathBuf::from("/Applications"), home.join("Applications")];
+            let mut apps = tabibu_uninstall::installed_apps(&roots);
+            apps.sort_by(|a, b| {
+                app_display_name(&a.0)
+                    .to_lowercase()
+                    .cmp(&app_display_name(&b.0).to_lowercase())
+            });
+            let _ = tx.send(apps);
+        });
+    }
+
+    /// Uninstall one app: move its bundle + leftover support files to the Trash
+    /// (reversible). Finds leftovers via tabibu_uninstall::find_remnants.
+    fn uninstall_app(&mut self, app: PathBuf, bundle_id: String) {
+        if self.uninstall.busy.is_some() {
+            return;
+        }
+        self.uninstall.busy = Some(app.clone());
+        let (tx, rx) = channel();
+        self.uninstall.action_rx = Some(rx);
+        thread::spawn(move || {
+            let name = app_display_name(&app);
+            let ctx = reclaim_anywhere_ctx();
+            let mut items: Vec<CleanupItem> = Vec::new();
+            let mut app_item = CleanupItem::new(
+                app.clone(),
+                Category::UnusedApp,
+                0,
+                SafetyTier::Review,
+                "Application bundle",
+            );
+            app_item.action = ReclaimAction::Trash;
+            items.push(app_item);
+            items.extend(tabibu_uninstall::find_remnants(&bundle_id, &name, &ctx));
+            for it in &mut items {
+                it.selected = true;
+                it.action = ReclaimAction::Trash;
+            }
+            let count = items.len();
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
+            let _ = tx.send((name, freed, count));
+        });
+    }
+
     /// Scan universal binaries once (/Applications + ~/Applications), off-thread.
     fn ensure_universal(&mut self) {
         if self.universal.started {
@@ -1607,6 +1686,30 @@ impl eframe::App for TabibuApp {
         if self.view == View::Brew {
             self.ensure_brew();
         }
+        if let Some(rx) = &self.uninstall.rx {
+            if let Ok(apps) = rx.try_recv() {
+                self.uninstall.rx = None;
+                self.uninstall.apps = apps;
+                self.uninstall.loaded = true;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.uninstall.action_rx {
+            if let Ok(res) = rx.try_recv() {
+                self.uninstall.action_rx = None;
+                self.uninstall.busy = None;
+                self.uninstall.last = Some(res);
+                // Refresh the app list now that one is gone.
+                self.uninstall.started = false;
+                self.uninstall.loaded = false;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.view == View::Uninstall {
+            self.ensure_uninstall();
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -1664,6 +1767,12 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Developer / CLI", self.view == View::Brew) {
                     self.view = View::Brew;
                 }
+                if nav_item(ui, "Uninstaller", self.view == View::Uninstall) {
+                    self.view = View::Uninstall;
+                }
+                if nav_item(ui, "Settings", self.view == View::Settings) {
+                    self.view = View::Settings;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -1694,6 +1803,8 @@ impl eframe::App for TabibuApp {
             View::Disk => self.ui_disk(ui),
             View::Universal => self.ui_universal(ui),
             View::Brew => self.ui_brew(ui),
+            View::Uninstall => self.ui_uninstall(ui),
+            View::Settings => self.ui_settings(ui),
         });
     }
 }
@@ -2212,6 +2323,123 @@ impl TabibuApp {
                 );
             });
         });
+    }
+
+    fn ui_uninstall(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x63, 0x66, 0xf1); // indigo
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Uninstaller").size(16.0).strong());
+            if self.uninstall.loaded {
+                ui.label(
+                    RichText::new(format!("· {} apps", self.uninstall.apps.len()))
+                        .color(p.text_dim),
+                );
+            }
+        });
+        ui.add_space(6.0);
+        if let Some((name, freed, count)) = self.uninstall.last.clone() {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Removed {name} — {} to the Trash · {count} item(s)",
+                        fmt_bytes(freed)
+                    ))
+                    .color(accent),
+                );
+            });
+        }
+        ui.separator();
+
+        if !self.uninstall.loaded {
+            self.ui_center(ui, "Finding installed apps…", true);
+            return;
+        }
+
+        let mut to_remove: Option<(PathBuf, String)> = None;
+        let busy = self.uninstall.busy.clone();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (path, bundle) in &self.uninstall.apps {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                        draw_file(ui, icon, p.text_faint);
+                        ui.label(app_display_name(path));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            let this_busy = busy.as_deref() == Some(path.as_path());
+                            let enabled = busy.is_none();
+                            let label = if this_busy {
+                                "Removing…"
+                            } else {
+                                "Uninstall"
+                            };
+                            let btn = egui::Button::new(RichText::new(label).color(Color32::WHITE))
+                                .fill(if enabled {
+                                    Color32::from_rgb(0xdc, 0x26, 0x26)
+                                } else {
+                                    p.text_faint
+                                });
+                            if ui.add_enabled(enabled, btn).clicked() {
+                                to_remove = Some((path.clone(), bundle.clone()));
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text(path.to_string_lossy().into_owned());
+                }
+            });
+
+        if let Some((path, bundle)) = to_remove {
+            self.uninstall_app(path, bundle);
+        }
+    }
+
+    fn ui_settings(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Settings").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Appearance").strong());
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let mut dark = self.dark;
+            if ui.checkbox(&mut dark, "Dark mode").changed() {
+                self.dark = dark;
+                apply_theme(ui.ctx(), self.dark);
+            }
+        });
+
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("About").strong());
+        });
+        ui.add_space(4.0);
+        for line in [
+            format!("Tabibu {}", env!("CARGO_PKG_VERSION")),
+            "Native egui build — the Rust core, called directly (no webview, no IPC).".to_string(),
+        ] {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.label(RichText::new(line).color(p.text_dim));
+            });
+            ui.add_space(2.0);
+        }
     }
 
     fn ui_universal(&mut self, ui: &mut egui::Ui) {
@@ -3266,6 +3494,8 @@ fn main() -> eframe::Result<()> {
                 Ok("disk") => app.view = View::Disk,
                 Ok("universal") => app.view = View::Universal,
                 Ok("brew") => app.view = View::Brew,
+                Ok("uninstall") => app.view = View::Uninstall,
+                Ok("settings") => app.view = View::Settings,
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();
