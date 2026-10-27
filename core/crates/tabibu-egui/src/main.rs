@@ -489,6 +489,8 @@ enum View {
     Memory,
     Dupes,
     Net,
+    Battery,
+    Startup,
 }
 
 enum ConnPhase {
@@ -525,6 +527,22 @@ impl Default for NetState {
             conn_rx: None,
         }
     }
+}
+
+/// One-shot loaded Battery info (fetched off-thread so pmset/ioreg don't hang UI).
+#[derive(Default)]
+struct BatteryState {
+    data: Option<tabibu_sys::BatteryInfo>,
+    rx: Option<Receiver<tabibu_sys::BatteryInfo>>,
+    started: bool,
+}
+
+/// One-shot loaded Startup (login) items.
+#[derive(Default)]
+struct StartupState {
+    data: Option<tabibu_sys::StartupReport>,
+    rx: Option<Receiver<tabibu_sys::StartupReport>>,
+    started: bool,
 }
 
 enum DupePhase {
@@ -653,6 +671,8 @@ struct TabibuApp {
     monitor: MonitorState,
     dupes: DupesState,
     net: NetState,
+    battery: BatteryState,
+    startup: StartupState,
 }
 
 impl Default for TabibuApp {
@@ -672,6 +692,8 @@ impl Default for TabibuApp {
             monitor: MonitorState::default(),
             dupes: DupesState::default(),
             net: NetState::default(),
+            battery: BatteryState::default(),
+            startup: StartupState::default(),
         }
     }
 }
@@ -1011,6 +1033,32 @@ impl TabibuApp {
             let _ = tx.send(tabibu_net::connection_test("1.1.1.1"));
         });
     }
+
+    /// Load battery info once (pmset/ioreg off the UI thread).
+    fn ensure_battery(&mut self) {
+        if self.battery.started {
+            return;
+        }
+        self.battery.started = true;
+        let (tx, rx) = channel();
+        self.battery.rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(tabibu_sys::battery_info());
+        });
+    }
+
+    /// Load login/startup items once (reads launchd dirs off the UI thread).
+    fn ensure_startup(&mut self) {
+        if self.startup.started {
+            return;
+        }
+        self.startup.started = true;
+        let (tx, rx) = channel();
+        self.startup.rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(tabibu_sys::startup_items());
+        });
+    }
 }
 
 /// Drop nested descendants of a selected folder: trashing the folder removes the
@@ -1229,6 +1277,28 @@ impl eframe::App for TabibuApp {
             self.ensure_net();
             ctx.request_repaint_after(Duration::from_millis(700));
         }
+        if let Some(rx) = &self.battery.rx {
+            if let Ok(b) = rx.try_recv() {
+                self.battery.rx = None;
+                self.battery.data = Some(b);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.startup.rx {
+            if let Ok(s) = rx.try_recv() {
+                self.startup.rx = None;
+                self.startup.data = Some(s);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.view == View::Battery {
+            self.ensure_battery();
+        }
+        if self.view == View::Startup {
+            self.ensure_startup();
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -1265,6 +1335,12 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Network", self.view == View::Net) {
                     self.view = View::Net;
                 }
+                if nav_item(ui, "Battery", self.view == View::Battery) {
+                    self.view = View::Battery;
+                }
+                if nav_item(ui, "Startup", self.view == View::Startup) {
+                    self.view = View::Startup;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -1288,6 +1364,8 @@ impl eframe::App for TabibuApp {
             View::Memory => self.ui_memory(ui),
             View::Dupes => self.ui_dupes(ui),
             View::Net => self.ui_net(ui),
+            View::Battery => self.ui_battery(ui),
+            View::Startup => self.ui_startup(ui),
         });
     }
 }
@@ -1549,6 +1627,147 @@ impl TabibuApp {
                 }
             }
         }
+    }
+
+    fn ui_battery(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x22, 0xc5, 0x5e); // green — webview battery accent
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Battery").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+
+        let Some(b) = self.battery.data.clone() else {
+            self.ui_center(ui, "Reading battery…", true);
+            return;
+        };
+        if !b.has_battery {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("This Mac has no battery.").color(p.text_dim));
+            });
+            return;
+        }
+
+        let dash = || "—".to_string();
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(130.0, 118.0), Sense::hover());
+            let center = Pos2::new(rect.center().x, rect.min.y + 50.0);
+            let frac = b.charge_percent.unwrap_or(0) as f32 / 100.0;
+            draw_ring(ui, center, 40.0, frac, accent, p.track);
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                b.charge_percent.map_or_else(dash, |c| format!("{c}%")),
+                FontId::proportional(20.0),
+                p.text,
+            );
+            ui.painter().text(
+                Pos2::new(center.x, rect.max.y - 4.0),
+                egui::Align2::CENTER_BOTTOM,
+                b.state.clone().unwrap_or_default(),
+                FontId::proportional(12.0),
+                p.text_dim,
+            );
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.add_space(14.0);
+                let rows = [
+                    (
+                        "Health",
+                        b.health_percent.map_or_else(dash, |h| format!("{h}%")),
+                    ),
+                    (
+                        "Cycle count",
+                        b.cycle_count.map_or_else(dash, |c| c.to_string()),
+                    ),
+                    ("Condition", b.condition.clone().unwrap_or_else(dash)),
+                    (
+                        "Time remaining",
+                        b.time_remaining.clone().unwrap_or_else(dash),
+                    ),
+                ];
+                for (k, v) in rows {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(k).color(p.text_dim));
+                        ui.add_space(12.0);
+                        ui.label(v);
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        });
+    }
+
+    fn ui_startup(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Startup Items").size(16.0).strong());
+        });
+        ui.add_space(6.0);
+        ui.separator();
+
+        let Some(rep) = self.startup.data.clone() else {
+            self.ui_center(ui, "Reading login items…", true);
+            return;
+        };
+        if rep.partial {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Some system items need Full Disk Access to read.")
+                        .color(tier_color(SafetyTier::Review)),
+                );
+            });
+        }
+        if rep.items.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("No login items found.").color(p.text_dim));
+            });
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let mut scopes: Vec<&str> = Vec::new();
+                for it in &rep.items {
+                    if !scopes.contains(&it.scope.as_str()) {
+                        scopes.push(it.scope.as_str());
+                    }
+                }
+                for scope in scopes {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(scope).strong());
+                    });
+                    for it in rep.items.iter().filter(|i| i.scope == scope) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(24.0);
+                            ui.label(it.label.as_str());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(it.program.as_str())
+                                            .color(p.text_dim)
+                                            .monospace(),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        })
+                        .response
+                        .on_hover_text(it.path.clone());
+                    }
+                }
+            });
     }
 
     fn ui_memory(&mut self, ui: &mut egui::Ui) {
@@ -2346,6 +2565,8 @@ fn main() -> eframe::Result<()> {
                     app.view = View::Security;
                     app.start_security_scan();
                 }
+                Ok("battery") => app.view = View::Battery,
+                Ok("startup") => app.view = View::Startup,
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();
