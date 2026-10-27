@@ -846,6 +846,11 @@ fn junk_ctx() -> ScanCtx {
     // module cache — reclaim permits exactly these, matching the app ctx.
     roots.extend(tabibu_junk::app_support_cache_roots(&home));
     roots.push(home.join("go/pkg/mod"));
+    // System-wide caches + logs (user-owned entries only) that the system cache /
+    // log scanners surface — reclaim permits exactly these roots.
+    roots.push(std::path::PathBuf::from("/Library/Caches"));
+    roots.push(std::path::PathBuf::from("/Library/Logs"));
+    roots.push(std::path::PathBuf::from("/private/var/log"));
     ScanCtx {
         home,
         allowed_roots: roots,

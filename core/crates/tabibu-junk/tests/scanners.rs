@@ -10,8 +10,8 @@ use tabibu_engine::{
     CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx, ScanError, Scanner,
 };
 use tabibu_junk::{
-    empty_trash_dirs, scanners, trash_total_size, DevCacheScanner, LogScanner, TempScanner,
-    TrashScanner, UserCacheScanner,
+    empty_trash_dirs, scanners, trash_total_size, DevCacheScanner, LogScanner, SystemCacheScanner,
+    TempScanner, TrashScanner, UserCacheScanner,
 };
 
 fn make_ctx(home: &Path) -> ScanCtx {
@@ -392,6 +392,31 @@ fn log_emits_individual_stale_files_never_directories() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn system_cache_reports_user_owned_dirs_as_review() {
+    let home = tempfile::tempdir().unwrap();
+    let caches = tempfile::tempdir().unwrap(); // stands in for /Library/Caches
+    write_file(&caches.path().join("com.foo.app/blob"), b"12345678"); // 8 B
+    write_file(&caches.path().join("com.bar.app/data"), b"123"); // 3 B
+    write_file(&caches.path().join("loose.txt"), b"x"); // a file, not a dir → ignored
+
+    let ctx = make_ctx(home.path());
+    let scanner = SystemCacheScanner::with_root(caches.path().to_path_buf());
+    let items = run(&scanner, &ctx);
+
+    assert_eq!(items.len(), 2, "only the two user-owned cache DIRS");
+    assert!(items.iter().all(|i| i.category == Category::UserCache));
+    assert!(
+        items.iter().all(|i| i.tier == SafetyTier::Review),
+        "system cache is Review (shared/system location)"
+    );
+    let foo = items
+        .iter()
+        .find(|i| i.path.ends_with("com.foo.app"))
+        .expect("com.foo.app emitted");
+    assert_eq!(foo.size_bytes, 8);
+}
+
+#[test]
 fn registry_exposes_all_scanners() {
     let ids: Vec<&str> = scanners().iter().map(|s| s.id()).collect();
     assert_eq!(
@@ -401,6 +426,7 @@ fn registry_exposes_all_scanners() {
             "user_cache",
             "container_cache",
             "app_support_cache",
+            "system_cache",
             "dev_cache",
             "temp",
             "log",

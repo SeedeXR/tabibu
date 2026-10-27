@@ -209,6 +209,11 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     // permits those and nothing else under Application Support / ~/go.
     allowed_roots.extend(tabibu_junk::app_support_cache_roots(&home));
     allowed_roots.push(home.join("go/pkg/mod"));
+    // System-wide caches + logs that SystemCacheScanner / LogScanner surface
+    // (user-owned entries only); reclaim permits exactly these roots.
+    allowed_roots.push(PathBuf::from("/Library/Caches"));
+    allowed_roots.push(PathBuf::from("/Library/Logs"));
+    allowed_roots.push(PathBuf::from("/private/var/log"));
     allowed_roots.extend(extra_roots.iter().map(PathBuf::from));
 
     ScanCtx {

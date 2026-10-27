@@ -100,6 +100,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(UserCacheScanner),
         Box::new(ContainerCacheScanner),
         Box::new(AppSupportCacheScanner),
+        Box::new(SystemCacheScanner::new()),
         Box::new(DevCacheScanner),
         Box::new(TempScanner::new()),
         Box::new(LogScanner),
@@ -1025,6 +1026,97 @@ fn scan_temp_dir(
 }
 
 // ---------------------------------------------------------------------------
+// SystemCacheScanner — system-wide app caches under /Library/Caches
+// ---------------------------------------------------------------------------
+
+/// Sweeps `/Library/Caches` (system-wide app caches, distinct from the per-user
+/// `~/Library/Caches` that [`UserCacheScanner`] covers). Only entries OWNED BY
+/// THE USER are offered — root-owned system caches couldn't be trashed anyway and
+/// listing them would be noise. All `Review` tier (shared/system location). macOS
+/// seals `/System/Library/Caches`, so that is intentionally not scanned.
+pub struct SystemCacheScanner {
+    root: PathBuf,
+}
+
+impl Default for SystemCacheScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SystemCacheScanner {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            root: PathBuf::from("/Library/Caches"),
+        }
+    }
+    /// Test-only: scan an explicit root instead of `/Library/Caches`.
+    #[must_use]
+    pub fn with_root(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
+impl Scanner for SystemCacheScanner {
+    fn id(&self) -> &'static str {
+        "system_cache"
+    }
+
+    fn scan(
+        &self,
+        ctx: &ScanCtx,
+        cancel: &CancelToken,
+        sink: &mut dyn FnMut(CleanupItem),
+    ) -> Result<(), ScanError> {
+        use std::os::unix::fs::MetadataExt;
+        if cancel.is_cancelled() {
+            return Err(ScanError::Cancelled);
+        }
+        // Only offer caches the user owns (removable); skip entirely if the home
+        // uid can't be read.
+        let Some(uid) = fs::metadata(&ctx.home).ok().map(|m| m.uid()) else {
+            return Ok(());
+        };
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return Ok(());
+        };
+        // Phase 1: user-owned cache dirs (cheap, no sizing yet).
+        let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+        for entry in entries.flatten() {
+            if cancel.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_dir() || meta.uid() != uid {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            candidates.push((entry.path(), name));
+        }
+        // Phase 2: size concurrently.
+        let sized: Vec<(PathBuf, String, u64)> = candidates
+            .into_par_iter()
+            .map(|(p, name)| -> Result<(PathBuf, String, u64), ScanError> {
+                let size = dir_size(&p, cancel)?;
+                Ok((p, name, size))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Phase 3: emit.
+        for (path, name, size) in sized {
+            sink(CleanupItem::new(
+                path,
+                Category::UserCache,
+                size,
+                SafetyTier::Review,
+                format!("System cache for {name} — review before removing"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LogScanner
 // ---------------------------------------------------------------------------
 
@@ -1033,15 +1125,26 @@ fn scan_temp_dir(
 /// with the stale bytes.
 pub struct LogScanner;
 
-/// Emit one Safe item per file older than `max_age` anywhere under `dir`.
+/// Policy for a log sweep. `owner`, when `Some`, restricts to files owned by that
+/// uid — used for system log dirs (/var/log, /Library/Logs) so only the user's
+/// own removable logs are offered, never root-owned system logs that couldn't be
+/// trashed anyway. `tier` lets system logs be `Review` while user logs stay `Safe`.
+struct LogPolicy<'a> {
+    max_age: Duration,
+    app: &'a str,
+    owner: Option<u32>,
+    tier: SafetyTier,
+}
+
+/// Emit one item per stale file anywhere under `dir`, per `policy`.
 fn emit_stale_logs(
     dir: &Path,
-    max_age: Duration,
     now: SystemTime,
     cancel: &CancelToken,
     sink: &mut dyn FnMut(CleanupItem),
-    app: &str,
+    policy: &LogPolicy,
 ) -> Result<(), ScanError> {
+    use std::os::unix::fs::MetadataExt;
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -1051,8 +1154,11 @@ fn emit_stale_logs(
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
-            emit_stale_logs(&entry.path(), max_age, now, cancel, sink, app)?;
-        } else if meta.is_file() && is_older_than(&meta, max_age, now) {
+            emit_stale_logs(&entry.path(), now, cancel, sink, policy)?;
+        } else if meta.is_file()
+            && is_older_than(&meta, policy.max_age, now)
+            && policy.owner.is_none_or(|uid| meta.uid() == uid)
+        {
             // Each stale FILE is its own item. Never the directory: a dir mixes
             // stale and current logs, so trashing it would delete live data the
             // size/reason never mentioned.
@@ -1060,8 +1166,8 @@ fn emit_stale_logs(
                 entry.path(),
                 Category::Log,
                 meta.len(),
-                SafetyTier::Safe,
-                format!("Log from {app} older than 30 days"),
+                policy.tier,
+                format!("Log from {} older than 30 days", policy.app),
             ));
         }
     }
@@ -1083,26 +1189,59 @@ impl Scanner for LogScanner {
             return Err(ScanError::Cancelled);
         }
         let now = SystemTime::now();
+        // 1. User logs under ~/Library/Logs — all user-owned, Safe.
         let root = ctx.home.join("Library/Logs");
-        let Ok(entries) = fs::read_dir(&root) else {
-            return Ok(());
-        };
-        for entry in entries.flatten() {
-            if cancel.is_cancelled() {
-                return Err(ScanError::Cancelled);
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if cancel.is_cancelled() {
+                    return Err(ScanError::Cancelled);
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if meta.is_dir() {
+                    emit_stale_logs(
+                        &entry.path(),
+                        now,
+                        cancel,
+                        sink,
+                        &LogPolicy {
+                            max_age: THIRTY_DAYS,
+                            app: &name,
+                            owner: None,
+                            tier: SafetyTier::Safe,
+                        },
+                    )?;
+                } else if meta.is_file() && is_older_than(&meta, THIRTY_DAYS, now) {
+                    sink(CleanupItem::new(
+                        entry.path(),
+                        Category::Log,
+                        meta.len(),
+                        SafetyTier::Safe,
+                        format!("Log file \"{name}\" older than 30 days"),
+                    ));
+                }
             }
-            let Ok(meta) = entry.metadata() else { continue };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if meta.is_dir() {
-                emit_stale_logs(&entry.path(), THIRTY_DAYS, now, cancel, sink, &name)?;
-            } else if meta.is_file() && is_older_than(&meta, THIRTY_DAYS, now) {
-                sink(CleanupItem::new(
-                    entry.path(),
-                    Category::Log,
-                    meta.len(),
-                    SafetyTier::Safe,
-                    format!("Log file \"{name}\" older than 30 days"),
-                ));
+        }
+        // 2. System-wide logs (/private/var/log, /Library/Logs) — restricted to
+        //    the user's OWN stale files (never root-owned system logs), Review.
+        let owner = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&ctx.home).ok().map(|m| m.uid())
+        };
+        if let Some(uid) = owner {
+            for sys in ["/private/var/log", "/Library/Logs"] {
+                emit_stale_logs(
+                    Path::new(sys),
+                    now,
+                    cancel,
+                    sink,
+                    &LogPolicy {
+                        max_age: THIRTY_DAYS,
+                        app: "the system",
+                        owner: Some(uid),
+                        tier: SafetyTier::Review,
+                    },
+                )?;
             }
         }
         Ok(())
