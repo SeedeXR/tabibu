@@ -42,6 +42,7 @@ tabibu-devscan = { path = "../../core/crates/tabibu-devscan" }
 tabibu-docker = { path = "../../core/crates/tabibu-docker" }
 tabibu-net = { path = "../../core/crates/tabibu-net" }
 tabibu-salama = { path = "../../core/crates/tabibu-salama" }
+tabibu-sys = { path = "../../core/crates/tabibu-sys" }
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-global-shortcut = "2.3.2"
 

@@ -3611,6 +3611,7 @@ name = "tabibu-sys"
 version = "0.1.0"
 dependencies = [
  "plist",
+ "serde",
  "sysinfo",
  "tabibu-engine",
  "tabibu-junk",
