@@ -485,6 +485,7 @@ enum View {
     Space,
     Junk,
     Large,
+    Security,
     Memory,
     Dupes,
     Net,
@@ -648,6 +649,7 @@ struct TabibuApp {
     del_rx: Option<Receiver<(u64, usize)>>,
     junk: JunkState,
     large: JunkState,
+    security: JunkState,
     monitor: MonitorState,
     dupes: DupesState,
     net: NetState,
@@ -666,6 +668,7 @@ impl Default for TabibuApp {
             del_rx: None,
             junk: JunkState::default(),
             large: JunkState::default(),
+            security: JunkState::default(),
             monitor: MonitorState::default(),
             dupes: DupesState::default(),
             net: NetState::default(),
@@ -833,6 +836,50 @@ impl TabibuApp {
         self.large.del_rx = Some(rx);
         thread::spawn(move || {
             let ctx = tabibu_sys::default_scan_ctx(&[]);
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
+            let _ = tx.send((freed, n));
+        });
+    }
+
+    /// Security scan: run the malware scanners through the engine (allowed-roots
+    /// = `/` so findings anywhere survive the guard). Reuses the cleanup machinery.
+    fn start_security_scan(&mut self) {
+        self.security.phase = JunkPhase::Scanning;
+        self.security.items.clear();
+        let (tx, rx) = channel();
+        self.security.scan_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = reclaim_anywhere_ctx();
+            let cancel = CancelToken::new();
+            let collected: Mutex<Vec<CleanupItem>> = Mutex::new(Vec::new());
+            let _ = tabibu_engine::smart_scan(&tabibu_malware::scanners(), &ctx, &cancel, &|it| {
+                collected.lock().expect("security sink poisoned").push(it);
+            });
+            let mut items = collected.into_inner().expect("security sink poisoned");
+            items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+            let _ = tx.send(items);
+        });
+    }
+
+    fn start_security_delete(&mut self) {
+        let items: Vec<CleanupItem> = self
+            .security
+            .items
+            .iter()
+            .filter(|i| i.selected)
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.security.phase = JunkPhase::Deleting;
+        let (tx, rx) = channel();
+        self.security.del_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = reclaim_anywhere_ctx();
             let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
                 .map(|r| r.reclaimed_bytes)
                 .unwrap_or(0);
@@ -1091,6 +1138,23 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(rx) = &self.security.scan_rx {
+            if let Ok(items) = rx.try_recv() {
+                self.security.scan_rx = None;
+                self.security.items = items;
+                self.security.phase = JunkPhase::Review;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.security.del_rx {
+            if let Ok((freed, items)) = rx.try_recv() {
+                self.security.del_rx = None;
+                self.security.phase = JunkPhase::Done { freed, items };
+            } else {
+                ctx.request_repaint();
+            }
+        }
         // Drain live monitor samples (keep only the newest; track a short CPU
         // history for the sparkline).
         if let Some(rx) = &self.monitor.rx {
@@ -1189,6 +1253,9 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Large & Old", self.view == View::Large) {
                     self.view = View::Large;
                 }
+                if nav_item(ui, "Security", self.view == View::Security) {
+                    self.view = View::Security;
+                }
                 if nav_item(ui, "Memory & CPU", self.view == View::Memory) {
                     self.view = View::Memory;
                 }
@@ -1217,6 +1284,7 @@ impl eframe::App for TabibuApp {
             },
             View::Junk => self.ui_junk(ui),
             View::Large => self.ui_large(ui),
+            View::Security => self.ui_security(ui),
             View::Memory => self.ui_memory(ui),
             View::Dupes => self.ui_dupes(ui),
             View::Net => self.ui_net(ui),
@@ -1414,6 +1482,70 @@ impl TabibuApp {
                 }
                 if act.trash {
                     self.start_large_delete();
+                }
+            }
+        }
+    }
+
+    fn ui_security(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0xec, 0x48, 0x99); // pink — webview security accent
+        match &self.security.phase {
+            JunkPhase::Idle => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(RichText::new("Security Scan").size(26.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Scan for known adware, malware and rogue configuration profiles. \
+                             Anything found is shown for review before it's quarantined to the \
+                             Trash — reversible.",
+                        )
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(20.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Scan").size(15.0).color(Color32::WHITE),
+                            )
+                            .fill(accent),
+                        )
+                        .clicked()
+                    {
+                        self.start_security_scan();
+                    }
+                });
+            }
+            JunkPhase::Scanning => self.ui_center(ui, "Scanning for threats…", true),
+            JunkPhase::Deleting => self.ui_center(ui, "Quarantining to the Trash…", true),
+            JunkPhase::Done { freed, items } => {
+                let (freed, items) = (*freed, *items);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} moved to the Trash · {items} item(s)",
+                            fmt_bytes(freed)
+                        ))
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(16.0);
+                    if ui.button("Rescan").clicked() {
+                        self.start_security_scan();
+                    }
+                });
+            }
+            JunkPhase::Review => {
+                let act = cleanup_review_ui(ui, self.dark, "Security", &mut self.security.items);
+                if act.rescan {
+                    self.start_security_scan();
+                }
+                if act.trash {
+                    self.start_security_delete();
                 }
             }
         }
@@ -2209,6 +2341,10 @@ fn main() -> eframe::Result<()> {
                 Ok("large") => {
                     app.view = View::Large;
                     app.start_large_scan();
+                }
+                Ok("security") => {
+                    app.view = View::Security;
+                    app.start_security_scan();
                 }
                 Ok("dupes") => {
                     app.view = View::Dupes;

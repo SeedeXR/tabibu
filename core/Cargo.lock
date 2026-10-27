@@ -3532,6 +3532,7 @@ dependencies = [
  "tabibu-dupes",
  "tabibu-engine",
  "tabibu-junk",
+ "tabibu-malware",
  "tabibu-monitor",
  "tabibu-net",
  "tabibu-sys",
