@@ -79,6 +79,26 @@ fn palette(dark: bool) -> Palette {
     }
 }
 
+/// Load Space Grotesk — the same brand font the Tauri/webview build uses
+/// (app/src/fonts/SpaceGrotesk.woff2, converted to TTF) — as the proportional
+/// family, so the native app reads identically. Monospace keeps egui's default
+/// (the webview's `--mono` was the system SF Mono fallback).
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "SpaceGrotesk".to_owned(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/SpaceGrotesk.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "SpaceGrotesk".to_owned());
+    ctx.set_fonts(fonts);
+}
+
 fn apply_theme(ctx: &egui::Context, dark: bool) {
     let p = palette(dark);
     let mut v = if dark {
@@ -474,6 +494,17 @@ fn cleanup_review_ui(
     action
 }
 
+/// Human label for a `docker system df` artifact kind.
+fn docker_kind_label(kind: &str) -> &str {
+    match kind {
+        "images" => "Images",
+        "containers" => "Containers",
+        "volumes" => "Volumes",
+        "build_cache" => "Build cache",
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -491,6 +522,7 @@ enum View {
     Net,
     Battery,
     Startup,
+    Docker,
 }
 
 enum ConnPhase {
@@ -543,6 +575,15 @@ struct StartupState {
     data: Option<tabibu_sys::StartupReport>,
     rx: Option<Receiver<tabibu_sys::StartupReport>>,
     started: bool,
+}
+
+/// Docker read-only analysis (`docker system df`). `None` report = not installed.
+#[derive(Default)]
+struct DockerState {
+    report: Option<tabibu_docker::Report>,
+    rx: Option<Receiver<Option<tabibu_docker::Report>>>,
+    started: bool,
+    loaded: bool,
 }
 
 enum DupePhase {
@@ -673,6 +714,7 @@ struct TabibuApp {
     net: NetState,
     battery: BatteryState,
     startup: StartupState,
+    docker: DockerState,
 }
 
 impl Default for TabibuApp {
@@ -694,6 +736,7 @@ impl Default for TabibuApp {
             net: NetState::default(),
             battery: BatteryState::default(),
             startup: StartupState::default(),
+            docker: DockerState::default(),
         }
     }
 }
@@ -1059,6 +1102,20 @@ impl TabibuApp {
             let _ = tx.send(tabibu_sys::startup_items());
         });
     }
+
+    /// Analyze Docker once (`docker system df`, off-thread). `None` = not installed.
+    fn ensure_docker(&mut self) {
+        if self.docker.started {
+            return;
+        }
+        self.docker.started = true;
+        let (tx, rx) = channel();
+        self.docker.rx = Some(rx);
+        thread::spawn(move || {
+            let report = tabibu_docker::Docker::detect().map(|d| d.analyze());
+            let _ = tx.send(report);
+        });
+    }
 }
 
 /// Drop nested descendants of a selected folder: trashing the folder removes the
@@ -1293,11 +1350,23 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(rx) = &self.docker.rx {
+            if let Ok(r) = rx.try_recv() {
+                self.docker.rx = None;
+                self.docker.report = r;
+                self.docker.loaded = true;
+            } else {
+                ctx.request_repaint();
+            }
+        }
         if self.view == View::Battery {
             self.ensure_battery();
         }
         if self.view == View::Startup {
             self.ensure_startup();
+        }
+        if self.view == View::Docker {
+            self.ensure_docker();
         }
 
         // Left navigation rail — more entries land here as the migration adds views.
@@ -1341,6 +1410,9 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Startup", self.view == View::Startup) {
                     self.view = View::Startup;
                 }
+                if nav_item(ui, "Docker", self.view == View::Docker) {
+                    self.view = View::Docker;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -1366,6 +1438,7 @@ impl eframe::App for TabibuApp {
             View::Net => self.ui_net(ui),
             View::Battery => self.ui_battery(ui),
             View::Startup => self.ui_startup(ui),
+            View::Docker => self.ui_docker(ui),
         });
     }
 }
@@ -1768,6 +1841,91 @@ impl TabibuApp {
                     }
                 }
             });
+    }
+
+    fn ui_docker(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x24, 0x96, 0xed); // docker blue
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Docker").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+
+        if !self.docker.loaded {
+            self.ui_center(ui, "Checking Docker…", true);
+            return;
+        }
+        let Some(rep) = self.docker.report.clone() else {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Docker isn't installed.").color(p.text_dim));
+            });
+            return;
+        };
+        if !rep.status.running {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Docker is installed but not running.").strong());
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Start Docker Desktop to analyze reclaimable space.")
+                        .color(p.text_dim),
+                );
+            });
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} reclaimable",
+                    fmt_bytes(rep.total_reclaimable_bytes)
+                ))
+                .size(22.0)
+                .strong()
+                .color(accent),
+            );
+            if let Some(v) = &rep.status.version {
+                ui.label(RichText::new(format!("· Docker {v}")).color(p.text_faint));
+            }
+        });
+        ui.add_space(10.0);
+        ui.separator();
+
+        for a in &rep.artifacts {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(RichText::new(docker_kind_label(&a.kind)).strong());
+                ui.label(
+                    RichText::new(format!("· {} of {} in use", a.active_count, a.total_count))
+                        .color(p.text_dim),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("{} reclaimable", fmt_bytes(a.reclaimable_bytes)))
+                            .color(p.text_dim)
+                            .monospace(),
+                    );
+                });
+            });
+        }
+
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(
+                    "Pruning from this view is coming; for now reclaim with `docker system \
+                     prune` or the CLI companion.",
+                )
+                .size(11.0)
+                .color(p.text_faint),
+            );
+        });
     }
 
     fn ui_memory(&mut self, ui: &mut egui::Ui) {
@@ -2539,6 +2697,7 @@ fn main() -> eframe::Result<()> {
         opts,
         Box::new(|cc| {
             let dark = cc.egui_ctx.style().visuals.dark_mode;
+            install_fonts(&cc.egui_ctx);
             apply_theme(&cc.egui_ctx, dark);
             let mut app = TabibuApp {
                 dark,
@@ -2567,6 +2726,7 @@ fn main() -> eframe::Result<()> {
                 }
                 Ok("battery") => app.view = View::Battery,
                 Ok("startup") => app.view = View::Startup,
+                Ok("docker") => app.view = View::Docker,
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();

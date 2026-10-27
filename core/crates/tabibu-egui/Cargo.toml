@@ -18,3 +18,4 @@ tabibu-monitor = { path = "../tabibu-monitor" }
 tabibu-dupes = { path = "../tabibu-dupes" }
 tabibu-net = { path = "../tabibu-net" }
 tabibu-malware = { path = "../tabibu-malware" }
+tabibu-docker = { path = "../tabibu-docker" }
