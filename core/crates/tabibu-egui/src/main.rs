@@ -2068,3 +2068,37 @@ fn main() -> eframe::Result<()> {
         }),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_bytes_is_decimal() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(999), "999 B");
+        assert_eq!(fmt_bytes(1_000), "1.0 KB");
+        assert_eq!(fmt_bytes(1_500_000), "1.5 MB");
+        assert_eq!(fmt_bytes(2_000_000_000), "2.0 GB");
+    }
+
+    #[test]
+    fn fmt_ram_is_binary() {
+        assert_eq!(fmt_ram(1_024), "1.0 KB");
+        // 16 GiB of physical RAM must read "16 GB", not 17.2.
+        assert_eq!(fmt_ram(16 * 1_024 * 1_024 * 1_024), "16 GB");
+    }
+
+    #[test]
+    fn pruned_selection_drops_nested_descendants() {
+        let mut sel: HashMap<PathBuf, (u64, u64)> = HashMap::new();
+        sel.insert(PathBuf::from("/a"), (10, 1));
+        sel.insert(PathBuf::from("/a/b"), (5, 1)); // inside /a — dropped
+        sel.insert(PathBuf::from("/c"), (7, 1));
+        let kept = pruned_selection(&sel);
+        assert!(kept.contains(&PathBuf::from("/a")));
+        assert!(kept.contains(&PathBuf::from("/c")));
+        assert!(!kept.contains(&PathBuf::from("/a/b")));
+        assert_eq!(kept.len(), 2);
+    }
+}
