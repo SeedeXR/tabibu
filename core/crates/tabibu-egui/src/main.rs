@@ -24,6 +24,7 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, Vec2,
 };
+use tabibu_dupes::{DupeConfig, DuplicateGroup};
 use tabibu_engine::{CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx};
 use tabibu_monitor::{Sampler, SystemSample, TopBy};
 use tabibu_walk::DirNode;
@@ -292,6 +293,19 @@ fn cat_label(c: Category) -> &'static str {
     }
 }
 
+/// Reclaim context that permits trashing any user-chosen path (allowed-roots =
+/// `/`), used by the Space Analyzer and Duplicates views where the user picks
+/// exact files. `reclaim` still forces Trash (reversible) and the engine
+/// denylist still refuses true system paths.
+fn reclaim_anywhere_ctx() -> ScanCtx {
+    ScanCtx {
+        home: tabibu_sys::home_dir(),
+        allowed_roots: vec![PathBuf::from("/")],
+        running_bundle_ids: HashSet::new(),
+        full_disk_access: true,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -303,6 +317,39 @@ enum View {
     Space,
     Junk,
     Memory,
+    Dupes,
+}
+
+enum DupePhase {
+    Idle,
+    Scanning,
+    Review,
+    Deleting,
+    Done { freed: u64, items: usize },
+}
+
+/// Duplicate-finder state — reuses tabibu_dupes::{collect_candidates,
+/// find_duplicates} + engine reclaim.
+struct DupesState {
+    phase: DupePhase,
+    groups: Vec<DuplicateGroup>,
+    /// Paths the user has marked to Trash (keeps at least the group's keeper by
+    /// default — paths[0], newest).
+    selected: HashSet<PathBuf>,
+    scan_rx: Option<Receiver<Result<Vec<DuplicateGroup>, String>>>,
+    del_rx: Option<Receiver<(u64, usize)>>,
+}
+
+impl Default for DupesState {
+    fn default() -> Self {
+        Self {
+            phase: DupePhase::Idle,
+            groups: Vec::new(),
+            selected: HashSet::new(),
+            scan_rx: None,
+            del_rx: None,
+        }
+    }
 }
 
 /// Live Memory & CPU monitor state. A background `Sampler` thread pushes a fresh
@@ -395,6 +442,7 @@ struct TabibuApp {
     del_rx: Option<Receiver<(u64, usize)>>,
     junk: JunkState,
     monitor: MonitorState,
+    dupes: DupesState,
 }
 
 impl Default for TabibuApp {
@@ -410,6 +458,7 @@ impl Default for TabibuApp {
             del_rx: None,
             junk: JunkState::default(),
             monitor: MonitorState::default(),
+            dupes: DupesState::default(),
         }
     }
 }
@@ -474,12 +523,7 @@ impl TabibuApp {
         let (tx, rx) = channel();
         self.del_rx = Some(rx);
         thread::spawn(move || {
-            let ctx = ScanCtx {
-                home: tabibu_sys::home_dir(),
-                allowed_roots: vec![PathBuf::from("/")],
-                running_bundle_ids: HashSet::new(),
-                full_disk_access: true,
-            };
+            let ctx = reclaim_anywhere_ctx();
             let freed = match tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir()) {
                 Ok(r) => r.reclaimed_bytes,
                 Err(_) => 0,
@@ -563,6 +607,68 @@ impl TabibuApp {
                 }
                 thread::sleep(Duration::from_millis(1200));
             }
+        });
+    }
+
+    /// Find duplicate files across the home folder (reuses the Tauri default:
+    /// whole-home walk, 4 KiB minimum). Runs the full dupe funnel on a worker.
+    fn start_dupe_scan(&mut self) {
+        self.dupes.phase = DupePhase::Scanning;
+        self.dupes.groups.clear();
+        self.dupes.selected.clear();
+        let (tx, rx) = channel();
+        self.dupes.scan_rx = Some(rx);
+        thread::spawn(move || {
+            // Whole home by default; `TABIBU_DUPE_ROOT` narrows it (fast testing).
+            let root = std::env::var_os("TABIBU_DUPE_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(tabibu_sys::home_dir);
+            let cancel = CancelToken::new();
+            let cfg = DupeConfig::default();
+            let res = tabibu_dupes::collect_candidates(&root, cfg.min_size, &cancel)
+                .and_then(|files| tabibu_dupes::find_duplicates(&files, &cfg, &cancel, &|_g| {}))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Move the ticked duplicate copies to the Trash (reversible).
+    fn start_dupe_delete(&mut self) {
+        let items: Vec<CleanupItem> = self
+            .dupes
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.paths
+                    .iter()
+                    .filter(|p| self.dupes.selected.contains(*p))
+                    .map(move |p| {
+                        let mut it = CleanupItem::new(
+                            p.clone(),
+                            Category::Duplicate,
+                            g.size_bytes,
+                            SafetyTier::Review,
+                            "Duplicate copy",
+                        );
+                        it.selected = true;
+                        it.action = ReclaimAction::Trash;
+                        it
+                    })
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.dupes.phase = DupePhase::Deleting;
+        let (tx, rx) = channel();
+        self.dupes.del_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = reclaim_anywhere_ctx();
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
+            let _ = tx.send((freed, n));
         });
     }
 }
@@ -690,6 +796,35 @@ impl eframe::App for TabibuApp {
             self.ensure_monitor();
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+        if let Some(rx) = &self.dupes.scan_rx {
+            if let Ok(res) = rx.try_recv() {
+                self.dupes.scan_rx = None;
+                match res {
+                    Ok(groups) => {
+                        // Default: keep the newest copy (paths[0]); pre-select the rest.
+                        self.dupes.selected.clear();
+                        for g in &groups {
+                            for p in g.paths.iter().skip(1) {
+                                self.dupes.selected.insert(p.clone());
+                            }
+                        }
+                        self.dupes.groups = groups;
+                        self.dupes.phase = DupePhase::Review;
+                    }
+                    Err(_) => self.dupes.phase = DupePhase::Idle,
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.dupes.del_rx {
+            if let Ok((freed, items)) = rx.try_recv() {
+                self.dupes.del_rx = None;
+                self.dupes.phase = DupePhase::Done { freed, items };
+            } else {
+                ctx.request_repaint();
+            }
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -714,6 +849,9 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Memory & CPU", self.view == View::Memory) {
                     self.view = View::Memory;
                 }
+                if nav_item(ui, "Duplicates", self.view == View::Dupes) {
+                    self.view = View::Dupes;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -733,6 +871,7 @@ impl eframe::App for TabibuApp {
             },
             View::Junk => self.ui_junk(ui),
             View::Memory => self.ui_memory(ui),
+            View::Dupes => self.ui_dupes(ui),
         });
     }
 }
@@ -1162,6 +1301,184 @@ impl TabibuApp {
             });
     }
 
+    fn ui_dupes(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x3b, 0x82, 0xf6); // blue — matches webview dupes accent
+        match &self.dupes.phase {
+            DupePhase::Idle => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(RichText::new("Find Duplicate Files").size(26.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Scan your home folder for byte-identical copies, then move the extra \
+                             copies to the Trash — reversible. The newest copy is kept by default.",
+                        )
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(20.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Scan").size(15.0).color(Color32::WHITE),
+                            )
+                            .fill(accent),
+                        )
+                        .clicked()
+                    {
+                        self.start_dupe_scan();
+                    }
+                });
+            }
+            DupePhase::Scanning => self.ui_center(ui, "Scanning for duplicate files…", true),
+            DupePhase::Deleting => self.ui_center(ui, "Moving duplicates to the Trash…", true),
+            DupePhase::Done { freed, items } => {
+                let (freed, items) = (*freed, *items);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} moved to the Trash · {items} copies",
+                            fmt_bytes(freed)
+                        ))
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(16.0);
+                    if ui.button("Rescan").clicked() {
+                        self.start_dupe_scan();
+                    }
+                });
+            }
+            DupePhase::Review => self.ui_dupes_review(ui, accent),
+        }
+    }
+
+    fn ui_dupes_review(&mut self, ui: &mut egui::Ui, accent: Color32) {
+        let p = palette(self.dark);
+        let total_reclaim: u64 = self
+            .dupes
+            .groups
+            .iter()
+            .map(|g| {
+                g.paths
+                    .iter()
+                    .filter(|pp| self.dupes.selected.contains(*pp))
+                    .count() as u64
+                    * g.size_bytes
+            })
+            .sum();
+        let sel_n = self.dupes.selected.len();
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!("{} duplicate sets", self.dupes.groups.len()))
+                    .size(16.0)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new(format!("· up to {} reclaimable", fmt_bytes(total_reclaim)))
+                    .color(p.text_dim),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                if ui.button("Rescan").clicked() {
+                    self.start_dupe_scan();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+
+        if self.dupes.groups.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("No duplicate files found.").color(p.text_dim));
+            });
+            return;
+        }
+
+        let mut toggle: Option<PathBuf> = None;
+        let avail_h = ui.available_height() - 52.0;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(avail_h.max(0.0))
+            .show(ui, |ui| {
+                for g in &self.dupes.groups {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("{} each", fmt_bytes(g.size_bytes))).strong(),
+                        );
+                        ui.label(
+                            RichText::new(format!("· {} copies", g.paths.len())).color(p.text_dim),
+                        );
+                    });
+                    for (idx, path) in g.paths.iter().enumerate() {
+                        let on = self.dupes.selected.contains(path);
+                        ui.horizontal(|ui| {
+                            ui.add_space(24.0);
+                            let mut checked = on;
+                            if ui.checkbox(&mut checked, "").changed() {
+                                toggle = Some(path.clone());
+                            }
+                            if idx == 0 {
+                                ui.label(RichText::new("keep").size(10.0).color(accent));
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(path.to_string_lossy()).color(if on {
+                                        p.text
+                                    } else {
+                                        p.text_dim
+                                    }),
+                                )
+                                .truncate(),
+                            );
+                        });
+                    }
+                }
+            });
+
+        if let Some(path) = toggle {
+            if !self.dupes.selected.remove(&path) {
+                self.dupes.selected.insert(path);
+            }
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if sel_n == 0 {
+                ui.label(
+                    RichText::new("Tick the copies to remove (the newest is kept by default).")
+                        .color(p.text_dim),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("{sel_n} selected · {}", fmt_bytes(total_reclaim)))
+                        .strong(),
+                );
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                let btn = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE))
+                    .fill(if sel_n == 0 {
+                        p.text_faint
+                    } else {
+                        Color32::from_rgb(0xdc, 0x26, 0x26)
+                    });
+                if ui.add_enabled(sel_n > 0, btn).clicked() {
+                    self.start_dupe_delete();
+                }
+            });
+        });
+    }
+
     fn ui_tree(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let total = self.root.as_ref().map(|r| r.alloc_bytes).unwrap_or(0);
@@ -1459,6 +1776,10 @@ fn main() -> eframe::Result<()> {
                     app.start_junk_scan();
                 }
                 Ok("memory") => app.view = View::Memory,
+                Ok("dupes") => {
+                    app.view = View::Dupes;
+                    app.start_dupe_scan();
+                }
                 _ => {}
             }
             Ok(Box::new(app))
