@@ -12,3 +12,5 @@ path = "src/main.rs"
 eframe = "0.31"
 tabibu-walk = { path = "../tabibu-walk" }
 tabibu-engine = { path = "../tabibu-engine" }
+tabibu-junk = { path = "../tabibu-junk" }
+tabibu-sys = { path = "../tabibu-sys" }

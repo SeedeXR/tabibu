@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Mutex;
 use std::thread;
 
 use eframe::egui::{
@@ -213,19 +214,73 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
+/// Safety-tier accent (green = safe, amber = review, red = risky) — matches the
+/// webview build's tier colouring in the Junk/Smart cleanup view.
+fn tier_color(t: SafetyTier) -> Color32 {
+    match t {
+        SafetyTier::Safe => Color32::from_rgb(0x10, 0xb9, 0x81),
+        SafetyTier::Review => Color32::from_rgb(0xf5, 0x9e, 0x0b),
+        SafetyTier::Risky => Color32::from_rgb(0xdc, 0x26, 0x26),
+    }
 }
 
-fn undo_dir() -> PathBuf {
-    home_dir().join("Library/Application Support/Tabibu/undo")
+/// Human label for a cleanup category (the Junk view's group headers).
+fn cat_label(c: Category) -> &'static str {
+    match c {
+        Category::Trash => "Trash",
+        Category::UserCache => "Caches",
+        Category::DevCache => "Developer caches",
+        Category::Temp => "Temporary files",
+        Category::Log => "Logs",
+        Category::Duplicate => "Duplicates",
+        Category::LargeOldFile => "Large & old files",
+        Category::AppRemnant => "App leftovers",
+        Category::OrphanedSupport => "Orphaned support files",
+        Category::UnusedApp => "Unused apps",
+        Category::StaleBinary => "Stale binaries",
+        Category::Malware => "Threats",
+    }
 }
 
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
+
+/// Which top-level feature is on screen. More land here as the migration
+/// progresses (Dashboard, Duplicates, …).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Space,
+    Junk,
+}
+
+enum JunkPhase {
+    Idle,
+    Scanning,
+    Review,
+    Deleting,
+    Done { freed: u64, items: usize },
+}
+
+/// Junk / Smart cleanup state — reuses `tabibu_junk::scanners()` +
+/// `tabibu_engine::smart_scan`/`reclaim` directly (no IPC).
+struct JunkState {
+    phase: JunkPhase,
+    items: Vec<CleanupItem>,
+    scan_rx: Option<Receiver<Vec<CleanupItem>>>,
+    del_rx: Option<Receiver<(u64, usize)>>,
+}
+
+impl Default for JunkState {
+    fn default() -> Self {
+        Self {
+            phase: JunkPhase::Idle,
+            items: Vec::new(),
+            scan_rx: None,
+            del_rx: None,
+        }
+    }
+}
 enum Phase {
     Idle,
     Scanning,
@@ -254,6 +309,7 @@ struct Row {
 
 struct TabibuApp {
     dark: bool,
+    view: View,
     phase: Phase,
     root: Option<DirNode>,
     expanded: HashSet<PathBuf>,
@@ -261,18 +317,21 @@ struct TabibuApp {
     selected: HashMap<PathBuf, (u64, u64)>,
     scan_rx: Option<Receiver<Result<DirNode, String>>>,
     del_rx: Option<Receiver<(u64, usize)>>,
+    junk: JunkState,
 }
 
 impl Default for TabibuApp {
     fn default() -> Self {
         Self {
             dark: true,
+            view: View::Space,
             phase: Phase::Idle,
             root: None,
             expanded: HashSet::new(),
             selected: HashMap::new(),
             scan_rx: None,
             del_rx: None,
+            junk: JunkState::default(),
         }
     }
 }
@@ -338,15 +397,65 @@ impl TabibuApp {
         self.del_rx = Some(rx);
         thread::spawn(move || {
             let ctx = ScanCtx {
-                home: home_dir(),
+                home: tabibu_sys::home_dir(),
                 allowed_roots: vec![PathBuf::from("/")],
                 running_bundle_ids: HashSet::new(),
                 full_disk_access: true,
             };
-            let freed = match tabibu_engine::reclaim(&ctx, &items, &undo_dir()) {
+            let freed = match tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir()) {
                 Ok(r) => r.reclaimed_bytes,
                 Err(_) => 0,
             };
+            let _ = tx.send((freed, n));
+        });
+    }
+
+    /// Junk / Smart cleanup scan: run every `tabibu_junk` scanner concurrently
+    /// through the engine's denylist guard, collect the surviving items, and hand
+    /// them to the review UI. Same `default_scan_ctx` the Tauri build uses — so
+    /// the running-process guard and reclaim allowed-roots match exactly.
+    fn start_junk_scan(&mut self) {
+        self.junk.phase = JunkPhase::Scanning;
+        self.junk.items.clear();
+        let (tx, rx) = channel();
+        self.junk.scan_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = tabibu_sys::default_scan_ctx(&[]);
+            let cancel = CancelToken::new();
+            let collected: Mutex<Vec<CleanupItem>> = Mutex::new(Vec::new());
+            let _report =
+                tabibu_engine::smart_scan(&tabibu_junk::scanners(), &ctx, &cancel, &|it| {
+                    collected.lock().expect("junk sink poisoned").push(it);
+                });
+            let mut items = collected.into_inner().expect("junk sink poisoned");
+            // Biggest first — the reviewer's attention goes where the space is.
+            items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+            let _ = tx.send(items);
+        });
+    }
+
+    /// Move every ticked item to the Trash (reversible) via the engine's reclaim,
+    /// guarded by the same ctx the scan used.
+    fn start_junk_delete(&mut self) {
+        let items: Vec<CleanupItem> = self
+            .junk
+            .items
+            .iter()
+            .filter(|i| i.selected)
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.junk.phase = JunkPhase::Deleting;
+        let (tx, rx) = channel();
+        self.junk.del_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = tabibu_sys::default_scan_ctx(&[]);
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
             let _ = tx.send((freed, n));
         });
     }
@@ -443,22 +552,73 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(rx) = &self.junk.scan_rx {
+            if let Ok(items) = rx.try_recv() {
+                self.junk.scan_rx = None;
+                self.junk.items = items;
+                self.junk.phase = JunkPhase::Review;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.junk.del_rx {
+            if let Ok((freed, items)) = rx.try_recv() {
+                self.junk.del_rx = None;
+                self.junk.phase = JunkPhase::Done { freed, items };
+            } else {
+                ctx.request_repaint();
+            }
+        }
 
-        egui::CentralPanel::default().show(ctx, |ui| match &self.phase {
-            Phase::Idle => self.ui_landing(ui),
-            Phase::Scanning => self.ui_center(ui, "Measuring your whole disk…", true),
-            Phase::Deleting => self.ui_center(ui, "Moving selected items to the Trash…", true),
-            Phase::Error(e) => {
-                let e = e.clone();
-                self.ui_center(ui, &format!("Couldn't read the disk: {e}"), false);
-            }
-            Phase::Done { freed, items } => {
-                let (freed, items) = (*freed, *items);
-                self.ui_done(ui, freed, items);
-            }
-            Phase::Browse => self.ui_tree(ui),
+        // Left navigation rail — more entries land here as the migration adds views.
+        let p = palette(self.dark);
+        egui::SidePanel::left("nav")
+            .resizable(false)
+            .exact_width(180.0)
+            .frame(egui::Frame {
+                fill: p.bg_elev,
+                inner_margin: egui::Margin::same(12),
+                ..Default::default()
+            })
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Tabibu").size(18.0).strong());
+                ui.add_space(14.0);
+                if nav_item(ui, "Space Analyzer", self.view == View::Space) {
+                    self.view = View::Space;
+                }
+                if nav_item(ui, "Junk", self.view == View::Junk) {
+                    self.view = View::Junk;
+                }
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.view {
+            View::Space => match &self.phase {
+                Phase::Idle => self.ui_landing(ui),
+                Phase::Scanning => self.ui_center(ui, "Measuring your whole disk…", true),
+                Phase::Deleting => self.ui_center(ui, "Moving selected items to the Trash…", true),
+                Phase::Error(e) => {
+                    let e = e.clone();
+                    self.ui_center(ui, &format!("Couldn't read the disk: {e}"), false);
+                }
+                Phase::Done { freed, items } => {
+                    let (freed, items) = (*freed, *items);
+                    self.ui_done(ui, freed, items);
+                }
+                Phase::Browse => self.ui_tree(ui),
+            },
+            View::Junk => self.ui_junk(ui),
         });
     }
+}
+
+/// One navigation-rail entry; returns true on click.
+fn nav_item(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
+    ui.add_sized(
+        [ui.available_width(), 32.0],
+        egui::SelectableLabel::new(active, label),
+    )
+    .clicked()
 }
 
 impl TabibuApp {
@@ -517,6 +677,220 @@ impl TabibuApp {
             if ui.button("Rescan").clicked() {
                 self.start_scan();
             }
+        });
+    }
+
+    fn ui_junk(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        match &self.junk.phase {
+            JunkPhase::Idle => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(RichText::new("Junk Cleanup").size(26.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Find caches, logs, temporary and leftover files across your Mac, \
+                             then move what you don't need to the Trash — reversible.",
+                        )
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(20.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Scan").size(15.0).color(Color32::WHITE),
+                            )
+                            .fill(p.accent),
+                        )
+                        .clicked()
+                    {
+                        self.start_junk_scan();
+                    }
+                });
+            }
+            JunkPhase::Scanning => self.ui_center(ui, "Scanning for junk…", true),
+            JunkPhase::Deleting => self.ui_center(ui, "Moving selected items to the Trash…", true),
+            JunkPhase::Done { freed, items } => {
+                let (freed, items) = (*freed, *items);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    ui.label(RichText::new("Cleanup complete").size(22.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} moved to the Trash · {items} item(s)",
+                            fmt_bytes(freed)
+                        ))
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(16.0);
+                    if ui.button("Rescan").clicked() {
+                        self.start_junk_scan();
+                    }
+                });
+            }
+            JunkPhase::Review => self.ui_junk_review(ui),
+        }
+    }
+
+    fn ui_junk_review(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let total_found: u64 = self.junk.items.iter().map(|i| i.size_bytes).sum();
+        let n_found = self.junk.items.len();
+        let sel_bytes: u64 = self
+            .junk
+            .items
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.size_bytes)
+            .sum();
+        let sel_n = self.junk.items.iter().filter(|i| i.selected).count();
+
+        // Header
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Junk").size(16.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "· {} found · {} items",
+                    fmt_bytes(total_found),
+                    n_found
+                ))
+                .color(p.text_dim),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                if ui.button("Rescan").clicked() {
+                    self.start_junk_scan();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+
+        if n_found == 0 {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Nothing to clean — you're all clear.").color(p.text_dim));
+            });
+            return;
+        }
+
+        // Category order (items already sorted biggest-first).
+        let mut order: Vec<Category> = Vec::new();
+        for it in &self.junk.items {
+            if !order.contains(&it.category) {
+                order.push(it.category);
+            }
+        }
+
+        let mut toggle: Option<usize> = None;
+        let mut bulk: Option<(Category, bool)> = None;
+
+        let avail_h = ui.available_height() - 52.0;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(avail_h.max(0.0))
+            .show(ui, |ui| {
+                for cat in &order {
+                    let idxs: Vec<usize> = self
+                        .junk
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, it)| it.category == *cat)
+                        .map(|(i, _)| i)
+                        .collect();
+                    let cat_bytes: u64 = idxs.iter().map(|&i| self.junk.items[i].size_bytes).sum();
+                    let all_sel = idxs.iter().all(|&i| self.junk.items[i].selected);
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        let mut checked = all_sel;
+                        if ui.checkbox(&mut checked, "").changed() {
+                            bulk = Some((*cat, checked));
+                        }
+                        ui.label(RichText::new(cat_label(*cat)).strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "· {} · {} items",
+                                fmt_bytes(cat_bytes),
+                                idxs.len()
+                            ))
+                            .color(p.text_dim),
+                        );
+                    });
+
+                    for &i in &idxs {
+                        let it = &self.junk.items[i];
+                        let name = it
+                            .path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| it.path.to_string_lossy().into_owned());
+                        let tip = it.path.to_string_lossy().into_owned();
+                        ui.horizontal(|ui| {
+                            ui.add_space(24.0);
+                            let mut checked = it.selected;
+                            if ui.checkbox(&mut checked, "").changed() {
+                                toggle = Some(i);
+                            }
+                            let (dot, _) =
+                                ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot.center(), 4.0, tier_color(it.tier));
+                            ui.label(name);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(fmt_bytes(it.size_bytes))
+                                        .color(p.text_dim)
+                                        .monospace(),
+                                );
+                            });
+                        })
+                        .response
+                        .on_hover_text(tip);
+                    }
+                }
+            });
+
+        if let Some(i) = toggle {
+            self.junk.items[i].selected = !self.junk.items[i].selected;
+        }
+        if let Some((cat, val)) = bulk {
+            for it in self.junk.items.iter_mut().filter(|it| it.category == cat) {
+                it.selected = val;
+            }
+        }
+
+        // Action bar
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if sel_n == 0 {
+                ui.label(
+                    RichText::new("Tick anything to remove it (reversible).").color(p.text_dim),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("{sel_n} selected · {}", fmt_bytes(sel_bytes))).strong(),
+                );
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                let btn = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE))
+                    .fill(if sel_n == 0 {
+                        p.text_faint
+                    } else {
+                        Color32::from_rgb(0xdc, 0x26, 0x26)
+                    });
+                if ui.add_enabled(sel_n > 0, btn).clicked() {
+                    self.start_junk_delete();
+                }
+            });
         });
     }
 
@@ -808,6 +1182,12 @@ fn main() -> eframe::Result<()> {
             // otherwise show the landing with a Scan button.
             if std::env::var_os("TABIBU_SCAN_ROOT").is_some() {
                 app.start_scan();
+            }
+            // Test seam: `TABIBU_VIEW=junk` opens the Junk view and kicks off a
+            // scan (for headless screenshots of the cleanup UI).
+            if std::env::var("TABIBU_VIEW").as_deref() == Ok("junk") {
+                app.view = View::Junk;
+                app.start_junk_scan();
             }
             Ok(Box::new(app))
         }),

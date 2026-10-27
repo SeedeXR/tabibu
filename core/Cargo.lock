@@ -3530,6 +3530,8 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "tabibu-engine",
+ "tabibu-junk",
+ "tabibu-sys",
  "tabibu-walk",
 ]
 
@@ -3599,6 +3601,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "tabibu-sys"
+version = "0.1.0"
+dependencies = [
+ "plist",
+ "sysinfo",
+ "tabibu-engine",
+ "tabibu-junk",
 ]
 
 [[package]]

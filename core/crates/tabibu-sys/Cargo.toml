@@ -1,0 +1,11 @@
+[package]
+name = "tabibu-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Shared macOS platform facts + scan-context builder (home dir, Full Disk Access probe, running-app bundle IDs, reclaim allowed-roots). The permanent home for what app/src-tauri/src/system.rs built per-app — reused by the egui app and (later) the Tauri app before it is deleted."
+
+[dependencies]
+tabibu-engine = { path = "../tabibu-engine" }
+tabibu-junk = { path = "../tabibu-junk" }
+sysinfo = "0.33"
+plist = "1"
