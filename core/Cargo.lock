@@ -3533,6 +3533,7 @@ dependencies = [
  "tabibu-engine",
  "tabibu-junk",
  "tabibu-monitor",
+ "tabibu-net",
  "tabibu-sys",
  "tabibu-walk",
 ]

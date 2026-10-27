@@ -27,6 +27,7 @@ use eframe::egui::{
 use tabibu_dupes::{DupeConfig, DuplicateGroup};
 use tabibu_engine::{CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx};
 use tabibu_monitor::{Sampler, SystemSample, TopBy};
+use tabibu_net::{ConnectionTest, NetSampler, Ping, Throughput, Wifi};
 use tabibu_walk::DirNode;
 
 // ---------------------------------------------------------------------------
@@ -318,6 +319,43 @@ enum View {
     Junk,
     Memory,
     Dupes,
+    Net,
+}
+
+enum ConnPhase {
+    Idle,
+    Testing,
+    Done,
+}
+
+/// Network view state: a live throughput sampler (like the CPU monitor) plus
+/// one-shot Wi-Fi status and an on-demand connection test. All from tabibu_net.
+struct NetState {
+    rx: Option<Receiver<Throughput>>,
+    latest: Option<Throughput>,
+    down_hist: VecDeque<u64>,
+    started: bool,
+    wifi: Option<Wifi>,
+    wifi_rx: Option<Receiver<Wifi>>,
+    conn_phase: ConnPhase,
+    ping: Option<Ping>,
+    conn_rx: Option<Receiver<ConnectionTest>>,
+}
+
+impl Default for NetState {
+    fn default() -> Self {
+        Self {
+            rx: None,
+            latest: None,
+            down_hist: VecDeque::new(),
+            started: false,
+            wifi: None,
+            wifi_rx: None,
+            conn_phase: ConnPhase::Idle,
+            ping: None,
+            conn_rx: None,
+        }
+    }
 }
 
 enum DupePhase {
@@ -443,6 +481,7 @@ struct TabibuApp {
     junk: JunkState,
     monitor: MonitorState,
     dupes: DupesState,
+    net: NetState,
 }
 
 impl Default for TabibuApp {
@@ -459,6 +498,7 @@ impl Default for TabibuApp {
             junk: JunkState::default(),
             monitor: MonitorState::default(),
             dupes: DupesState::default(),
+            net: NetState::default(),
         }
     }
 }
@@ -671,6 +711,41 @@ impl TabibuApp {
             let _ = tx.send((freed, n));
         });
     }
+
+    /// Start the live throughput sampler (once) and kick a one-shot Wi-Fi probe.
+    fn ensure_net(&mut self) {
+        if self.net.started {
+            return;
+        }
+        self.net.started = true;
+        let (tx, rx) = channel();
+        self.net.rx = Some(rx);
+        thread::spawn(move || {
+            let mut sampler = NetSampler::new();
+            loop {
+                let t = sampler.sample();
+                if tx.send(t).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1000));
+            }
+        });
+        let (wtx, wrx) = channel();
+        self.net.wifi_rx = Some(wrx);
+        thread::spawn(move || {
+            let _ = wtx.send(tabibu_net::wifi_status());
+        });
+    }
+
+    /// Run a connection test (ping + Wi-Fi) against Cloudflare on a worker.
+    fn run_conn_test(&mut self) {
+        self.net.conn_phase = ConnPhase::Testing;
+        let (tx, rx) = channel();
+        self.net.conn_rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(tabibu_net::connection_test("1.1.1.1"));
+        });
+    }
 }
 
 /// Drop nested descendants of a selected folder: trashing the folder removes the
@@ -825,6 +900,36 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        // Network: drain throughput, Wi-Fi probe, and connection-test results.
+        if let Some(rx) = &self.net.rx {
+            while let Ok(t) = rx.try_recv() {
+                self.net.down_hist.push_back(t.down_bps);
+                while self.net.down_hist.len() > 60 {
+                    self.net.down_hist.pop_front();
+                }
+                self.net.latest = Some(t);
+            }
+        }
+        if let Some(rx) = &self.net.wifi_rx {
+            if let Ok(w) = rx.try_recv() {
+                self.net.wifi_rx = None;
+                self.net.wifi = Some(w);
+            }
+        }
+        if let Some(rx) = &self.net.conn_rx {
+            if let Ok(ct) = rx.try_recv() {
+                self.net.conn_rx = None;
+                self.net.wifi = Some(ct.wifi);
+                self.net.ping = Some(ct.ping);
+                self.net.conn_phase = ConnPhase::Done;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.view == View::Net {
+            self.ensure_net();
+            ctx.request_repaint_after(Duration::from_millis(700));
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -852,6 +957,9 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Duplicates", self.view == View::Dupes) {
                     self.view = View::Dupes;
                 }
+                if nav_item(ui, "Network", self.view == View::Net) {
+                    self.view = View::Net;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -872,6 +980,7 @@ impl eframe::App for TabibuApp {
             View::Junk => self.ui_junk(ui),
             View::Memory => self.ui_memory(ui),
             View::Dupes => self.ui_dupes(ui),
+            View::Net => self.ui_net(ui),
         });
     }
 }
@@ -1479,6 +1588,175 @@ impl TabibuApp {
         });
     }
 
+    fn ui_net(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x02, 0x84, 0xc7); // blue — webview network accent
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Network").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+
+        // Live throughput.
+        let (down, up, tdown, tup) = self
+            .net
+            .latest
+            .map(|t| (t.down_bps, t.up_bps, t.total_down_bytes, t.total_up_bytes))
+            .unwrap_or((0, 0, 0, 0));
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Download").color(p.text_dim));
+                ui.label(
+                    RichText::new(format!("{}/s", fmt_bytes(down)))
+                        .size(22.0)
+                        .strong()
+                        .color(accent),
+                );
+                ui.label(
+                    RichText::new(format!("{} total", fmt_bytes(tdown)))
+                        .size(11.0)
+                        .color(p.text_faint),
+                );
+            });
+            ui.add_space(40.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Upload").color(p.text_dim));
+                ui.label(
+                    RichText::new(format!("{}/s", fmt_bytes(up)))
+                        .size(22.0)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(format!("{} total", fmt_bytes(tup)))
+                        .size(11.0)
+                        .color(p.text_faint),
+                );
+            });
+        });
+
+        // Download sparkline (auto-scaled to its own peak).
+        let hist: Vec<u64> = self.net.down_hist.iter().copied().collect();
+        if hist.len() >= 2 {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let w = (ui.available_width() - 8.0).max(60.0);
+                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(strip, CornerRadius::same(4), p.bg_elev);
+                let maxv = hist.iter().copied().max().unwrap_or(1).max(1) as f32;
+                let dx = strip.width() / (hist.len() as f32 - 1.0);
+                let pts: Vec<Pos2> = hist
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        Pos2::new(
+                            strip.min.x + i as f32 * dx,
+                            strip.max.y - (*v as f32 / maxv) * strip.height(),
+                        )
+                    })
+                    .collect();
+                ui.painter()
+                    .add(Shape::line(pts, Stroke::new(1.5_f32, accent)));
+            });
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Wi-Fi").strong());
+        });
+        match &self.net.wifi {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Checking…").color(p.text_dim));
+                });
+            }
+            Some(w) if !w.connected => {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Not connected to Wi-Fi.").color(p.text_dim));
+                });
+            }
+            Some(w) => {
+                let em_dash = || "—".to_string();
+                let rows = [
+                    (
+                        "Signal",
+                        w.quality_pct.map_or_else(em_dash, |q| format!("{q}%")),
+                    ),
+                    (
+                        "RSSI",
+                        w.rssi_dbm.map_or_else(em_dash, |r| format!("{r} dBm")),
+                    ),
+                    (
+                        "Link rate",
+                        w.tx_rate_mbps.map_or_else(em_dash, |t| format!("{t} Mbps")),
+                    ),
+                    ("Mode", w.phy_mode.clone().unwrap_or_else(em_dash)),
+                ];
+                for (k, v) in rows {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(k).color(p.text_dim));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            ui.label(v);
+                        });
+                    });
+                }
+            }
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Connection").strong());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                let testing = matches!(self.net.conn_phase, ConnPhase::Testing);
+                if ui
+                    .add_enabled(
+                        !testing,
+                        egui::Button::new(if testing {
+                            "Testing…"
+                        } else {
+                            "Test connection"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.run_conn_test();
+                }
+            });
+        });
+        if let (ConnPhase::Done, Some(ping)) = (&self.net.conn_phase, &self.net.ping) {
+            let desc = if ping.received == 0 {
+                "No response — you appear to be offline.".to_string()
+            } else {
+                format!(
+                    "{:.0}% loss · {} avg · {}/{} replies",
+                    ping.loss_pct,
+                    ping.avg_ms
+                        .map_or_else(|| "—".to_string(), |m| format!("{m:.0} ms")),
+                    ping.received,
+                    ping.transmitted
+                )
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(RichText::new(desc).color(p.text_dim));
+            });
+        }
+    }
+
     fn ui_tree(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let total = self.root.as_ref().map(|r| r.alloc_bytes).unwrap_or(0);
@@ -1779,6 +2057,10 @@ fn main() -> eframe::Result<()> {
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();
+                }
+                Ok("net") => {
+                    app.view = View::Net;
+                    app.run_conn_test();
                 }
                 _ => {}
             }
