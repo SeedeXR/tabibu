@@ -19,3 +19,4 @@ tabibu-dupes = { path = "../tabibu-dupes" }
 tabibu-net = { path = "../tabibu-net" }
 tabibu-malware = { path = "../tabibu-malware" }
 tabibu-docker = { path = "../tabibu-docker" }
+tabibu-devscan = { path = "../tabibu-devscan" }

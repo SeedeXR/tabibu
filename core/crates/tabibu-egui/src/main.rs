@@ -523,6 +523,8 @@ enum View {
     Battery,
     Startup,
     Docker,
+    Dev,
+    Disk,
 }
 
 enum ConnPhase {
@@ -584,6 +586,14 @@ struct DockerState {
     rx: Option<Receiver<Option<tabibu_docker::Report>>>,
     started: bool,
     loaded: bool,
+}
+
+/// One-shot disk-space reading for the Disk view.
+#[derive(Default)]
+struct DiskState {
+    data: Option<tabibu_monitor::DiskSpace>,
+    rx: Option<Receiver<tabibu_monitor::DiskSpace>>,
+    started: bool,
 }
 
 enum DupePhase {
@@ -709,12 +719,14 @@ struct TabibuApp {
     junk: JunkState,
     large: JunkState,
     security: JunkState,
+    dev: JunkState,
     monitor: MonitorState,
     dupes: DupesState,
     net: NetState,
     battery: BatteryState,
     startup: StartupState,
     docker: DockerState,
+    disk: DiskState,
 }
 
 impl Default for TabibuApp {
@@ -731,12 +743,14 @@ impl Default for TabibuApp {
             junk: JunkState::default(),
             large: JunkState::default(),
             security: JunkState::default(),
+            dev: JunkState::default(),
             monitor: MonitorState::default(),
             dupes: DupesState::default(),
             net: NetState::default(),
             battery: BatteryState::default(),
             startup: StartupState::default(),
             docker: DockerState::default(),
+            disk: DiskState::default(),
         }
     }
 }
@@ -1103,6 +1117,73 @@ impl TabibuApp {
         });
     }
 
+    /// Build-artifacts scan (node_modules, target, …) via tabibu_devscan, mapped
+    /// to CleanupItems so the shared cleanup UI handles select + trash.
+    fn start_dev_scan(&mut self) {
+        self.dev.phase = JunkPhase::Scanning;
+        self.dev.items.clear();
+        let (tx, rx) = channel();
+        self.dev.scan_rx = Some(rx);
+        thread::spawn(move || {
+            let home = tabibu_sys::home_dir();
+            let cancel = CancelToken::new();
+            let arts = tabibu_devscan::scan(std::slice::from_ref(&home), &home, &cancel);
+            let mut items: Vec<CleanupItem> = arts
+                .into_iter()
+                .map(|a| {
+                    let mut it = CleanupItem::new(
+                        a.path,
+                        Category::DevCache,
+                        a.size_bytes,
+                        SafetyTier::Review,
+                        format!("{} · rebuild: {}", a.kind, a.rebuild),
+                    );
+                    it.action = ReclaimAction::Trash;
+                    it
+                })
+                .collect();
+            items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+            let _ = tx.send(items);
+        });
+    }
+
+    fn start_dev_delete(&mut self) {
+        let items: Vec<CleanupItem> = self
+            .dev
+            .items
+            .iter()
+            .filter(|i| i.selected)
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.dev.phase = JunkPhase::Deleting;
+        let (tx, rx) = channel();
+        self.dev.del_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = reclaim_anywhere_ctx();
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
+            let _ = tx.send((freed, n));
+        });
+    }
+
+    /// Load boot-volume disk space once (off-thread).
+    fn ensure_disk(&mut self) {
+        if self.disk.started {
+            return;
+        }
+        self.disk.started = true;
+        let (tx, rx) = channel();
+        self.disk.rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(tabibu_monitor::disk_space());
+        });
+    }
+
     /// Analyze Docker once (`docker system df`, off-thread). `None` = not installed.
     fn ensure_docker(&mut self) {
         if self.docker.started {
@@ -1260,6 +1341,31 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(rx) = &self.dev.scan_rx {
+            if let Ok(items) = rx.try_recv() {
+                self.dev.scan_rx = None;
+                self.dev.items = items;
+                self.dev.phase = JunkPhase::Review;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.dev.del_rx {
+            if let Ok((freed, items)) = rx.try_recv() {
+                self.dev.del_rx = None;
+                self.dev.phase = JunkPhase::Done { freed, items };
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.disk.rx {
+            if let Ok(d) = rx.try_recv() {
+                self.disk.rx = None;
+                self.disk.data = Some(d);
+            } else {
+                ctx.request_repaint();
+            }
+        }
         // Drain live monitor samples (keep only the newest; track a short CPU
         // history for the sparkline).
         if let Some(rx) = &self.monitor.rx {
@@ -1368,6 +1474,9 @@ impl eframe::App for TabibuApp {
         if self.view == View::Docker {
             self.ensure_docker();
         }
+        if self.view == View::Disk {
+            self.ensure_disk();
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -1413,6 +1522,12 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Docker", self.view == View::Docker) {
                     self.view = View::Docker;
                 }
+                if nav_item(ui, "Build Artifacts", self.view == View::Dev) {
+                    self.view = View::Dev;
+                }
+                if nav_item(ui, "Disk", self.view == View::Disk) {
+                    self.view = View::Disk;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -1439,6 +1554,8 @@ impl eframe::App for TabibuApp {
             View::Battery => self.ui_battery(ui),
             View::Startup => self.ui_startup(ui),
             View::Docker => self.ui_docker(ui),
+            View::Dev => self.ui_dev(ui),
+            View::Disk => self.ui_disk(ui),
         });
     }
 }
@@ -1841,6 +1958,122 @@ impl TabibuApp {
                     }
                 }
             });
+    }
+
+    fn ui_dev(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x63, 0x66, 0xf1); // indigo
+        match &self.dev.phase {
+            JunkPhase::Idle => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(RichText::new("Build Artifacts").size(26.0).strong());
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "Find regenerable developer output (node_modules, Rust/Maven target, \
+                             build/dist dirs, …) and move what you don't need to the Trash — \
+                             reversible. Each is safe to delete; your tooling rebuilds it.",
+                        )
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(20.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Scan").size(15.0).color(Color32::WHITE),
+                            )
+                            .fill(accent),
+                        )
+                        .clicked()
+                    {
+                        self.start_dev_scan();
+                    }
+                });
+            }
+            JunkPhase::Scanning => self.ui_center(ui, "Scanning for build artifacts…", true),
+            JunkPhase::Deleting => self.ui_center(ui, "Moving selected items to the Trash…", true),
+            JunkPhase::Done { freed, items } => {
+                let (freed, items) = (*freed, *items);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} moved to the Trash · {items} item(s)",
+                            fmt_bytes(freed)
+                        ))
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(16.0);
+                    if ui.button("Rescan").clicked() {
+                        self.start_dev_scan();
+                    }
+                });
+            }
+            JunkPhase::Review => {
+                let act = cleanup_review_ui(ui, self.dark, "Build Artifacts", &mut self.dev.items);
+                if act.rescan {
+                    self.start_dev_scan();
+                }
+                if act.trash {
+                    self.start_dev_delete();
+                }
+            }
+        }
+    }
+
+    fn ui_disk(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0xa8, 0x55, 0xf7); // purple
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Disk").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+
+        let Some(d) = self.disk.data else {
+            self.ui_center(ui, "Reading disk…", true);
+            return;
+        };
+        let used = d.total_bytes.saturating_sub(d.available_bytes);
+        let frac = if d.total_bytes > 0 {
+            used as f32 / d.total_bytes as f32
+        } else {
+            0.0
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(150.0, 150.0), Sense::hover());
+            let center = rect.center();
+            draw_ring(ui, center, 54.0, frac, accent, p.track);
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}%", frac * 100.0),
+                FontId::proportional(24.0),
+                p.text,
+            );
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.add_space(30.0);
+                // Disk/storage uses DECIMAL units (matches Finder).
+                ui.label(
+                    RichText::new(format!("{} used", fmt_bytes(used)))
+                        .size(18.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("{} free", fmt_bytes(d.available_bytes))).color(accent),
+                );
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(format!("{} total", fmt_bytes(d.total_bytes))).color(p.text_dim),
+                );
+            });
+        });
     }
 
     fn ui_docker(&mut self, ui: &mut egui::Ui) {
@@ -2727,6 +2960,11 @@ fn main() -> eframe::Result<()> {
                 Ok("battery") => app.view = View::Battery,
                 Ok("startup") => app.view = View::Startup,
                 Ok("docker") => app.view = View::Docker,
+                Ok("dev") => {
+                    app.view = View::Dev;
+                    app.start_dev_scan();
+                }
+                Ok("disk") => app.view = View::Disk,
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();
