@@ -265,27 +265,80 @@ fn fmt_ram(n: u64) -> String {
     }
 }
 
-/// A circular progress ring (CPU dial): a faint full-circle track with a
-/// foreground arc covering `frac` of the circle, starting at 12 o'clock.
+/// A circular progress ring (CPU/charge/disk dial): a faint full-circle track
+/// with a foreground arc covering `frac`, starting at 12 o'clock and clockwise,
+/// with ROUNDED end caps — matching the webview build's `stroke-linecap="round"`.
 fn draw_ring(ui: &egui::Ui, center: Pos2, radius: f32, frac: f32, color: Color32, track: Color32) {
     let painter = ui.painter();
-    let thickness = 6.0_f32;
+    let thickness = 8.0_f32;
     painter.circle_stroke(center, radius, Stroke::new(thickness, track));
     let frac = frac.clamp(0.0, 1.0);
     if frac <= 0.0 {
         return;
     }
-    let steps = (frac * 96.0).ceil().max(1.0) as usize;
+    // One segment per ~3.75° keeps the arc visually smooth at any size.
+    let steps = (frac * 96.0).ceil().max(2.0) as usize;
     let start = -std::f32::consts::FRAC_PI_2; // 12 o'clock
-    let mut pts = Vec::with_capacity(steps + 1);
-    for k in 0..=steps {
-        let t = start + (k as f32 / steps as f32) * frac * std::f32::consts::TAU;
-        pts.push(Pos2::new(
-            center.x + radius * t.cos(),
-            center.y + radius * t.sin(),
-        ));
-    }
+    let pts: Vec<Pos2> = (0..=steps)
+        .map(|k| {
+            let t = start + (k as f32 / steps as f32) * frac * std::f32::consts::TAU;
+            Pos2::new(center.x + radius * t.cos(), center.y + radius * t.sin())
+        })
+        .collect();
+    let cap = thickness / 2.0;
+    // Round caps: a filled dot at each arc end (egui strokes are butt-capped).
+    painter.circle_filled(pts[0], cap, color);
+    painter.circle_filled(pts[pts.len() - 1], cap, color);
     painter.add(Shape::line(pts, Stroke::new(thickness, color)));
+}
+
+/// A smooth sparkline inside `rect`: a soft translucent area fill under a
+/// round-capped line, with interior padding so peaks/troughs never clip the
+/// edge. `max_hint` floors the vertical scale (e.g. 100.0 for a percentage).
+fn draw_sparkline(ui: &egui::Ui, rect: Rect, values: &[f32], max_hint: f32, accent: Color32) {
+    let p = ui.painter();
+    if values.len() < 2 {
+        return;
+    }
+    let pad = 6.0;
+    let inner = Rect::from_min_max(
+        Pos2::new(rect.min.x + pad, rect.min.y + pad),
+        Pos2::new(rect.max.x - pad, rect.max.y - pad),
+    );
+    let maxv = values
+        .iter()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(max_hint)
+        .max(1.0);
+    let n = values.len();
+    let dx = inner.width() / (n as f32 - 1.0);
+    let line: Vec<Pos2> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            Pos2::new(
+                inner.min.x + i as f32 * dx,
+                inner.max.y - (v / maxv).clamp(0.0, 1.0) * inner.height(),
+            )
+        })
+        .collect();
+    // Area fill: the line, closed down to the baseline.
+    let mut area = line.clone();
+    area.push(Pos2::new(inner.max.x, inner.max.y));
+    area.push(Pos2::new(inner.min.x, inner.max.y));
+    let fill = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38);
+    p.add(Shape::Path(egui::epaint::PathShape {
+        points: area,
+        closed: true,
+        fill,
+        stroke: egui::epaint::PathStroke::NONE,
+    }));
+    // Round-capped line on top.
+    let cap = 1.0_f32;
+    p.circle_filled(line[0], cap, accent);
+    p.circle_filled(line[line.len() - 1], cap, accent);
+    p.add(Shape::line(line, Stroke::new(2.0_f32, accent)));
 }
 
 /// Safety-tier accent (green = safe, amber = review, red = risky) — matches the
@@ -2237,22 +2290,10 @@ impl TabibuApp {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 let w = (ui.available_width() - 8.0).max(60.0);
-                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
+                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 48.0), Sense::hover());
                 ui.painter()
-                    .rect_filled(strip, CornerRadius::same(4), p.bg_elev);
-                let dx = strip.width() / (hist.len() as f32 - 1.0);
-                let pts: Vec<Pos2> = hist
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        Pos2::new(
-                            strip.min.x + i as f32 * dx,
-                            strip.max.y - (v / 100.0).clamp(0.0, 1.0) * strip.height(),
-                        )
-                    })
-                    .collect();
-                ui.painter()
-                    .add(Shape::line(pts, Stroke::new(1.5_f32, accent)));
+                    .rect_filled(strip, CornerRadius::same(8), p.bg_elev);
+                draw_sparkline(ui, strip, &hist, 100.0, accent);
             });
         }
 
@@ -2531,29 +2572,16 @@ impl TabibuApp {
         });
 
         // Download sparkline (auto-scaled to its own peak).
-        let hist: Vec<u64> = self.net.down_hist.iter().copied().collect();
+        let hist: Vec<f32> = self.net.down_hist.iter().map(|&v| v as f32).collect();
         if hist.len() >= 2 {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 let w = (ui.available_width() - 8.0).max(60.0);
-                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
+                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 48.0), Sense::hover());
                 ui.painter()
-                    .rect_filled(strip, CornerRadius::same(4), p.bg_elev);
-                let maxv = hist.iter().copied().max().unwrap_or(1).max(1) as f32;
-                let dx = strip.width() / (hist.len() as f32 - 1.0);
-                let pts: Vec<Pos2> = hist
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        Pos2::new(
-                            strip.min.x + i as f32 * dx,
-                            strip.max.y - (*v as f32 / maxv) * strip.height(),
-                        )
-                    })
-                    .collect();
-                ui.painter()
-                    .add(Shape::line(pts, Stroke::new(1.5_f32, accent)));
+                    .rect_filled(strip, CornerRadius::same(8), p.bg_elev);
+                draw_sparkline(ui, strip, &hist, 1.0, accent);
             });
         }
 
