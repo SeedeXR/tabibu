@@ -578,6 +578,8 @@ enum View {
     Docker,
     Dev,
     Disk,
+    Universal,
+    Brew,
 }
 
 enum ConnPhase {
@@ -647,6 +649,24 @@ struct DiskState {
     data: Option<tabibu_monitor::DiskSpace>,
     rx: Option<Receiver<tabibu_monitor::DiskSpace>>,
     started: bool,
+}
+
+/// Universal-binary scan (read-only). Always returns a report.
+#[derive(Default)]
+struct UniversalState {
+    report: Option<tabibu_universal::UniversalReport>,
+    rx: Option<Receiver<tabibu_universal::UniversalReport>>,
+    started: bool,
+    loaded: bool,
+}
+
+/// Homebrew analysis (read-only). `None` report = not installed.
+#[derive(Default)]
+struct BrewState {
+    report: Option<tabibu_brew::Report>,
+    rx: Option<Receiver<Option<tabibu_brew::Report>>>,
+    started: bool,
+    loaded: bool,
 }
 
 enum DupePhase {
@@ -780,6 +800,8 @@ struct TabibuApp {
     startup: StartupState,
     docker: DockerState,
     disk: DiskState,
+    universal: UniversalState,
+    brew: BrewState,
 }
 
 impl Default for TabibuApp {
@@ -804,6 +826,8 @@ impl Default for TabibuApp {
             startup: StartupState::default(),
             docker: DockerState::default(),
             disk: DiskState::default(),
+            universal: UniversalState::default(),
+            brew: BrewState::default(),
         }
     }
 }
@@ -1237,6 +1261,35 @@ impl TabibuApp {
         });
     }
 
+    /// Scan universal binaries once (/Applications + ~/Applications), off-thread.
+    fn ensure_universal(&mut self) {
+        if self.universal.started {
+            return;
+        }
+        self.universal.started = true;
+        let (tx, rx) = channel();
+        self.universal.rx = Some(rx);
+        thread::spawn(move || {
+            let home = tabibu_sys::home_dir();
+            let roots = vec![PathBuf::from("/Applications"), home.join("Applications")];
+            let _ = tx.send(tabibu_universal::scan(&roots, &CancelToken::new()));
+        });
+    }
+
+    /// Analyze Homebrew once, off-thread. `None` = not installed.
+    fn ensure_brew(&mut self) {
+        if self.brew.started {
+            return;
+        }
+        self.brew.started = true;
+        let (tx, rx) = channel();
+        self.brew.rx = Some(rx);
+        thread::spawn(move || {
+            let report = tabibu_brew::Brew::detect().map(|b| b.analyze());
+            let _ = tx.send(report);
+        });
+    }
+
     /// Analyze Docker once (`docker system df`, off-thread). `None` = not installed.
     fn ensure_docker(&mut self) {
         if self.docker.started {
@@ -1530,6 +1583,30 @@ impl eframe::App for TabibuApp {
         if self.view == View::Disk {
             self.ensure_disk();
         }
+        if let Some(rx) = &self.universal.rx {
+            if let Ok(r) = rx.try_recv() {
+                self.universal.rx = None;
+                self.universal.report = Some(r);
+                self.universal.loaded = true;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.brew.rx {
+            if let Ok(r) = rx.try_recv() {
+                self.brew.rx = None;
+                self.brew.report = r;
+                self.brew.loaded = true;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.view == View::Universal {
+            self.ensure_universal();
+        }
+        if self.view == View::Brew {
+            self.ensure_brew();
+        }
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
@@ -1581,6 +1658,12 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Disk", self.view == View::Disk) {
                     self.view = View::Disk;
                 }
+                if nav_item(ui, "Universal Binaries", self.view == View::Universal) {
+                    self.view = View::Universal;
+                }
+                if nav_item(ui, "Developer / CLI", self.view == View::Brew) {
+                    self.view = View::Brew;
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.view {
@@ -1609,6 +1692,8 @@ impl eframe::App for TabibuApp {
             View::Docker => self.ui_docker(ui),
             View::Dev => self.ui_dev(ui),
             View::Disk => self.ui_disk(ui),
+            View::Universal => self.ui_universal(ui),
+            View::Brew => self.ui_brew(ui),
         });
     }
 }
@@ -2126,6 +2211,192 @@ impl TabibuApp {
                     RichText::new(format!("{} total", fmt_bytes(d.total_bytes))).color(p.text_dim),
                 );
             });
+        });
+    }
+
+    fn ui_universal(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0x08, 0x91, 0xb2); // cyan
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Universal Binaries").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+
+        if !self.universal.loaded {
+            self.ui_center(ui, "Scanning apps for extra architecture slices…", true);
+            return;
+        }
+        let Some(rep) = self.universal.report.as_ref() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} safely reclaimable",
+                    fmt_bytes(rep.safe_reclaimable_bytes)
+                ))
+                .size(22.0)
+                .strong()
+                .color(accent),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "· keeps {} · {} app(s)",
+                    rep.native_arch, rep.safe_app_count
+                ))
+                .color(p.text_dim),
+            );
+        });
+        ui.add_space(10.0);
+        ui.separator();
+
+        if rep.apps.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("No universal apps with a reclaimable slice.").color(p.text_dim),
+                );
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for a in &rep.apps {
+                        let safe = a.category == "safe";
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            let (dot, _) =
+                                ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            ui.painter().circle_filled(
+                                dot.center(),
+                                4.0,
+                                if safe {
+                                    tier_color(SafetyTier::Safe)
+                                } else {
+                                    tier_color(SafetyTier::Risky)
+                                },
+                            );
+                            ui.label(a.name.as_str());
+                            ui.label(
+                                RichText::new(format!("· {}", a.arches.join(" + ")))
+                                    .size(11.0)
+                                    .color(p.text_faint),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(fmt_bytes(a.reclaimable_bytes))
+                                        .color(p.text_dim)
+                                        .monospace(),
+                                );
+                            });
+                        })
+                        .response
+                        .on_hover_text(format!(
+                            "{} · signing: {}",
+                            a.path.display(),
+                            a.signing
+                        ));
+                    }
+                });
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(
+                    "Thinning (removing the non-native slice) is coming to this view; it rewrites \
+                     the app bundle, so it stays opt-in per app.",
+                )
+                .size(11.0)
+                .color(p.text_faint),
+            );
+        });
+    }
+
+    fn ui_brew(&mut self, ui: &mut egui::Ui) {
+        let p = palette(self.dark);
+        let accent = Color32::from_rgb(0xd9, 0x77, 0x06); // amber
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Developer / CLI").size(16.0).strong());
+        });
+        ui.add_space(10.0);
+
+        if !self.brew.loaded {
+            self.ui_center(ui, "Checking Homebrew…", true);
+            return;
+        }
+        let Some(rep) = self.brew.report.clone() else {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Homebrew isn't installed.").color(p.text_dim));
+            });
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} reclaimable",
+                    fmt_bytes(rep.cleanup.freeable_bytes)
+                ))
+                .size(22.0)
+                .strong()
+                .color(accent),
+            );
+            // The version string already includes "Homebrew …"; don't double it.
+            let ver = rep
+                .status
+                .version
+                .clone()
+                .unwrap_or_else(|| "Homebrew".to_owned());
+            ui.label(
+                RichText::new(format!("· {ver} · {} packages", rep.packages.len()))
+                    .color(p.text_dim),
+            );
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(RichText::new("Orphaned dependencies").strong());
+            ui.label(
+                RichText::new(format!("· {} removable", rep.autoremovable.len())).color(p.text_dim),
+            );
+        });
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height((ui.available_height() - 40.0).max(60.0))
+            .show(ui, |ui| {
+                if rep.autoremovable.is_empty() {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        ui.label(RichText::new("None — nothing to autoremove.").color(p.text_dim));
+                    });
+                }
+                for name in &rep.autoremovable {
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        ui.label(name.as_str());
+                    });
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(
+                    "cleanup / autoremove / uninstall actions are coming to this view; for now \
+                     use `brew cleanup` or the CLI companion.",
+                )
+                .size(11.0)
+                .color(p.text_faint),
+            );
         });
     }
 
@@ -2993,6 +3264,8 @@ fn main() -> eframe::Result<()> {
                     app.start_dev_scan();
                 }
                 Ok("disk") => app.view = View::Disk,
+                Ok("universal") => app.view = View::Universal,
+                Ok("brew") => app.view = View::Brew,
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();

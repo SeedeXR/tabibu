@@ -20,3 +20,6 @@ tabibu-net = { path = "../tabibu-net" }
 tabibu-malware = { path = "../tabibu-malware" }
 tabibu-docker = { path = "../tabibu-docker" }
 tabibu-devscan = { path = "../tabibu-devscan" }
+tabibu-universal = { path = "../tabibu-universal" }
+tabibu-brew = { path = "../tabibu-brew" }
+tabibu-uninstall = { path = "../tabibu-uninstall" }

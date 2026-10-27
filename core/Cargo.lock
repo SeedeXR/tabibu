@@ -3529,6 +3529,7 @@ name = "tabibu-egui"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "tabibu-brew",
  "tabibu-devscan",
  "tabibu-docker",
  "tabibu-dupes",
@@ -3538,6 +3539,8 @@ dependencies = [
  "tabibu-monitor",
  "tabibu-net",
  "tabibu-sys",
+ "tabibu-uninstall",
+ "tabibu-universal",
  "tabibu-walk",
 ]
 
