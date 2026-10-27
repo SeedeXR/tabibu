@@ -25,7 +25,9 @@ use eframe::egui::{
     StrokeKind, Vec2,
 };
 use tabibu_dupes::{DupeConfig, DuplicateGroup};
-use tabibu_engine::{CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx};
+use tabibu_engine::{
+    CancelToken, Category, CleanupItem, ReclaimAction, SafetyTier, ScanCtx, Scanner,
+};
 use tabibu_monitor::{Sampler, SystemSample, TopBy};
 use tabibu_net::{ConnectionTest, NetSampler, Ping, Throughput, Wifi};
 use tabibu_walk::DirNode;
@@ -307,6 +309,171 @@ fn reclaim_anywhere_ctx() -> ScanCtx {
     }
 }
 
+/// What the shared cleanup-review UI reports back to its caller.
+#[derive(Default)]
+struct CleanupAction {
+    rescan: bool,
+    trash: bool,
+}
+
+/// Shared grouped-review UI for scanner-backed cleanup views (Junk, Large & Old):
+/// header + per-category groups (select-all, tier dots, sizes) + Move-to-Trash
+/// bar. Toggles `item.selected` in place; returns which action the user clicked.
+fn cleanup_review_ui(
+    ui: &mut egui::Ui,
+    dark: bool,
+    title: &str,
+    items: &mut [CleanupItem],
+) -> CleanupAction {
+    let p = palette(dark);
+    let total_found: u64 = items.iter().map(|i| i.size_bytes).sum();
+    let n_found = items.len();
+    let sel_bytes: u64 = items
+        .iter()
+        .filter(|i| i.selected)
+        .map(|i| i.size_bytes)
+        .sum();
+    let sel_n = items.iter().filter(|i| i.selected).count();
+    let mut action = CleanupAction::default();
+
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(RichText::new(title).size(16.0).strong());
+        ui.label(
+            RichText::new(format!(
+                "· {} found · {} items",
+                fmt_bytes(total_found),
+                n_found
+            ))
+            .color(p.text_dim),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(8.0);
+            if ui.button("Rescan").clicked() {
+                action.rescan = true;
+            }
+        });
+    });
+    ui.add_space(4.0);
+    ui.separator();
+
+    if n_found == 0 {
+        ui.add_space(20.0);
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new("Nothing found — you're all clear.").color(p.text_dim));
+        });
+        return action;
+    }
+
+    // Category order (items already sorted biggest-first).
+    let mut order: Vec<Category> = Vec::new();
+    for it in items.iter() {
+        if !order.contains(&it.category) {
+            order.push(it.category);
+        }
+    }
+
+    let mut toggle: Option<usize> = None;
+    let mut bulk: Option<(Category, bool)> = None;
+
+    let avail_h = ui.available_height() - 52.0;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(avail_h.max(0.0))
+        .show(ui, |ui| {
+            for cat in &order {
+                let idxs: Vec<usize> = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, it)| it.category == *cat)
+                    .map(|(i, _)| i)
+                    .collect();
+                let cat_bytes: u64 = idxs.iter().map(|&i| items[i].size_bytes).sum();
+                let all_sel = idxs.iter().all(|&i| items[i].selected);
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    let mut checked = all_sel;
+                    if ui.checkbox(&mut checked, "").changed() {
+                        bulk = Some((*cat, checked));
+                    }
+                    ui.label(RichText::new(cat_label(*cat)).strong());
+                    ui.label(
+                        RichText::new(format!("· {} · {} items", fmt_bytes(cat_bytes), idxs.len()))
+                            .color(p.text_dim),
+                    );
+                });
+
+                for &i in &idxs {
+                    let it = &items[i];
+                    let name = it
+                        .path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| it.path.to_string_lossy().into_owned());
+                    let tip = it.path.to_string_lossy().into_owned();
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        let mut checked = it.selected;
+                        if ui.checkbox(&mut checked, "").changed() {
+                            toggle = Some(i);
+                        }
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot.center(), 4.0, tier_color(it.tier));
+                        ui.label(name);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(fmt_bytes(it.size_bytes))
+                                    .color(p.text_dim)
+                                    .monospace(),
+                            );
+                        });
+                    })
+                    .response
+                    .on_hover_text(tip);
+                }
+            }
+        });
+
+    if let Some(i) = toggle {
+        items[i].selected = !items[i].selected;
+    }
+    if let Some((cat, val)) = bulk {
+        for it in items.iter_mut().filter(|it| it.category == cat) {
+            it.selected = val;
+        }
+    }
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        if sel_n == 0 {
+            ui.label(RichText::new("Tick anything to remove it (reversible).").color(p.text_dim));
+        } else {
+            ui.label(
+                RichText::new(format!("{sel_n} selected · {}", fmt_bytes(sel_bytes))).strong(),
+            );
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(8.0);
+            let btn = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE)).fill(
+                if sel_n == 0 {
+                    p.text_faint
+                } else {
+                    Color32::from_rgb(0xdc, 0x26, 0x26)
+                },
+            );
+            if ui.add_enabled(sel_n > 0, btn).clicked() {
+                action.trash = true;
+            }
+        });
+    });
+    action
+}
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -317,6 +484,7 @@ fn reclaim_anywhere_ctx() -> ScanCtx {
 enum View {
     Space,
     Junk,
+    Large,
     Memory,
     Dupes,
     Net,
@@ -479,6 +647,7 @@ struct TabibuApp {
     scan_rx: Option<Receiver<Result<DirNode, String>>>,
     del_rx: Option<Receiver<(u64, usize)>>,
     junk: JunkState,
+    large: JunkState,
     monitor: MonitorState,
     dupes: DupesState,
     net: NetState,
@@ -496,6 +665,7 @@ impl Default for TabibuApp {
             scan_rx: None,
             del_rx: None,
             junk: JunkState::default(),
+            large: JunkState::default(),
             monitor: MonitorState::default(),
             dupes: DupesState::default(),
             net: NetState::default(),
@@ -613,6 +783,54 @@ impl TabibuApp {
         self.junk.phase = JunkPhase::Deleting;
         let (tx, rx) = channel();
         self.junk.del_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = tabibu_sys::default_scan_ctx(&[]);
+            let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
+                .map(|r| r.reclaimed_bytes)
+                .unwrap_or(0);
+            let _ = tx.send((freed, n));
+        });
+    }
+
+    /// Large & Old scan: the Junk machinery filtered to just the `large_old`
+    /// scanner (parity with the Tauri "Large & Old" view).
+    fn start_large_scan(&mut self) {
+        self.large.phase = JunkPhase::Scanning;
+        self.large.items.clear();
+        let (tx, rx) = channel();
+        self.large.scan_rx = Some(rx);
+        thread::spawn(move || {
+            let ctx = tabibu_sys::default_scan_ctx(&[]);
+            let cancel = CancelToken::new();
+            let scanners: Vec<Box<dyn Scanner>> = tabibu_junk::scanners()
+                .into_iter()
+                .filter(|s| s.id() == "large_old")
+                .collect();
+            let collected: Mutex<Vec<CleanupItem>> = Mutex::new(Vec::new());
+            let _ = tabibu_engine::smart_scan(&scanners, &ctx, &cancel, &|it| {
+                collected.lock().expect("large sink poisoned").push(it);
+            });
+            let mut items = collected.into_inner().expect("large sink poisoned");
+            items.sort_by_key(|a| std::cmp::Reverse(a.size_bytes));
+            let _ = tx.send(items);
+        });
+    }
+
+    fn start_large_delete(&mut self) {
+        let items: Vec<CleanupItem> = self
+            .large
+            .items
+            .iter()
+            .filter(|i| i.selected)
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.large.phase = JunkPhase::Deleting;
+        let (tx, rx) = channel();
+        self.large.del_rx = Some(rx);
         thread::spawn(move || {
             let ctx = tabibu_sys::default_scan_ctx(&[]);
             let freed = tabibu_engine::reclaim(&ctx, &items, &tabibu_sys::undo_dir())
@@ -856,6 +1074,23 @@ impl eframe::App for TabibuApp {
                 ctx.request_repaint();
             }
         }
+        if let Some(rx) = &self.large.scan_rx {
+            if let Ok(items) = rx.try_recv() {
+                self.large.scan_rx = None;
+                self.large.items = items;
+                self.large.phase = JunkPhase::Review;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(rx) = &self.large.del_rx {
+            if let Ok((freed, items)) = rx.try_recv() {
+                self.large.del_rx = None;
+                self.large.phase = JunkPhase::Done { freed, items };
+            } else {
+                ctx.request_repaint();
+            }
+        }
         // Drain live monitor samples (keep only the newest; track a short CPU
         // history for the sparkline).
         if let Some(rx) = &self.monitor.rx {
@@ -951,6 +1186,9 @@ impl eframe::App for TabibuApp {
                 if nav_item(ui, "Junk", self.view == View::Junk) {
                     self.view = View::Junk;
                 }
+                if nav_item(ui, "Large & Old", self.view == View::Large) {
+                    self.view = View::Large;
+                }
                 if nav_item(ui, "Memory & CPU", self.view == View::Memory) {
                     self.view = View::Memory;
                 }
@@ -978,6 +1216,7 @@ impl eframe::App for TabibuApp {
                 Phase::Browse => self.ui_tree(ui),
             },
             View::Junk => self.ui_junk(ui),
+            View::Large => self.ui_large(ui),
             View::Memory => self.ui_memory(ui),
             View::Dupes => self.ui_dupes(ui),
             View::Net => self.ui_net(ui),
@@ -1108,163 +1347,76 @@ impl TabibuApp {
     }
 
     fn ui_junk_review(&mut self, ui: &mut egui::Ui) {
+        let act = cleanup_review_ui(ui, self.dark, "Junk", &mut self.junk.items);
+        if act.rescan {
+            self.start_junk_scan();
+        }
+        if act.trash {
+            self.start_junk_delete();
+        }
+    }
+
+    fn ui_large(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
-        let total_found: u64 = self.junk.items.iter().map(|i| i.size_bytes).sum();
-        let n_found = self.junk.items.len();
-        let sel_bytes: u64 = self
-            .junk
-            .items
-            .iter()
-            .filter(|i| i.selected)
-            .map(|i| i.size_bytes)
-            .sum();
-        let sel_n = self.junk.items.iter().filter(|i| i.selected).count();
-
-        // Header
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Junk").size(16.0).strong());
-            ui.label(
-                RichText::new(format!(
-                    "· {} found · {} items",
-                    fmt_bytes(total_found),
-                    n_found
-                ))
-                .color(p.text_dim),
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(8.0);
-                if ui.button("Rescan").clicked() {
-                    self.start_junk_scan();
-                }
-            });
-        });
-        ui.add_space(4.0);
-        ui.separator();
-
-        if n_found == 0 {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Nothing to clean — you're all clear.").color(p.text_dim));
-            });
-            return;
-        }
-
-        // Category order (items already sorted biggest-first).
-        let mut order: Vec<Category> = Vec::new();
-        for it in &self.junk.items {
-            if !order.contains(&it.category) {
-                order.push(it.category);
-            }
-        }
-
-        let mut toggle: Option<usize> = None;
-        let mut bulk: Option<(Category, bool)> = None;
-
-        let avail_h = ui.available_height() - 52.0;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .max_height(avail_h.max(0.0))
-            .show(ui, |ui| {
-                for cat in &order {
-                    let idxs: Vec<usize> = self
-                        .junk
-                        .items
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, it)| it.category == *cat)
-                        .map(|(i, _)| i)
-                        .collect();
-                    let cat_bytes: u64 = idxs.iter().map(|&i| self.junk.items[i].size_bytes).sum();
-                    let all_sel = idxs.iter().all(|&i| self.junk.items[i].selected);
-
+        let accent = Color32::from_rgb(0x0e, 0xa5, 0xe9); // sky — webview "Large & Old" accent
+        match &self.large.phase {
+            JunkPhase::Idle => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.3);
+                    ui.label(RichText::new("Large & Old Files").size(26.0).strong());
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        let mut checked = all_sel;
-                        if ui.checkbox(&mut checked, "").changed() {
-                            bulk = Some((*cat, checked));
-                        }
-                        ui.label(RichText::new(cat_label(*cat)).strong());
-                        ui.label(
-                            RichText::new(format!(
-                                "· {} · {} items",
-                                fmt_bytes(cat_bytes),
-                                idxs.len()
-                            ))
-                            .color(p.text_dim),
-                        );
-                    });
-
-                    for &i in &idxs {
-                        let it = &self.junk.items[i];
-                        let name = it
-                            .path
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| it.path.to_string_lossy().into_owned());
-                        let tip = it.path.to_string_lossy().into_owned();
-                        ui.horizontal(|ui| {
-                            ui.add_space(24.0);
-                            let mut checked = it.selected;
-                            if ui.checkbox(&mut checked, "").changed() {
-                                toggle = Some(i);
-                            }
-                            let (dot, _) =
-                                ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                            ui.painter()
-                                .circle_filled(dot.center(), 4.0, tier_color(it.tier));
-                            ui.label(name);
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.add_space(8.0);
-                                ui.label(
-                                    RichText::new(fmt_bytes(it.size_bytes))
-                                        .color(p.text_dim)
-                                        .monospace(),
-                                );
-                            });
-                        })
-                        .response
-                        .on_hover_text(tip);
+                    ui.label(
+                        RichText::new(
+                            "Find big, long-untouched files (mostly in Downloads) and move what \
+                             you don't need to the Trash — reversible. Nothing is pre-selected.",
+                        )
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(20.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Scan").size(15.0).color(Color32::WHITE),
+                            )
+                            .fill(accent),
+                        )
+                        .clicked()
+                    {
+                        self.start_large_scan();
                     }
+                });
+            }
+            JunkPhase::Scanning => self.ui_center(ui, "Scanning for large, old files…", true),
+            JunkPhase::Deleting => self.ui_center(ui, "Moving selected items to the Trash…", true),
+            JunkPhase::Done { freed, items } => {
+                let (freed, items) = (*freed, *items);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} moved to the Trash · {items} item(s)",
+                            fmt_bytes(freed)
+                        ))
+                        .color(p.text_dim),
+                    );
+                    ui.add_space(16.0);
+                    if ui.button("Rescan").clicked() {
+                        self.start_large_scan();
+                    }
+                });
+            }
+            JunkPhase::Review => {
+                let act = cleanup_review_ui(ui, self.dark, "Large & Old", &mut self.large.items);
+                if act.rescan {
+                    self.start_large_scan();
                 }
-            });
-
-        if let Some(i) = toggle {
-            self.junk.items[i].selected = !self.junk.items[i].selected;
-        }
-        if let Some((cat, val)) = bulk {
-            for it in self.junk.items.iter_mut().filter(|it| it.category == cat) {
-                it.selected = val;
+                if act.trash {
+                    self.start_large_delete();
+                }
             }
         }
-
-        // Action bar
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            if sel_n == 0 {
-                ui.label(
-                    RichText::new("Tick anything to remove it (reversible).").color(p.text_dim),
-                );
-            } else {
-                ui.label(
-                    RichText::new(format!("{sel_n} selected · {}", fmt_bytes(sel_bytes))).strong(),
-                );
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(8.0);
-                let btn = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE))
-                    .fill(if sel_n == 0 {
-                        p.text_faint
-                    } else {
-                        Color32::from_rgb(0xdc, 0x26, 0x26)
-                    });
-                if ui.add_enabled(sel_n > 0, btn).clicked() {
-                    self.start_junk_delete();
-                }
-            });
-        });
     }
 
     fn ui_memory(&mut self, ui: &mut egui::Ui) {
@@ -2054,6 +2206,10 @@ fn main() -> eframe::Result<()> {
                     app.start_junk_scan();
                 }
                 Ok("memory") => app.view = View::Memory,
+                Ok("large") => {
+                    app.view = View::Large;
+                    app.start_large_scan();
+                }
                 Ok("dupes") => {
                     app.view = View::Dupes;
                     app.start_dupe_scan();
