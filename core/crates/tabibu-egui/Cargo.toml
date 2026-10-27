@@ -1,0 +1,14 @@
+[package]
+name = "tabibu-egui"
+version = "0.1.0"
+edition = "2021"
+description = "Native egui desktop UI for Tabibu (replacing the Tauri webview shell). Phase 1: Space Analyzer."
+
+[[bin]]
+name = "tabibu-egui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.31"
+tabibu-walk = { path = "../tabibu-walk" }
+tabibu-engine = { path = "../tabibu-engine" }

@@ -19,6 +19,7 @@ members = [
     "crates/tabibu-dohd",
     "crates/tabibu-cli",
     "crates/tabibu-devscan",
+    "crates/tabibu-egui",
 ]
 
 [workspace.package]
