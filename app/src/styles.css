@@ -24,7 +24,7 @@
   --space-m: 12px;
   --space-l: 16px;
   --space-xl: 24px;
-  --radius: 10px;
+  --radius: 8px;
   --radius-s: 6px;
   --dur-fast: 0.15s;
   --dur: 0.28s;
@@ -468,22 +468,66 @@ button.sm { font-size: 12px; padding: 4px 12px; }
 /* active nav item tinted by its own section accent */
 .nav-item.active { color: var(--view-accent); background: color-mix(in srgb, var(--view-accent) 16%, transparent); }
 
-/* ---------- Dashboard ---------- */
-.dash { padding: var(--space-l) var(--space-xl) var(--space-xl); display: grid; gap: var(--space-l);
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.dash .wide { grid-column: 1 / -1; }
-.dcard { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-l); }
-.dcard .dh { font-size: 12px; color: var(--text-dim); margin-bottom: var(--space-s); display: flex; align-items: center; gap: 6px; }
-.dcard .dh svg { width: 15px; height: 15px; }
-.dcard .big { font-size: 26px; font-weight: 700; font-family: var(--mono); letter-spacing: -0.01em; }
-.dcard .small { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
-.health-hero {
-  background: linear-gradient(150deg, #14313a, #0c1f26); color: #eaf6f2;
-  border: none; display: flex; align-items: center; gap: var(--space-xl);
+/* ---------- Dashboard (redesign: glassy bento, violet + lime, 8px radius) ---------- */
+.dash2 {
+  padding: var(--space-l) var(--space-xl) var(--space-xl);
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-auto-rows: 136px;
 }
-.health-hero .ring-wrap { flex: none; }
-.health-hero h3 { font-size: 13px; opacity: 0.7; font-weight: 500; }
-.health-hero .verdict { font-size: 30px; font-weight: 700; }
+.m-card {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px; padding: 16px;
+  display: flex; flex-direction: column; min-width: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+@media (prefers-color-scheme: light) {
+  .m-card { background: #fff; border-color: var(--border); box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+}
+/* Violet-accented variant */
+.m-card.violet {
+  background: linear-gradient(155deg, rgba(139, 92, 246, 0.22), rgba(139, 92, 246, 0.05));
+  border-color: rgba(139, 92, 246, 0.40);
+}
+.m-label { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.m-big { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin-top: 2px; line-height: 1.05; }
+.m-sub { font-size: 11.5px; color: var(--text-dim); margin-top: auto; }
+
+/* Progress indicators */
+.barrow { display: flex; align-items: flex-end; gap: 2.5px; height: 20px; margin-top: 10px; }
+.barrow .vbar { flex: 1; height: 100%; min-width: 2px; border-radius: 2px; background: var(--track); transition: background .2s; }
+.dotrow { display: flex; align-items: center; gap: 4px; margin-top: 12px; }
+.dotrow .pdot { width: 6px; height: 6px; border-radius: 50%; background: var(--track); }
+
+/* Gradient bar (battery etc.) */
+.gbar { height: 8px; border-radius: 20px; background: var(--track); overflow: hidden; margin-top: 12px; }
+.gbar > i { display: block; height: 100%; border-radius: 20px;
+  background: linear-gradient(90deg, rgba(139,92,246,0.5), #8b5cf6); }
+
+/* Big health ring — tall hero card */
+.ring-card { grid-row: span 2; align-items: center; justify-content: center; text-align: center; gap: 2px; }
+.ring-card .ringwrap { line-height: 0; }
+.ring-card .ring-title { font-size: 15px; font-weight: 600; margin-top: 10px; }
+.ring-card .m-sub { margin-top: 2px; }
+
+/* Semicircle arc gauge card */
+.arc-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; height: 100%; }
+.arcwrap { line-height: 0; flex: none; }
+
+/* Live-graph cards keep their chart snug to the bottom */
+.m-card > div > svg { display: block; }
+
+/* Smart Scan CTA (wide) */
+.cta-card { grid-column: span 2; justify-content: center; }
+.cta-card .cta-text { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+.cta-card .cta-btn {
+  margin-top: 14px; align-self: flex-start; padding: 9px 20px; border: none; border-radius: 8px;
+  font-weight: 600; color: #fff; cursor: pointer;
+  background: linear-gradient(155deg, #9d78f7, #7c4ff0);
+  box-shadow: 0 6px 18px rgba(124, 79, 240, 0.35);
+}
+.cta-card .cta-btn:hover { filter: brightness(1.08); }
 
 /* ---------- Toggle switch (settings) ---------- */
 /* Checkbox-based toggle (Settings). Scoped with :has(input) so it does NOT

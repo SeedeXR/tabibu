@@ -2215,77 +2215,133 @@ function replaceNode(id, node) {
   const el = document.getElementById(id);
   if (el) el.replaceWith(node);
 }
+// ---- Dashboard accent palette (matches the redesign: violet + lime) ----
+const DASH_PRP = "#8b5cf6", DASH_GRN = "#a8d44f", DASH_ORG = "#f97316";
+
+// A metric card: small label, big value, an inline indicator, optional sub.
+function metricCard(label, big, indicator, variant, sub, id) {
+  const props = { class: "m-card" + (variant ? " " + variant : "") };
+  if (id) props.id = id;
+  return h("div", props,
+    h("div", { class: "m-label" }, label),
+    h("div", { class: "m-big" }, big),
+    indicator || h("div", {}),
+    sub ? h("div", { class: "m-sub" }, sub) : null);
+}
+// A row of small vertical bars filled to `frac` (the webview's "consistency" look).
+function barRow(frac, color) {
+  const n = 22, on = Math.round(Math.min(Math.max(frac, 0), 1) * n), bars = [];
+  for (let i = 0; i < n; i++) bars.push(h("span", { class: "vbar" + (i < on ? " on" : ""), style: i < on ? `background:${color}` : "" }));
+  return h("div", { class: "barrow" }, ...bars);
+}
+// A row of dots filled to `frac`.
+function dotRow(frac, color) {
+  const n = 16, on = Math.round(Math.min(Math.max(frac, 0), 1) * n), dots = [];
+  for (let i = 0; i < n; i++) dots.push(h("span", { class: "pdot" + (i < on ? " on" : ""), style: i < on ? `background:${color}` : "" }));
+  return h("div", { class: "dotrow" }, ...dots);
+}
+function miniSpark(key, color) {
+  const s = dashHist[key];
+  return s.length > 1 ? lineChart(s, color, null, 240, 40) : h("div", { class: "m-sub", style: "margin-top:8px" }, "collecting…");
+}
+
 function memCard(sample) {
-  if (!sample) return h("div", { class: "dcard", id: "dash-mem-card" });
-  const memFrac = sample.used_memory_bytes / Math.max(sample.total_memory_bytes, 1);
-  return dcard("cpu", "Memory", `${Math.round(memFrac * 100)}% used`,
-    `${fmtRam(sample.used_memory_bytes)} of ${fmtRam(sample.total_memory_bytes)}`
-    + (sample.used_swap_bytes > 0 ? ` · swap ${fmtRam(sample.used_swap_bytes)}` : ""),
-    "dash-mem-card");
+  const f = sample ? sample.used_memory_bytes / Math.max(sample.total_memory_bytes, 1) : 0;
+  return metricCard("Memory", `${Math.round(f * 100)}%`, miniSpark("mem", DASH_PRP), "",
+    sample ? `${fmtRam(sample.used_memory_bytes)} / ${fmtRam(sample.total_memory_bytes)}` : "—", "dash-mem-card");
 }
 function cpuCard(sample) {
-  if (!sample) return h("div", { class: "dcard", id: "dash-cpu-card" });
-  return dcard("gauge", "CPU", `${Math.round(sample.cpu_percent)}%`, "across all cores", "dash-cpu-card");
+  const f = sample ? Math.min(sample.cpu_percent, 100) / 100 : 0;
+  return metricCard("CPU", `${sample ? Math.round(sample.cpu_percent) : 0}%`, dotRow(f, DASH_PRP), "violet",
+    "across all cores", "dash-cpu-card");
 }
-function buildDashboard({ disk, sample, battery, thermal, trend }) {
-  const grid = h("div", { class: "dash" });
-  // Mac Health hero: an honest verdict from free-space + memory headroom.
-  const freeFrac = disk && disk.total_bytes ? disk.available_bytes / disk.total_bytes : 1;
-  const memFrac = sample && sample.total_memory_bytes ? sample.used_memory_bytes / sample.total_memory_bytes : 0;
-  let verdict = "Good", vcolor = "#22c55e";
-  if (freeFrac < 0.1 || memFrac > 0.92) { verdict = "Needs attention"; vcolor = "#f59e0b"; }
-  if (freeFrac < 0.05) { verdict = "Low on space"; vcolor = "#ef4444"; }
-  grid.append(h("div", { class: "dcard health-hero wide" },
-    h("div", { class: "ring-wrap" }, ringSvg(freeFrac, verdict.split(" ")[0], vcolor, 120)),
-    h("div", {}, h("h3", {}, "Mac Health"), h("div", { class: "verdict", style: `color:${vcolor}` }, verdict),
-      h("div", { class: "small", style: "color:#9fc7bd;margin-top:6px" },
-        disk ? `${fmtBytes(disk.available_bytes)} free of ${fmtBytes(disk.total_bytes)}` : "Storage unavailable"))));
 
-  if (disk) {
-    grid.append(dcard("hard-drive", "Storage", `${fmtBytes(disk.available_bytes)} free`,
-      `of ${fmtBytes(disk.total_bytes)} · ${Math.round((1 - freeFrac) * 100)}% used`));
-  }
-  // Always render these (even if the first sample failed) so the live updater
-  // can replace them by id; memCard/cpuCard return an id'd placeholder on null.
-  grid.append(memCard(sample));
+function buildDashboard({ disk, sample, battery, thermal, trend }) {
+  const grid = h("div", { class: "dash2" });
+  const freeFrac = disk && disk.total_bytes ? disk.available_bytes / disk.total_bytes : 1;
+  const usedFrac = 1 - freeFrac;
+  const memFrac = sample && sample.total_memory_bytes ? sample.used_memory_bytes / sample.total_memory_bytes : 0;
+
+  // Honest Mac Health score (0–100) from free-space + memory headroom.
+  const score = Math.round(Math.max(0, Math.min(100, (freeFrac * 0.6 + (1 - memFrac) * 0.4) * 100)));
+  const verdict = score >= 70 ? "Good" : score >= 40 ? "Fair" : "Low";
+
+  // Big health ring (tall, violet, glowing) — the hero.
+  grid.append(h("div", { class: "m-card ring-card" },
+    h("div", { class: "ringwrap", html: ringGaugeSvg(score / 100, String(score), DASH_PRP, 176) }),
+    h("div", { class: "ring-title" }, "Mac Health"),
+    h("div", { class: "m-sub" }, disk ? `${verdict} · ${fmtBytes(disk.available_bytes)} free` : verdict)));
+
+  // Three metric cards (CPU violet + dots, Memory + spark, Storage + bars).
   grid.append(cpuCard(sample));
+  grid.append(memCard(sample));
+  grid.append(metricCard("Storage", `${Math.round(usedFrac * 100)}%`, barRow(usedFrac, DASH_GRN), "",
+    disk ? `${fmtBytes(disk.available_bytes)} free` : "—"));
+
+  // Disk free — semicircle arc gauge (the "80%" look).
+  if (disk) {
+    grid.append(h("div", { class: "m-card" },
+      h("div", { class: "arc-row" },
+        h("div", {}, h("div", { class: "m-big" }, fmtBytes(disk.available_bytes)),
+          h("div", { class: "m-sub" }, `free of ${fmtBytes(disk.total_bytes)}`)),
+        h("div", { class: "arcwrap", html: arcGaugeSvg(usedFrac, DASH_GRN) }))));
+  }
+
+  // Battery — gradient bar card.
   if (battery && battery.has_battery) {
-    grid.append(dcard("battery", "Battery", battery.charge_percent != null ? `${battery.charge_percent}%` : "—",
-      [battery.state, battery.cycle_count != null ? `${battery.cycle_count} cycles` : null,
-       battery.health_percent != null ? `${battery.health_percent}% health` : null].filter(Boolean).join(" · ")));
+    const bf = (battery.charge_percent ?? 0) / 100;
+    grid.append(h("div", { class: "m-card violet" },
+      h("div", { class: "m-label" }, "Battery"),
+      h("div", { class: "m-big" }, battery.charge_percent != null ? `${battery.charge_percent}%` : "—"),
+      h("div", { class: "gbar" }, h("i", { style: `width:${Math.max(bf * 100, 3)}%` })),
+      h("div", { class: "m-sub" }, [battery.state, battery.cycle_count != null ? `${battery.cycle_count} cycles` : null].filter(Boolean).join(" · "))));
   }
-  const sm = sessions.smart;
-  grid.append(sm && sm.items && sm.items.length
-    ? dcard("sparkles", "Last Smart Scan", fmtBytes(foundBytes(sm)) + " found", `${sm.items.length} items — open Smart Scan to review`)
-    : h("div", { class: "dcard" }, h("div", { class: "dh" }, icon("sparkles"), "Smart Scan"),
-        h("div", { class: "small", style: "margin-bottom:10px" }, "No scan yet this session."),
-        h("button", { class: "primary", onClick: () => navigate("smart") }, "Run Smart Scan")));
-  if (thermal) {
-    const tcolor = thermal.pressure === "Nominal" ? "#22c55e" : thermal.pressure === "Fair" ? "#f59e0b" : "#ef4444";
-    grid.append(h("div", { class: "dcard" }, h("div", { class: "dh" }, icon("gauge"), "Thermal"),
-      h("div", { class: "big", style: `color:${tcolor}` }, thermal.pressure),
-      h("div", { class: "small" }, thermal.speed_limit != null ? `CPU speed limit ${thermal.speed_limit}%` : "No throttling")));
-  }
-  grid.append(graphCard("CPU", "cpu", "#f97316", "%", "dash-cpu-graph"));
-  grid.append(graphCard("Memory", "mem", "#3b82f6", "%", "dash-mem-graph"));
-  if (trend && trend.length > 1) {
-    const series = trend.map((p) => p[1] / 1e9); // GB
-    grid.append(h("div", { class: "dcard wide" }, h("div", { class: "dh" }, icon("hard-drive"), "Free space trend"),
-      lineChart(series, "#14b8a6", (v) => `${v.toFixed(0)} GB`, 720, 90)));
-  }
+
+  // Live CPU + Memory graphs.
+  grid.append(graphCard("CPU", "cpu", DASH_ORG, "%", "dash-cpu-graph"));
+  grid.append(graphCard("Memory", "mem", DASH_PRP, "%", "dash-mem-graph"));
+
+  // Smart Scan CTA (wide, glassy).
+  grid.append(h("div", { class: "m-card cta-card" },
+    h("div", { class: "m-label" }, "Smart Scan"),
+    h("div", { class: "cta-text" }, "Find reclaimable space across caches, logs and large files."),
+    h("button", { class: "cta-btn", onClick: () => navigate("smart") }, "Run Smart Scan")));
   return grid;
 }
-function dcard(ic, title, big, small, id) {
-  const props = id ? { class: "dcard", id } : { class: "dcard" };
-  return h("div", props, h("div", { class: "dh" }, icon(ic), title),
-    h("div", { class: "big" }, big), h("div", { class: "small" }, small || ""));
-}
+
 function graphCard(title, key, color, unit, id) {
   const series = dashHist[key];
   const last = series.length ? series[series.length - 1] : 0;
-  return h("div", { class: "dcard", id }, h("div", { class: "dh" }, icon("activity"), title),
-    h("div", { class: "big", style: `color:${color}` }, `${Math.round(last)}${unit}`),
-    series.length > 1 ? lineChart(series, color, null, 280, 64) : h("div", { class: "small" }, "collecting…"));
+  return h("div", { class: "m-card", id },
+    h("div", { class: "m-label" }, title),
+    h("div", { class: "m-big", style: `color:${color}` }, `${Math.round(last)}${unit}`),
+    series.length > 1 ? lineChart(series, color, null, 280, 56) : h("div", { class: "m-sub", style: "margin-top:8px" }, "collecting…"));
+}
+// Big ring gauge: a glowing violet arc with the value centred + faint dots around.
+function ringGaugeSvg(frac, label, color, size) {
+  const cx = size / 2, r = size * 0.36, c = 2 * Math.PI * r, off = c * (1 - Math.min(Math.max(frac, 0), 1));
+  let dots = ""; const dn = 44, dr = r + 16;
+  for (let i = 0; i < dn; i++) { const a = (i / dn) * 2 * Math.PI; dots += `<circle cx="${(cx + dr * Math.cos(a)).toFixed(1)}" cy="${(cx + dr * Math.sin(a)).toFixed(1)}" r="1" fill="rgba(255,255,255,0.16)"/>`; }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <defs><filter id="rgl" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    ${dots}
+    <circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="5"/>
+    <circle cx="${cx}" cy="${cx}" r="${r}" fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 ${cx} ${cx})" filter="url(#rgl)"/>
+    <text x="${cx}" y="${cx}" text-anchor="middle" dominant-baseline="central" font-size="${(size * 0.28).toFixed(0)}" font-weight="700" fill="#fff">${label}</text>
+  </svg>`;
+}
+// Semicircle gauge drawn as a fan of small bars filled to `frac`, with a % label.
+function arcGaugeSvg(frac, color) {
+  const w = 130, hgt = 74, n = 24, on = Math.round(Math.min(Math.max(frac, 0), 1) * n), cx = w / 2, cy = hgt - 8, R = 54;
+  let bars = "";
+  for (let i = 0; i < n; i++) {
+    const a = Math.PI - (i / (n - 1)) * Math.PI;
+    const x1 = cx + (R - 11) * Math.cos(a), y1 = cy - (R - 11) * Math.sin(a);
+    const x2 = cx + R * Math.cos(a), y2 = cy - R * Math.sin(a);
+    const col = i < on ? color : "rgba(255,255,255,0.12)";
+    bars += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${col}" stroke-width="3" stroke-linecap="round"/>`;
+  }
+  return `<svg width="${w}" height="${hgt}" viewBox="0 0 ${w} ${hgt}">${bars}<text x="${cx}" y="${cy - 2}" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">${Math.round(frac * 100)}%</text></svg>`;
 }
 // Monotonic id source so each chart's gradient <def> is unique — two charts
 // on screen (CPU + Memory) must not collide, or both fills resolve to the
