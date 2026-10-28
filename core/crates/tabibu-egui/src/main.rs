@@ -194,6 +194,16 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(12.0, 6.0);
+    // Lean, Zed-like scrollbars: a thin floating handle that only thickens on
+    // hover, instead of egui's chunky always-on bar.
+    let mut scroll = egui::style::ScrollStyle::thin();
+    scroll.floating = true;
+    scroll.bar_width = 6.0;
+    scroll.floating_width = 4.0;
+    scroll.handle_min_length = 24.0;
+    scroll.bar_inner_margin = 2.0;
+    scroll.bar_outer_margin = 0.0;
+    style.spacing.scroll = scroll;
     // Match the webview's type scale (13px base, SF Mono for values) instead of
     // egui's looser 14px default — the biggest single lever on "designed" text.
     use egui::{FontFamily, FontId, TextStyle};
@@ -1048,6 +1058,7 @@ struct UninstallState {
     busy: Option<PathBuf>,
     action_rx: Option<Receiver<(String, u64, usize)>>, // (name, freed, item count)
     last: Option<(String, u64, usize)>,
+    query: String,
 }
 
 enum DupePhase {
@@ -3447,20 +3458,17 @@ impl TabibuApp {
     fn ui_uninstall(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0x63, 0x66, 0xf1); // indigo
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Uninstaller").size(19.0));
-            if self.uninstall.loaded {
-                ui.label(
-                    RichText::new(format!("· {} apps", self.uninstall.apps.len()))
-                        .color(p.text_dim),
-                );
-            }
-        });
-        ui.add_space(6.0);
+        let n = self.uninstall.apps.len();
+        let sub = if self.uninstall.loaded {
+            format!("{n} apps")
+        } else {
+            "apps & their leftovers".to_string()
+        };
+        view_header(ui, &p, "Uninstaller", &sub);
+
         if let Some((name, freed, count)) = self.uninstall.last.clone() {
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
+                ui.add_space(16.0);
                 ui.label(
                     RichText::new(format!(
                         "Removed {name} — {} to the Trash · {count} item(s)",
@@ -3469,28 +3477,51 @@ impl TabibuApp {
                     .color(accent),
                 );
             });
+            ui.add_space(4.0);
         }
-        ui.separator();
 
         if !self.uninstall.loaded {
             self.ui_center(ui, "Finding installed apps…", true);
             return;
         }
 
+        // Search box (filters the list, like the webview's app browser).
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.uninstall.query)
+                    .hint_text("Search apps")
+                    .desired_width(240.0),
+            );
+        });
+        ui.add_space(6.0);
+        ui.separator();
+
+        let q = self.uninstall.query.to_lowercase();
         let mut to_remove: Option<(PathBuf, String)> = None;
         let busy = self.uninstall.busy.clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (path, bundle) in &self.uninstall.apps {
-                    ui.add_space(4.0);
+                    let name = app_display_name(path);
+                    if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    ui.add_space(5.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        let (icon, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                        draw_file(ui, icon, p.text_faint);
-                        ui.label(app_display_name(path));
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(&name).size(13.0));
+                            ui.label(
+                                RichText::new(bundle.as_str())
+                                    .color(p.text_dim)
+                                    .monospace()
+                                    .size(11.0),
+                            );
+                        });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(8.0);
+                            ui.add_space(16.0);
                             let this_busy = busy.as_deref() == Some(path.as_path());
                             let enabled = busy.is_none();
                             let label = if this_busy {
@@ -3503,14 +3534,15 @@ impl TabibuApp {
                                     Color32::from_rgb(0xdc, 0x26, 0x26)
                                 } else {
                                     p.text_faint
-                                });
+                                })
+                                .corner_radius(CornerRadius::same(7));
                             if ui.add_enabled(enabled, btn).clicked() {
                                 to_remove = Some((path.clone(), bundle.clone()));
                             }
                         });
-                    })
-                    .response
-                    .on_hover_text(path.to_string_lossy().into_owned());
+                    });
+                    ui.add_space(5.0);
+                    ui.separator();
                 }
             });
 
