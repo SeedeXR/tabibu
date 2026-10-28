@@ -3105,11 +3105,7 @@ impl TabibuApp {
     fn ui_battery(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0x22, 0xc5, 0x5e); // green — webview battery accent
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Battery").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Battery", "power & health");
 
         let Some(b) = self.battery.data.clone() else {
             self.ui_center(ui, "Reading battery…", true);
@@ -3123,52 +3119,60 @@ impl TabibuApp {
             return;
         }
 
-        let dash = || "—".to_string();
+        let charge = b.charge_percent.unwrap_or(0);
+        let color = if charge < 20 {
+            Color32::from_rgb(0xdc, 0x26, 0x26)
+        } else {
+            accent
+        };
+        // Charge dial + state / time remaining.
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(130.0, 118.0), Sense::hover());
-            let center = Pos2::new(rect.center().x, rect.min.y + 50.0);
-            let frac = b.charge_percent.unwrap_or(0) as f32 / 100.0;
-            draw_ring(ui, center, 40.0, frac, accent, p.track);
-            ui.painter().text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                b.charge_percent.map_or_else(dash, |c| format!("{c}%")),
-                FontId::proportional(20.0),
-                p.text,
-            );
-            ui.painter().text(
-                Pos2::new(center.x, rect.max.y - 4.0),
-                egui::Align2::CENTER_BOTTOM,
-                b.state.clone().unwrap_or_default(),
-                FontId::proportional(12.0),
-                p.text_dim,
-            );
             ui.add_space(16.0);
+            dial(
+                ui,
+                &p,
+                &b.state.clone().unwrap_or_default(),
+                charge as f32 / 100.0,
+                &format!("{charge}%"),
+                color,
+            );
+            ui.add_space(28.0);
             ui.vertical(|ui| {
-                ui.add_space(14.0);
-                let rows = [
-                    (
-                        "Health",
-                        b.health_percent.map_or_else(dash, |h| format!("{h}%")),
-                    ),
-                    (
-                        "Cycle count",
-                        b.cycle_count.map_or_else(dash, |c| c.to_string()),
-                    ),
-                    ("Condition", b.condition.clone().unwrap_or_else(dash)),
-                    (
-                        "Time remaining",
-                        b.time_remaining.clone().unwrap_or_else(dash),
-                    ),
-                ];
-                for (k, v) in rows {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(k).color(p.text_dim));
-                        ui.add_space(12.0);
-                        ui.label(v);
-                    });
-                    ui.add_space(4.0);
+                ui.add_space(22.0);
+                if let Some(st) = &b.state {
+                    kv_row(ui, &p, "State", st);
+                }
+                if let Some(tr) = &b.time_remaining {
+                    kv_row(ui, &p, "Time remaining", tr);
+                }
+            });
+        });
+
+        // Battery health card.
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            card_frame(ui, &p, 420.0, 0.0, |ui| {
+                ui.label(semibold("Battery health").size(14.0));
+                ui.add_space(10.0);
+                if let Some(h) = b.health_percent {
+                    kv_row(ui, &p, "Capacity vs. design", &format!("{h}%"));
+                }
+                if let Some(c) = b.cycle_count {
+                    kv_row(ui, &p, "Cycle count", &c.to_string());
+                }
+                if let Some(cond) = &b.condition {
+                    kv_row(ui, &p, "Condition", cond);
+                }
+                if b.health_percent.is_none() && b.cycle_count.is_none() {
+                    ui.label(
+                        RichText::new(
+                            "Detailed health metrics weren't available from this Mac's battery \
+                             controller.",
+                        )
+                        .color(p.text_dim)
+                        .size(12.0),
+                    );
                 }
             });
         });
