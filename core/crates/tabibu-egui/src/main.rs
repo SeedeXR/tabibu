@@ -864,6 +864,9 @@ struct TabibuApp {
     /// opted out via `TABIBU_NO_TRAY`.
     shell: Option<Shell>,
     shell_init: bool,
+    /// Full Disk Access granted? Shown as a top banner when false. Defaults to
+    /// `true` so no banner flashes before the real probe runs on frame 1.
+    fda: bool,
 }
 
 impl Default for TabibuApp {
@@ -894,8 +897,22 @@ impl Default for TabibuApp {
             uninstall: UninstallState::default(),
             shell: None,
             shell_init: false,
+            fda: true,
         }
     }
+}
+
+/// Re-probe Full Disk Access (reads a TCC-gated path). Cheap but does IO, so
+/// it's called only on the first frame and when the user taps "Re-check".
+fn probe_fda() -> bool {
+    tabibu_sys::has_full_disk_access(&tabibu_sys::home_dir())
+}
+
+/// Open the macOS Privacy → Full Disk Access settings pane.
+fn open_fda_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn();
 }
 
 const ROW_H: f32 = 34.0;
@@ -1557,6 +1574,7 @@ impl eframe::App for TabibuApp {
         // firing even while the window is hidden, so the tray stays responsive.
         if !self.shell_init {
             self.shell_init = true;
+            self.fda = probe_fda();
             if std::env::var_os("TABIBU_NO_TRAY").is_none() {
                 self.shell = Shell::new();
             }
@@ -1869,6 +1887,44 @@ impl eframe::App for TabibuApp {
 
         // Left navigation rail — more entries land here as the migration adds views.
         let p = palette(self.dark);
+
+        // Full Disk Access banner: without FDA, scans miss system caches, other
+        // apps' data and protected folders. Shown across every view until granted
+        // (matches the Tauri shell's permission prompt). A dev binary run from the
+        // terminal has no FDA, so this surfaces there too.
+        if !self.fda {
+            egui::TopBottomPanel::top("fda_banner")
+                .frame(egui::Frame {
+                    fill: Color32::from_rgb(0x7a, 0x5a, 0x12),
+                    inner_margin: egui::Margin::symmetric(16, 10),
+                    ..Default::default()
+                })
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("⚠  Full Disk Access needed")
+                                .color(Color32::WHITE)
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "— Tabibu can't see system caches, other apps' data, \
+                                 or protected folders until you grant it.",
+                            )
+                            .color(Color32::from_rgb(0xf0, 0xe6, 0xcf)),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Re-check").clicked() {
+                                self.fda = probe_fda();
+                            }
+                            if ui.button("Open System Settings").clicked() {
+                                open_fda_settings();
+                            }
+                        });
+                    });
+                });
+        }
+
         egui::SidePanel::left("nav")
             .resizable(false)
             .exact_width(180.0)
