@@ -954,8 +954,18 @@ function startSpaceScan() {
   const s = spaceState;
   s.phase = "scanning"; s.error = null; s.expanded = new Set(); s.sel.clear(); s.root = null;
   spaceView();
-  invoke("size_tree", { root: DISK_ROOT, maxDepth: 1 })
-    .then((root) => { s.root = root; s.phase = "browse"; })
+  // Load several levels up front (the walk already sizes the WHOLE subtree
+  // regardless of depth — maxDepth only bounds how many levels are retained), so
+  // the tree arrives populated with branches you can drill into instantly;
+  // anything deeper than this still lazy-loads on expand.
+  invoke("size_tree", { root: DISK_ROOT, maxDepth: 3 })
+    .then((root) => {
+      s.root = root;
+      // Pre-expand the top-level folders so the disk shows as a populated tree
+      // immediately, not a flat row you have to click open.
+      for (const c of (root.children || [])) if (c.is_dir && Number(c.size_bytes) > 0) s.expanded.add(c.path);
+      s.phase = "browse";
+    })
     .catch((e) => { s.error = String(e); })
     .finally(() => { if (state.current === "space") spaceView(); });
 }
