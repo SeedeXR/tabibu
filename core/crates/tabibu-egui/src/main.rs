@@ -837,6 +837,38 @@ fn stat_card(
     });
 }
 
+/// A labelled dial (ring + centred % + caption) — the webview's `.dial`.
+fn dial(ui: &mut egui::Ui, p: &Palette, label: &str, frac: f32, big: &str, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(100.0, 112.0), Sense::hover());
+    let center = Pos2::new(rect.center().x, rect.min.y + 44.0);
+    draw_ring(ui, center, 36.0, frac, color, p.track);
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        big,
+        FontId::new(17.0, egui::FontFamily::Name("semibold".into())),
+        p.text,
+    );
+    ui.painter().text(
+        Pos2::new(center.x, rect.max.y - 2.0),
+        egui::Align2::CENTER_BOTTOM,
+        label,
+        FontId::proportional(12.0),
+        p.text_dim,
+    );
+}
+
+/// A key/value row (dim key, Inter-bold value) — the webview's `.kv`.
+fn kv_row(ui: &mut egui::Ui, p: &Palette, k: &str, v: &str) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui(Vec2::new(130.0, 18.0), |ui| {
+            ui.label(RichText::new(k).color(p.text_dim).size(12.5));
+        });
+        ui.label(metric(v).size(13.0));
+    });
+    ui.add_space(4.0);
+}
+
 /// A filled, accent-coloured primary button. Returns true on click.
 fn accent_button(ui: &mut egui::Ui, label: &str, accent: Color32) -> bool {
     let btn = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong())
@@ -3949,61 +3981,56 @@ impl TabibuApp {
             return;
         };
 
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Memory & CPU").size(19.0));
-        });
-        ui.add_space(8.0);
+        view_header(ui, &p, "Memory & CPU", "live system activity");
 
-        // CPU dial + memory/swap stats.
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(130.0, 118.0), Sense::hover());
-            let center = Pos2::new(rect.center().x, rect.min.y + 50.0);
-            draw_ring(ui, center, 40.0, s.cpu_percent / 100.0, accent, p.track);
-            ui.painter().text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                format!("{}%", s.cpu_percent.round() as i64),
-                FontId::proportional(20.0),
-                p.text,
-            );
-            ui.painter().text(
-                Pos2::new(center.x, rect.max.y - 4.0),
-                egui::Align2::CENTER_BOTTOM,
-                "CPU",
-                FontId::proportional(12.0),
-                p.text_dim,
-            );
+        let mem_frac = s.used_memory_bytes as f32 / s.total_memory_bytes.max(1) as f32;
+        let mem_color = if mem_frac > 0.9 {
+            Color32::from_rgb(0xdc, 0x26, 0x26)
+        } else if mem_frac > 0.75 {
+            Color32::from_rgb(0xf5, 0x9e, 0x0b)
+        } else {
+            Color32::from_rgb(0x16, 0xa3, 0x4a)
+        };
 
+        // Two dials (Memory + CPU) + a key/value block — matches the webview.
+        ui.horizontal(|ui| {
             ui.add_space(16.0);
-            let mem_frac = s.used_memory_bytes as f32 / s.total_memory_bytes.max(1) as f32;
+            dial(
+                ui,
+                &p,
+                "Memory",
+                mem_frac,
+                &format!("{}%", (mem_frac * 100.0).round() as i64),
+                mem_color,
+            );
+            ui.add_space(20.0);
+            dial(
+                ui,
+                &p,
+                "CPU",
+                s.cpu_percent / 100.0,
+                &format!("{}%", s.cpu_percent.round() as i64),
+                accent,
+            );
+            ui.add_space(32.0);
             ui.vertical(|ui| {
-                ui.add_space(20.0);
-                ui.label(
-                    RichText::new(format!(
-                        "Memory  {} / {}",
+                ui.add_space(16.0);
+                kv_row(
+                    ui,
+                    &p,
+                    "Memory used",
+                    &format!(
+                        "{} / {}",
                         fmt_ram(s.used_memory_bytes),
                         fmt_ram(s.total_memory_bytes)
-                    ))
-                    .strong(),
-                );
-                ui.add_space(6.0);
-                let (bar, _) = ui.allocate_exact_size(Vec2::new(360.0, 8.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(bar, CornerRadius::same(4), p.track);
-                ui.painter().rect_filled(
-                    Rect::from_min_size(
-                        bar.min,
-                        Vec2::new(bar.width() * mem_frac.clamp(0.0, 1.0), bar.height()),
                     ),
-                    CornerRadius::same(4),
-                    accent,
                 );
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(format!("Swap used  {}", fmt_ram(s.used_swap_bytes)))
-                        .color(p.text_dim),
+                kv_row(ui, &p, "Swap used", &fmt_ram(s.used_swap_bytes));
+                kv_row(
+                    ui,
+                    &p,
+                    "Memory free",
+                    &fmt_ram(s.total_memory_bytes.saturating_sub(s.used_memory_bytes)),
                 );
             });
         });
