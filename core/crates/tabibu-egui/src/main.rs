@@ -12,6 +12,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod shell;
+use shell::{Shell, ShellEvent};
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -856,6 +859,11 @@ struct TabibuApp {
     universal: UniversalState,
     brew: BrewState,
     uninstall: UninstallState,
+    /// Menu-bar shell (tray + menu + global shortcut). Created lazily on the
+    /// first frame; `None` until then, or if the tray can't be built / was
+    /// opted out via `TABIBU_NO_TRAY`.
+    shell: Option<Shell>,
+    shell_init: bool,
 }
 
 impl Default for TabibuApp {
@@ -884,6 +892,8 @@ impl Default for TabibuApp {
             universal: UniversalState::default(),
             brew: BrewState::default(),
             uninstall: UninstallState::default(),
+            shell: None,
+            shell_init: false,
         }
     }
 }
@@ -1526,8 +1536,51 @@ fn flatten(
     }
 }
 
+impl TabibuApp {
+    /// Reveal + focus the dashboard window (from a tray/menu/hotkey action),
+    /// optionally navigating to a view. The window is only ever hidden (on
+    /// close), never destroyed, so making it visible brings it right back.
+    fn show_window(&mut self, ctx: &egui::Context, view: Option<View>) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        if let Some(v) = view {
+            self.view = v;
+        }
+    }
+}
+
 impl eframe::App for TabibuApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Menu-bar shell: build once (after the event loop is up — an
+        // NSStatusItem created earlier won't attach), then drain its tray / menu
+        // / hotkey channels every frame. A short repaint heartbeat keeps update()
+        // firing even while the window is hidden, so the tray stays responsive.
+        if !self.shell_init {
+            self.shell_init = true;
+            if std::env::var_os("TABIBU_NO_TRAY").is_none() {
+                self.shell = Shell::new();
+            }
+        }
+        if self.shell.is_some() {
+            let events = self.shell.as_ref().map(Shell::poll).unwrap_or_default();
+            for ev in events {
+                match ev {
+                    ShellEvent::Open => self.show_window(ctx, None),
+                    ShellEvent::Settings => self.show_window(ctx, Some(View::Settings)),
+                    ShellEvent::Quit => std::process::exit(0),
+                }
+            }
+            ctx.request_repaint_after(Duration::from_millis(150));
+            // Closing the dashboard hides it and keeps the app alive in the menu
+            // bar (parity with the Tauri shell). Only tray Quit / Cmd-Q exits.
+            // ponytail: Dock icon lingers (no Regular↔Accessory toggle yet) —
+            // that needs objc2-app-kit; deferred to the bundling phase.
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+
         // Poll background work.
         if let Some(rx) = &self.scan_rx {
             if let Ok(res) = rx.try_recv() {

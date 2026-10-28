@@ -23,3 +23,10 @@ tabibu-devscan = { path = "../tabibu-devscan" }
 tabibu-universal = { path = "../tabibu-universal" }
 tabibu-brew = { path = "../tabibu-brew" }
 tabibu-uninstall = { path = "../tabibu-uninstall" }
+
+# Menu-bar shell (ports app/src-tauri/src/tray.rs to the standalone eframe build).
+# Versions pinned to the same ones Tauri already resolves, so no new fetch.
+tray-icon = "0.25"
+global-hotkey = "0.8"
+notify-rust = "4"
+png = "0.18" # decode the bundled RGBA tray template (already in the lock via eframe)
