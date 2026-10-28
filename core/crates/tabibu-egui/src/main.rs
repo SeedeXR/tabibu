@@ -3180,11 +3180,7 @@ impl TabibuApp {
 
     fn ui_startup(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Startup Items").size(19.0));
-        });
-        ui.add_space(6.0);
+        view_header(ui, &p, "Startup Items", "what launches at login");
         ui.separator();
 
         let Some(rep) = self.startup.data.clone() else {
@@ -3314,11 +3310,7 @@ impl TabibuApp {
     fn ui_disk(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0xa8, 0x55, 0xf7); // purple
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Disk").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Disk", "space on your startup volume");
 
         let Some(d) = self.disk.data else {
             self.ui_center(ui, "Reading disk…", true);
@@ -3645,11 +3637,7 @@ impl TabibuApp {
 
     fn ui_settings(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Settings").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Settings", "appearance, startup & about");
         ui.separator();
         ui.add_space(10.0);
 
@@ -3710,11 +3698,7 @@ impl TabibuApp {
     fn ui_universal(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0x08, 0x91, 0xb2); // cyan
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Universal Binaries").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Universal Binaries", "reclaim unused CPU slices");
 
         if !self.universal.loaded {
             self.ui_center(ui, "Scanning apps for extra architecture slices…", true);
@@ -3812,11 +3796,7 @@ impl TabibuApp {
     fn ui_brew(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0xd9, 0x77, 0x06); // amber
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Developer / CLI").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Developer / CLI", "Homebrew packages & cleanup");
 
         if !self.brew.loaded {
             self.ui_center(ui, "Checking Homebrew…", true);
@@ -3894,11 +3874,7 @@ impl TabibuApp {
     fn ui_docker(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0x24, 0x96, 0xed); // docker blue
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Docker").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Docker", "images, containers & build cache");
 
         if !self.docker.loaded {
             self.ui_center(ui, "Checking Docker…", true);
@@ -4282,11 +4258,7 @@ impl TabibuApp {
         let p = palette(self.dark);
         let accent = Color32::from_rgb(0x02, 0x84, 0xc7); // blue — webview network accent
 
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(semibold("Network").size(19.0));
-        });
-        ui.add_space(10.0);
+        view_header(ui, &p, "Network", "connection & throughput");
 
         // Live throughput.
         let (down, up, tdown, tup) = self
