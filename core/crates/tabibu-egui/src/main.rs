@@ -104,12 +104,17 @@ fn install_fonts(ctx: &egui::Context) {
             &include_bytes!("../assets/42dotSans-SemiBold.ttf")[..],
         ),
         ("InterBold", &include_bytes!("../assets/Inter-Bold.ttf")[..]),
+        ("lucide", &include_bytes!("../assets/lucide.ttf")[..]),
     ] {
         fonts.font_data.insert(
             name.to_owned(),
             Arc::new(egui::FontData::from_static(bytes)),
         );
     }
+    // Lucide icon font (subset) — the exact nav icons the webview uses.
+    fonts
+        .families
+        .insert(FontFamily::Name("lucide".into()), vec!["lucide".to_owned()]);
     fonts
         .families
         .entry(FontFamily::Proportional)
@@ -2565,212 +2570,41 @@ impl eframe::App for TabibuApp {
     }
 }
 
-/// Per-view nav icon — simple painter glyphs echoing the webview's lucide set, so
-/// every nav row carries its symbol (gauge, sparkles, trash, …). `rect` is ~16px.
-#[allow(clippy::too_many_lines)]
+/// Per-view nav icon, rendered from the bundled lucide icon font — the exact
+/// glyphs the webview uses. `rect` is ~16px.
 fn draw_nav_icon(ui: &egui::Ui, rect: Rect, view: View, color: Color32) {
-    let p = ui.painter();
-    let st = Stroke::new(1.6_f32, color);
-    let b = Rect::from_center_size(rect.center(), Vec2::splat(rect.width() * 0.76));
-    let c = b.center();
-    let w = b.width();
-    let seg = |a: Pos2, d: Pos2| p.line_segment([a, d], st);
-    let rc = |r: Rect| p.rect_stroke(r, CornerRadius::same(2), st, StrokeKind::Middle);
-    match view {
-        View::Dash => {
-            p.circle_stroke(c, w * 0.44, st);
-            seg(c, Pos2::new(c.x + w * 0.28, c.y - w * 0.28));
-            p.circle_filled(c, 1.4, color);
-        }
-        View::Smart => {
-            let a = w * 0.30;
-            seg(Pos2::new(c.x, c.y - a), Pos2::new(c.x, c.y + a));
-            seg(Pos2::new(c.x - a, c.y), Pos2::new(c.x + a, c.y));
-            let (a2, cc) = (w * 0.15, Pos2::new(b.right() - w * 0.1, b.top() + w * 0.12));
-            seg(Pos2::new(cc.x, cc.y - a2), Pos2::new(cc.x, cc.y + a2));
-            seg(Pos2::new(cc.x - a2, cc.y), Pos2::new(cc.x + a2, cc.y));
-        }
-        View::Junk => {
-            let top = b.top() + h_frac(b, 0.24);
-            seg(Pos2::new(b.left(), top), Pos2::new(b.right(), top));
-            seg(
-                Pos2::new(c.x - w * 0.12, b.top()),
-                Pos2::new(c.x + w * 0.12, b.top()),
-            );
-            seg(
-                Pos2::new(c.x - w * 0.12, b.top()),
-                Pos2::new(c.x - w * 0.12, top),
-            );
-            seg(
-                Pos2::new(c.x + w * 0.12, b.top()),
-                Pos2::new(c.x + w * 0.12, top),
-            );
-            rc(Rect::from_min_max(
-                Pos2::new(b.left() + w * 0.14, top),
-                Pos2::new(b.right() - w * 0.14, b.bottom()),
-            ));
-        }
-        View::Space => {
-            // folder + magnifier
-            rc(Rect::from_min_max(
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.28)),
-                Pos2::new(b.right() - w * 0.1, b.bottom()),
-            ));
-            p.circle_stroke(Pos2::new(c.x + w * 0.12, c.y + w * 0.04), w * 0.16, st);
-            seg(
-                Pos2::new(c.x + w * 0.26, c.y + w * 0.18),
-                Pos2::new(b.right(), b.bottom()),
-            );
-        }
-        View::Dupes | View::Universal => {
-            // overlapping squares / layers
-            rc(Rect::from_min_size(
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.22)),
-                Vec2::splat(w * 0.6),
-            ));
-            rc(Rect::from_min_size(
-                Pos2::new(b.left() + w * 0.3, b.top()),
-                Vec2::splat(w * 0.6),
-            ));
-        }
-        View::Large | View::Dev => {
-            // stacked pages / package
-            rc(Rect::from_min_size(
-                Pos2::new(b.left() + w * 0.18, b.top()),
-                Vec2::new(w * 0.62, h_frac(b, 0.72)),
-            ));
-            seg(
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.22)),
-                Pos2::new(b.left(), b.bottom()),
-            );
-            seg(
-                Pos2::new(b.left(), b.bottom()),
-                Pos2::new(b.left() + w * 0.5, b.bottom()),
-            );
-        }
-        View::Net => {
-            // wifi arcs + dot
-            for (rad, yo) in [(0.44_f32, 0.12_f32), (0.26, 0.26)] {
-                let arc: Vec<Pos2> = (0..=12)
-                    .map(|k| {
-                        let t = std::f32::consts::PI * (1.15 + 0.7 * k as f32 / 12.0);
-                        Pos2::new(
-                            c.x + w * rad * t.cos(),
-                            b.bottom() - h_frac(b, yo) + w * rad * t.sin(),
-                        )
-                    })
-                    .collect();
-                p.add(Shape::line(arc, st));
-            }
-            p.circle_filled(Pos2::new(c.x, b.bottom() - h_frac(b, 0.08)), 1.6, color);
-        }
-        View::Battery => {
-            rc(Rect::from_min_max(
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.28)),
-                Pos2::new(b.right() - w * 0.12, b.bottom() - h_frac(b, 0.28)),
-            ));
-            seg(
-                Pos2::new(b.right() - w * 0.1, c.y - w * 0.1),
-                Pos2::new(b.right() - w * 0.1, c.y + w * 0.1),
-            );
-        }
-        View::Startup | View::Memory => {
-            // activity pulse / chip — a simple waveform
-            let y = c.y;
-            let pts = vec![
-                Pos2::new(b.left(), y),
-                Pos2::new(c.x - w * 0.18, y),
-                Pos2::new(c.x - w * 0.02, b.top()),
-                Pos2::new(c.x + w * 0.14, b.bottom()),
-                Pos2::new(c.x + w * 0.3, y),
-                Pos2::new(b.right(), y),
-            ];
-            p.add(Shape::line(pts, st));
-        }
-        View::Docker => {
-            rc(Rect::from_min_max(
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.38)),
-                Pos2::new(b.right(), b.bottom()),
-            ));
-            for i in 0..3 {
-                let x = b.left() + w * (0.2 + 0.28 * i as f32);
-                seg(
-                    Pos2::new(x, b.top() + h_frac(b, 0.38)),
-                    Pos2::new(x, b.top() + h_frac(b, 0.14)),
-                );
-            }
-        }
-        View::Disk => {
-            rc(Rect::from_min_max(
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.3)),
-                Pos2::new(b.right(), b.bottom() - h_frac(b, 0.1)),
-            ));
-            p.circle_filled(
-                Pos2::new(b.right() - w * 0.18, b.bottom() - h_frac(b, 0.3)),
-                1.4,
-                color,
-            );
-        }
-        View::Brew => {
-            rc(b);
-            seg(
-                Pos2::new(b.left() + w * 0.2, c.y - w * 0.14),
-                Pos2::new(b.left() + w * 0.38, c.y),
-            );
-            seg(
-                Pos2::new(b.left() + w * 0.38, c.y),
-                Pos2::new(b.left() + w * 0.2, c.y + w * 0.14),
-            );
-            seg(
-                Pos2::new(b.left() + w * 0.5, c.y + w * 0.14),
-                Pos2::new(b.right() - w * 0.18, c.y + w * 0.14),
-            );
-        }
-        View::Uninstall => {
-            // rocket: diamond body + fins
-            let tip = Pos2::new(c.x, b.top());
-            seg(
-                tip,
-                Pos2::new(b.right() - w * 0.2, b.bottom() - h_frac(b, 0.2)),
-            );
-            seg(
-                tip,
-                Pos2::new(b.left() + w * 0.2, b.bottom() - h_frac(b, 0.2)),
-            );
-            seg(
-                Pos2::new(b.left() + w * 0.2, b.bottom() - h_frac(b, 0.2)),
-                Pos2::new(b.right() - w * 0.2, b.bottom() - h_frac(b, 0.2)),
-            );
-            p.circle_filled(Pos2::new(c.x, c.y), 1.4, color);
-        }
-        View::Security => {
-            // shield
-            let pts = vec![
-                Pos2::new(c.x, b.top()),
-                Pos2::new(b.right(), b.top() + h_frac(b, 0.2)),
-                Pos2::new(c.x, b.bottom()),
-                Pos2::new(b.left(), b.top() + h_frac(b, 0.2)),
-                Pos2::new(c.x, b.top()),
-            ];
-            p.add(Shape::line(pts, st));
-        }
-        View::Settings => {
-            p.circle_stroke(c, w * 0.22, st);
-            for i in 0..6 {
-                let t = std::f32::consts::TAU * i as f32 / 6.0;
-                let (a, d) = (
-                    Pos2::new(c.x + w * 0.3 * t.cos(), c.y + w * 0.3 * t.sin()),
-                    Pos2::new(c.x + w * 0.46 * t.cos(), c.y + w * 0.46 * t.sin()),
-                );
-                seg(a, d);
-            }
-        }
-    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        view_icon_char(view),
+        FontId::new(16.0, egui::FontFamily::Name("lucide".into())),
+        color,
+    );
 }
 
-/// Fraction of a rect's height (local helper for icon geometry).
-fn h_frac(r: Rect, f: f32) -> f32 {
-    r.height() * f
+/// View -> lucide codepoint (matches the webview NAV icon map).
+fn view_icon_char(view: View) -> char {
+    let cp: u32 = match view {
+        View::Dash => 57791,      // gauge
+        View::Smart => 58386,     // sparkles
+        View::Junk => 57742,      // trash-2
+        View::Space => 58169,     // folder-search
+        View::Dupes => 57502,     // copy
+        View::Large => 57551,     // files
+        View::Uninstall => 57990, // rocket
+        View::Brew => 57729,      // terminal
+        View::Dev => 57641,       // package
+        View::Docker => 58581,    // container
+        View::Universal => 58665, // layers
+        View::Startup => 57400,   // activity
+        View::Disk => 57581,      // hard-drive
+        View::Memory => 57513,    // cpu
+        View::Battery => 57427,   // battery
+        View::Net => 57774,       // wifi
+        View::Security => 57688,  // shield
+        View::Settings => 57672,  // rotate-ccw
+    };
+    char::from_u32(cp).unwrap_or('?')
 }
 
 /// Per-view accent — ported from the webview's THEME map (app/src/main.js). Each
