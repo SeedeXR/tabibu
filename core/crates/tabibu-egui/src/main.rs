@@ -828,30 +828,6 @@ fn card_frame(ui: &mut egui::Ui, p: &Palette, w: f32, min_h: f32, add: impl FnOn
         });
 }
 
-/// A dashboard stat card: an accent dot + title, a big MONO value, a dim sub.
-fn stat_card(
-    ui: &mut egui::Ui,
-    p: &Palette,
-    size: Vec2,
-    title: &str,
-    accent: Color32,
-    big: &str,
-    small: &str,
-) {
-    card_frame(ui, p, size.x, size.y, |ui| {
-        ui.horizontal(|ui| {
-            let (dot, _) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
-            ui.painter().circle_filled(dot.center(), 4.0, accent);
-            ui.add_space(2.0);
-            ui.label(RichText::new(title).size(12.0).color(p.text_dim));
-        });
-        ui.add_space(8.0);
-        ui.label(metric(big).size(25.0).color(p.text));
-        ui.add_space(3.0);
-        ui.label(RichText::new(small).size(11.5).color(p.text_dim));
-    });
-}
-
 /// A labelled dial (ring + centred % + caption) — the webview's `.dial`.
 fn dial(ui: &mut egui::Ui, p: &Palette, label: &str, frac: f32, big: &str, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(100.0, 112.0), Sense::hover());
@@ -913,6 +889,122 @@ fn accent_button(ui: &mut egui::Ui, label: &str, accent: Color32) -> bool {
         .fill(accent)
         .corner_radius(CornerRadius::same(7));
     ui.add(btn).clicked()
+}
+
+/// Draw a lucide glyph (by codepoint) centred in `rect`.
+fn lucide_at(ui: &egui::Ui, rect: Rect, cp: u32, color: Color32, size: f32) {
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        char::from_u32(cp).unwrap_or('?'),
+        FontId::new(size, egui::FontFamily::Name("lucide".into())),
+        color,
+    );
+}
+
+/// A dashboard metric card: a dim lucide-icon + title header, a big Inter value
+/// (optionally coloured), and a dim sub — the webview's `.dcard`.
+#[allow(clippy::too_many_arguments)]
+fn dcard(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    w: f32,
+    icon_cp: u32,
+    title: &str,
+    big: &str,
+    big_color: Color32,
+    small: &str,
+) {
+    card_frame(ui, p, w, 104.0, |ui| {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
+            lucide_at(ui, r, icon_cp, p.text_dim, 14.0);
+            ui.add_space(5.0);
+            ui.label(RichText::new(title).size(12.0).color(p.text_dim));
+        });
+        ui.add_space(8.0);
+        ui.label(metric(big).size(24.0).color(big_color));
+        ui.add_space(3.0);
+        ui.label(RichText::new(small).size(11.5).color(p.text_dim));
+    });
+}
+
+/// A small live graph card (header icon + title + big % + sparkline) — the
+/// webview's `graphCard`.
+fn graph_card(ui: &mut egui::Ui, p: &Palette, w: f32, title: &str, hist: &[f32], color: Color32) {
+    card_frame(ui, p, w, 118.0, |ui| {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
+            lucide_at(ui, r, 57400, p.text_dim, 14.0); // activity
+            ui.add_space(5.0);
+            ui.label(RichText::new(title).size(12.0).color(p.text_dim));
+        });
+        ui.add_space(4.0);
+        let last = hist.last().copied().unwrap_or(0.0);
+        ui.label(
+            metric(format!("{}%", last.round() as i64))
+                .size(20.0)
+                .color(color),
+        );
+        ui.add_space(6.0);
+        let gw = ui.available_width().max(60.0);
+        let (strip, _) = ui.allocate_exact_size(Vec2::new(gw, 42.0), Sense::hover());
+        if hist.len() >= 2 {
+            draw_sparkline(ui, strip, hist, 100.0, color);
+        } else {
+            ui.painter().text(
+                strip.left_center() + Vec2::new(2.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                "collecting…",
+                FontId::proportional(11.0),
+                p.text_faint,
+            );
+        }
+    });
+}
+
+/// The wide "Mac Health" hero card: a free-space ring + honest verdict, on a
+/// dark-teal surface (the webview's `.health-hero`).
+fn health_hero(
+    ui: &mut egui::Ui,
+    w: f32,
+    free_frac: f32,
+    verdict: &str,
+    vcolor: Color32,
+    sub: &str,
+) {
+    let fill = Color32::from_rgb(0x11, 0x2c, 0x33);
+    let light = Color32::from_rgb(0xea, 0xf6, 0xf2);
+    let light_dim = Color32::from_rgb(0x9f, 0xc7, 0xbd);
+    let track = Color32::from_rgba_unmultiplied(255, 255, 255, 28);
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(18))
+        .show(ui, |ui| {
+            ui.set_width(w - 36.0);
+            ui.set_min_height(104.0);
+            ui.horizontal(|ui| {
+                let (rr, _) = ui.allocate_exact_size(Vec2::splat(104.0), Sense::hover());
+                draw_ring(ui, rr.center(), 44.0, free_frac, vcolor, track);
+                ui.painter().text(
+                    rr.center(),
+                    egui::Align2::CENTER_CENTER,
+                    verdict.split(' ').next().unwrap_or(verdict),
+                    FontId::new(15.0, egui::FontFamily::Name("semibold".into())),
+                    light,
+                );
+                ui.add_space(22.0);
+                ui.vertical(|ui| {
+                    ui.add_space(14.0);
+                    ui.label(RichText::new("Mac Health").color(light_dim).size(13.0));
+                    ui.add_space(2.0);
+                    ui.label(semibold(verdict).size(28.0).color(vcolor));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(sub).color(light_dim).size(12.0));
+                });
+            });
+        });
 }
 
 /// An app bundle's display name: the file stem without the `.app` extension.
@@ -1103,6 +1195,7 @@ struct MonitorState {
     /// the top-process list at the source.
     by_cpu: Arc<AtomicBool>,
     cpu_hist: VecDeque<f32>,
+    mem_hist: VecDeque<f32>,
     started: bool,
 }
 
@@ -1113,6 +1206,7 @@ impl Default for MonitorState {
             latest: None,
             by_cpu: Arc::new(AtomicBool::new(true)),
             cpu_hist: VecDeque::new(),
+            mem_hist: VecDeque::new(),
             started: false,
         }
     }
@@ -2296,8 +2390,17 @@ impl eframe::App for TabibuApp {
         if let Some(rx) = &self.monitor.rx {
             while let Ok(s) = rx.try_recv() {
                 self.monitor.cpu_hist.push_back(s.cpu_percent.min(100.0));
+                let mem_pct = if s.total_memory_bytes > 0 {
+                    (s.used_memory_bytes as f32 / s.total_memory_bytes as f32 * 100.0).min(100.0)
+                } else {
+                    0.0
+                };
+                self.monitor.mem_hist.push_back(mem_pct);
                 while self.monitor.cpu_hist.len() > 60 {
                     self.monitor.cpu_hist.pop_front();
+                }
+                while self.monitor.mem_hist.len() > 60 {
+                    self.monitor.mem_hist.pop_front();
                 }
                 self.monitor.latest = Some(s);
             }
@@ -3276,27 +3379,47 @@ impl TabibuApp {
             0.0
         };
         let battery = self.battery.data.clone();
-        let hist: Vec<f32> = self.monitor.cpu_hist.iter().copied().collect();
+        let cpu_hist: Vec<f32> = self.monitor.cpu_hist.iter().copied().collect();
+        let mem_hist: Vec<f32> = self.monitor.mem_hist.iter().copied().collect();
 
-        // Stat cards (title, accent, big MONO value, small sub).
-        let mut cards: Vec<(&str, Color32, String, String)> = vec![
+        // Honest health verdict from free-space + memory headroom (matches the
+        // webview's Mac Health hero).
+        let free_frac = if dt > 0 {
+            dfree as f32 / dt as f32
+        } else {
+            1.0
+        };
+        let (verdict, vcolor) = if free_frac < 0.05 {
+            ("Low on space", Color32::from_rgb(0xef, 0x44, 0x44))
+        } else if free_frac < 0.1 || mem_pct > 92.0 {
+            ("Needs attention", Color32::from_rgb(0xf5, 0x9e, 0x0b))
+        } else {
+            ("Good", Color32::from_rgb(0x22, 0xc5, 0x5e))
+        };
+
+        // Icon'd stat cards (lucide codepoint, title, big value, color, sub).
+        let text = p.text;
+        let mut cards: Vec<(u32, &str, String, Color32, String)> = vec![
             (
+                57581, // hard-drive
                 "Storage",
-                view_accent(View::Disk),
                 format!("{} free", fmt_bytes(dfree)),
+                text,
                 format!("of {} · {}% used", fmt_bytes(dt), dused_pct as i64),
             ),
             (
+                57513, // cpu chip
                 "Memory",
-                view_accent(View::Memory),
                 format!("{}% used", mem_pct as i64),
+                text,
                 format!("{} of {}", fmt_ram(mu), fmt_ram(mt)),
             ),
             (
+                57791, // gauge
                 "CPU",
-                view_accent(View::Memory),
                 format!("{}%", cpu.round() as i64),
-                "live utilisation".to_string(),
+                text,
+                "across all cores".to_string(),
             ),
         ];
         if let Some(b) = battery.as_ref().filter(|b| b.has_battery) {
@@ -3307,15 +3430,15 @@ impl TabibuApp {
                 None => state,
             };
             cards.push((
+                57427, // battery
                 "Battery",
-                view_accent(View::Battery),
                 format!("{}%", b.charge_percent.unwrap_or(0)),
+                text,
                 sub,
             ));
         }
 
-        // Responsive grid: as many 240px-min columns as fit (like the webview's
-        // repeat(auto-fit, minmax(240px, 1fr))).
+        // Responsive grid: as many 240px-min columns as fit.
         let margin = 16.0;
         let gap = 14.0;
         let avail = (ui.available_width() - margin * 2.0).max(240.0);
@@ -3326,55 +3449,71 @@ impl TabibuApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.add_space(2.0);
+                // Mac Health hero (wide).
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    let sub = if dt > 0 {
+                        format!("{} free of {}", fmt_bytes(dfree), fmt_bytes(dt))
+                    } else {
+                        "Storage unavailable".to_string()
+                    };
+                    health_hero(ui, avail, free_frac, verdict, vcolor, &sub);
+                });
+                ui.add_space(gap);
+
+                // Stat cards.
                 for row in cards.chunks(cols) {
                     ui.horizontal(|ui| {
                         ui.add_space(margin);
-                        for (i, (title, accent, big, small)) in row.iter().enumerate() {
+                        for (i, (cp, title, big, bc, small)) in row.iter().enumerate() {
                             if i > 0 {
                                 ui.add_space(gap);
                             }
-                            stat_card(ui, &p, Vec2::new(card_w, 110.0), title, *accent, big, small);
+                            dcard(ui, &p, card_w, *cp, title, big, *bc, small);
                         }
                     });
                     ui.add_space(gap);
                 }
 
-                // Wide live-CPU graph card.
-                if hist.len() >= 2 {
-                    ui.horizontal(|ui| {
-                        ui.add_space(margin);
-                        card_frame(ui, &p, avail, 96.0, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("CPU").size(12.0).color(p.text_dim));
-                                ui.add_space(6.0);
-                                ui.label(
-                                    metric(format!("{}%", cpu.round() as i64))
-                                        .size(12.0)
-                                        .color(p.text_dim),
-                                );
-                            });
-                            ui.add_space(6.0);
-                            let w = (ui.available_width()).max(60.0);
-                            let (strip, _) =
-                                ui.allocate_exact_size(Vec2::new(w, 50.0), Sense::hover());
-                            draw_sparkline(ui, strip, &hist, 100.0, view_accent(View::Memory));
-                        });
-                    });
+                // CPU + Memory live-graph cards (two across).
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    graph_card(
+                        ui,
+                        &p,
+                        card_w,
+                        "CPU",
+                        &cpu_hist,
+                        Color32::from_rgb(0xf9, 0x73, 0x16),
+                    );
                     ui.add_space(gap);
-                }
+                    graph_card(
+                        ui,
+                        &p,
+                        card_w,
+                        "Memory",
+                        &mem_hist,
+                        Color32::from_rgb(0x3b, 0x82, 0xf6),
+                    );
+                });
+                ui.add_space(gap);
 
-                // Smart Scan CTA card.
+                // Smart Scan CTA (wide).
                 ui.horizontal(|ui| {
                     ui.add_space(margin);
                     card_frame(ui, &p, avail, 92.0, |ui| {
-                        ui.label(RichText::new("Smart Scan").strong());
-                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
+                            lucide_at(ui, r, 58386, p.text_dim, 14.0); // sparkles
+                            ui.add_space(5.0);
+                            ui.label(RichText::new("Smart Scan").size(12.0).color(p.text_dim));
+                        });
+                        ui.add_space(4.0);
                         ui.label(
-                            RichText::new(
-                                "Find reclaimable space across caches, logs, large files and more.",
-                            )
-                            .color(p.text_dim)
-                            .size(12.0),
+                            RichText::new("No scan yet this session.")
+                                .color(p.text_dim)
+                                .size(13.0),
                         );
                         ui.add_space(8.0);
                         if accent_button(ui, "Run Smart Scan", view_accent(View::Smart)) {
