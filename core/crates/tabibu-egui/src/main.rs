@@ -874,6 +874,29 @@ fn kv_row(ui: &mut egui::Ui, p: &Palette, k: &str, v: &str) {
     ui.add_space(4.0);
 }
 
+/// Centered empty-state for the Docker view (icon + title + body + Re-check),
+/// matching the webview's `centered(...)`. Sets `recheck` on the button click.
+fn docker_empty_state(ui: &mut egui::Ui, p: &Palette, title: &str, body: &str, recheck: &mut bool) {
+    ui.add_space(40.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.allocate_ui_with_layout(
+            Vec2::new(480.0, 200.0),
+            Layout::top_down(Align::Min),
+            |ui| {
+                ui.set_width(480.0);
+                ui.label(semibold(title).size(18.0));
+                ui.add_space(8.0);
+                ui.label(RichText::new(body).color(p.text_dim)); // wraps at 480
+                ui.add_space(16.0);
+                if ui.button("Re-check").clicked() {
+                    *recheck = true;
+                }
+            },
+        );
+    });
+}
+
 /// A filled, accent-coloured primary button. Returns true on click.
 fn accent_button(ui: &mut egui::Ui, label: &str, accent: Color32) -> bool {
     let btn = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong())
@@ -3741,23 +3764,35 @@ impl TabibuApp {
             self.ui_center(ui, "Checking Docker…", true);
             return;
         }
+        let mut recheck = false;
         let Some(rep) = self.docker.report.clone() else {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Docker isn't installed.").color(p.text_dim));
-            });
+            docker_empty_state(
+                ui,
+                &p,
+                "Docker not found",
+                "The docker CLI wasn't found. Install Docker Desktop to reclaim space from build \
+                 cache, images, containers and volumes here.",
+                &mut recheck,
+            );
+            if recheck {
+                self.docker.started = false;
+                self.docker.loaded = false;
+            }
             return;
         };
         if !rep.status.running {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Docker is installed but not running.").strong());
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("Start Docker Desktop to analyze reclaimable space.")
-                        .color(p.text_dim),
-                );
-            });
+            docker_empty_state(
+                ui,
+                &p,
+                "Docker isn't running",
+                "The docker CLI is installed but its daemon isn't responding. Start Docker \
+                 Desktop, then re-check.",
+                &mut recheck,
+            );
+            if recheck {
+                self.docker.started = false;
+                self.docker.loaded = false;
+            }
             return;
         }
 
