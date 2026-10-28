@@ -1045,7 +1045,7 @@ function spaceTree() {
   // nested list — depth-first over expanded branches
   const list = h("div", { class: "list" });
   const rows = [];
-  flattenTree(root, 0, total, rows);
+  flattenTree(root, 0, total, rows, []);
   if (!rows.length) list.append(h("div", { class: "dim", style: "padding:24px;text-align:center" }, "This folder is empty or unreadable."));
   for (const r of rows) list.append(r);
   wrap.append(list);
@@ -1057,24 +1057,49 @@ function spaceTree() {
 // Flatten expanded branches into rows (children already sorted largest-first).
 // An expanded folder that failed to read shows an error row instead of looking
 // deceptively empty (the tool exists to surface disk usage, not hide it).
-function flattenTree(node, depth, total, out) {
-  for (const c of node.children || []) {
-    out.push(spaceRow(c, depth, total));
+function flattenTree(node, depth, total, out, ancestorsLast) {
+  const kids = node.children || [];
+  for (let j = 0; j < kids.length; j++) {
+    const c = kids[j];
+    const isLast = j === kids.length - 1;
+    out.push(spaceRow(c, depth, total, ancestorsLast, isLast));
     if (!spaceState.expanded.has(c.path)) continue;
-    if (c.children && c.children.length) flattenTree(c, depth + 1, total, out);
-    else if (c._error) out.push(spaceErrorRow(depth + 1));
+    const childAnc = ancestorsLast.concat(isLast);
+    if (c.children && c.children.length) flattenTree(c, depth + 1, total, out, childAnc);
+    else if (c._error) out.push(spaceErrorRow(depth + 1, childAnc));
   }
 }
 
-function spaceErrorRow(depth) {
-  return h("div", { class: "item", style: `padding-left:${14 + depth * 20}px` },
+// Zed-style tree indent guides: a vertical line per ancestor level that still
+// has siblings below, and a curved elbow connecting this row to its parent.
+function treeGuides(depth, ancestorsLast, isLast) {
+  const cells = [];
+  for (let i = 0; i < depth; i++) {
+    if (i < depth - 1) {
+      // Passthrough column: draw the vertical line only if that ancestor had
+      // more siblings coming (so the line visually continues past this row).
+      cells.push(h("span", { class: "tg " + (ancestorsLast[i] ? "tg-blank" : "tg-line") }));
+    } else {
+      // The connector cell for THIS row: a curved branch; keep the vertical
+      // running below it unless this is the last child.
+      cells.push(h("span", { class: "tg tg-conn" + (isLast ? "" : " cont") }));
+    }
+  }
+  // One flush container (the .item's flex gap must not space the guide columns
+  // apart, or the vertical lines wouldn't line up row-to-row).
+  return h("span", { class: "tg-wrap" }, ...cells);
+}
+
+function spaceErrorRow(depth, ancestorsLast) {
+  return h("div", { class: "item" },
+    treeGuides(depth, ancestorsLast || [], true),
     h("span", { class: "disc placeholder" }),
     icon("circle-alert", "ficon"),
     h("div", { class: "path" },
       h("div", { class: "reason" }, "Couldn't read this folder — it may need Full Disk Access.")));
 }
 
-function spaceRow(c, depth, total) {
+function spaceRow(c, depth, total, ancestorsLast, isLast) {
   const s = spaceState;
   const expandable = c.is_dir && szOf(c) > 0;
   const open = s.expanded.has(c.path);
@@ -1090,9 +1115,9 @@ function spaceRow(c, depth, total) {
 
   return h("div", {
     class: "item" + (expandable ? " drill" : ""),
-    style: `padding-left:${14 + depth * 20}px`,
     onClick: expandable ? () => toggleExpand(c) : undefined,
   },
+    treeGuides(depth, ancestorsLast || [], isLast),
     disclosure,
     h("input", { type: "checkbox", checked: s.sel.has(c.path) ? "" : null,
       onClick: (e) => { e.stopPropagation(); toggleSel(c); } }),

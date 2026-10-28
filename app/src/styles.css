@@ -214,10 +214,32 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 }
 .item {
   display: flex; align-items: center; gap: var(--space-m);
-  padding: 7px 0; border-bottom: 1px solid var(--border);
+  padding: 7px var(--space-s); border-bottom: 1px solid var(--border);
 }
 .item:hover { background: var(--hover); }
-.item input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+
+/* ---------- Custom checkbox (lists + tree) ---------- */
+.item input[type="checkbox"],
+.dupe-path input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 17px; height: 17px; flex: none; margin: 0; position: relative; cursor: pointer;
+  border: 1.5px solid var(--text-faint); border-radius: 5px; background: var(--bg-elev);
+  transition: background var(--dur-fast), border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.item input[type="checkbox"]:hover,
+.dupe-path input[type="checkbox"]:hover { border-color: var(--accent); }
+.item input[type="checkbox"]:checked,
+.dupe-path input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+/* The tick */
+.item input[type="checkbox"]:checked::after,
+.dupe-path input[type="checkbox"]:checked::after {
+  content: ""; position: absolute; left: 5px; top: 1.5px; width: 4px; height: 8px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.item input[type="checkbox"]:focus-visible,
+.dupe-path input[type="checkbox"]:focus-visible {
+  outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
 .item .path { flex: 1; min-width: 0; }
 .item .path .p { font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
 .item .path .reason { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -243,6 +265,29 @@ button.lg { padding: 9px 20px; font-size: 14px; }
 .item .disc.placeholder { cursor: default; visibility: hidden; }
 .item .disc.loading svg { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- Tree indent guides (Zed-style: vertical lines + curved branch) ---------- */
+.tg-wrap { display: flex; align-self: stretch; flex: none; margin-right: calc(-1 * var(--space-m) + 2px); }
+.tg { width: 20px; align-self: stretch; position: relative; flex: none; }
+/* a guide color a touch stronger than the row border so lines read clearly */
+.tg-line::before,
+.tg-conn::before,
+.tg-conn.cont::after {
+  content: ""; position: absolute; background: var(--track);
+}
+/* passthrough: full-height vertical line centred in the column */
+.tg-line::before { left: 9px; top: 0; bottom: 0; width: 1px; }
+/* connector: a curved elbow — vertical down to the mid-row, then curving right */
+.tg-conn::before {
+  left: 9px; top: 0; height: 50%; width: 11px; background: none;
+  border-left: 1px solid var(--track);
+  border-bottom: 1px solid var(--track);
+  border-bottom-left-radius: 8px;
+}
+/* …and keep the vertical running below the elbow unless this is the last child */
+.tg-conn.cont::after { left: 9px; top: 50%; bottom: 0; width: 1px; }
+/* accent the whole branch of the row under the pointer */
+.item.drill:hover .tg-conn::before { border-color: color-mix(in srgb, var(--accent) 55%, var(--track)); }
 
 /* ---------- Reclaim bar ---------- */
 .reclaim-bar {
