@@ -42,6 +42,7 @@ use tabibu_walk::DirNode;
 struct Palette {
     bg: Color32,
     bg_elev: Color32,
+    sidebar: Color32,
     text: Color32,
     text_dim: Color32,
     text_faint: Color32,
@@ -57,6 +58,7 @@ fn palette(dark: bool) -> Palette {
         Palette {
             bg: Color32::from_rgb(0x1a, 0x1b, 0x1e),
             bg_elev: Color32::from_rgb(0x25, 0x26, 0x2b),
+            sidebar: Color32::from_rgb(0x16, 0x17, 0x19),
             text: Color32::from_rgb(0xf2, 0xf2, 0xf5),
             text_dim: Color32::from_rgb(0xa3, 0xa3, 0xab),
             text_faint: Color32::from_rgb(0x6e, 0x6e, 0x78),
@@ -70,6 +72,7 @@ fn palette(dark: bool) -> Palette {
         Palette {
             bg: Color32::from_rgb(0xf4, 0xf5, 0xf7),
             bg_elev: Color32::from_rgb(0xff, 0xff, 0xff),
+            sidebar: Color32::from_rgb(0xec, 0xec, 0xef),
             text: Color32::from_rgb(0x1c, 0x1c, 0x1e),
             text_dim: Color32::from_rgb(0x6b, 0x6b, 0x70),
             text_faint: Color32::from_rgb(0x9a, 0x9a, 0xa0),
@@ -84,8 +87,10 @@ fn palette(dark: bool) -> Palette {
 
 /// Load Space Grotesk — the same brand font the Tauri/webview build uses
 /// (app/src/fonts/SpaceGrotesk.woff2, converted to TTF) — as the proportional
-/// family, so the native app reads identically. Monospace keeps egui's default
-/// (the webview's `--mono` was the system SF Mono fallback).
+/// family, so the native app reads identically. For the monospace family (all
+/// numbers, sizes and paths — the webview's `--mono`) we runtime-load the system
+/// SF Mono so the premium "tabular numbers" look matches; it's NOT bundled
+/// (Apple font licensing), and we fall back to egui's default mono if absent.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -99,7 +104,31 @@ fn install_fonts(ctx: &egui::Context) {
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, "SpaceGrotesk".to_owned());
+    // System SF Mono — the same `--mono` family the webview used for values.
+    for path in [
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Library/Fonts/Menlo.ttc", // fallback (also a clean mono)
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "Mono".to_owned(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, "Mono".to_owned());
+            break;
+        }
+    }
     ctx.set_fonts(fonts);
+}
+
+/// A monospace `RichText` — Tabibu uses SF Mono for every number, size and path
+/// (the webview's `--mono`), which is most of the "premium, tabular" feel.
+fn mono(text: impl Into<String>) -> RichText {
+    RichText::new(text).monospace()
 }
 
 fn apply_theme(ctx: &egui::Context, dark: bool) {
@@ -163,6 +192,31 @@ fn draw_chevron(ui: &egui::Ui, rect: Rect, open: bool, color: Color32) {
     };
     ui.painter()
         .add(Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// The Tabibu brand glyph: a "pulse / activity" line (the healer's vitals
+/// trace), drawn inside `rect`. Round-joined so it reads crisp at logo size.
+fn draw_pulse(ui: &egui::Ui, rect: Rect, color: Color32) {
+    let r = rect.shrink2(Vec2::new(rect.width() * 0.18, rect.height() * 0.30));
+    let y = r.center().y;
+    let (x0, x1) = (r.left(), r.right());
+    let w = x1 - x0;
+    let pts = vec![
+        Pos2::new(x0, y),
+        Pos2::new(x0 + w * 0.28, y),
+        Pos2::new(x0 + w * 0.42, r.top()),
+        Pos2::new(x0 + w * 0.58, r.bottom()),
+        Pos2::new(x0 + w * 0.72, y),
+        Pos2::new(x1, y),
+    ];
+    let stroke = egui::epaint::PathStroke::new(1.8_f32, color);
+    ui.painter()
+        .add(egui::epaint::Shape::Path(egui::epaint::PathShape {
+            points: pts,
+            closed: false,
+            fill: Color32::TRANSPARENT,
+            stroke,
+        }));
 }
 
 fn draw_folder(ui: &egui::Ui, rect: Rect, color: Color32) {
@@ -550,33 +604,74 @@ fn cleanup_review_ui(
     action
 }
 
-/// A labelled ring "card" for the Dashboard: title above, a progress ring with a
-/// big value centred, and a sublabel below.
-fn ring_card(
+/// Standard view header: a bold title + a dim "· subtitle", left-inset to match
+/// the content margin. The consistent heading treatment across every view.
+fn view_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.label(RichText::new(title).size(20.0).strong());
+        if !subtitle.is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("· {subtitle}"))
+                    .color(p.text_dim)
+                    .size(13.0),
+            );
+        }
+    });
+    ui.add_space(12.0);
+}
+
+/// A card surface (elevated fill + hairline border + 10px radius) of fixed size;
+/// runs `add` in a 14px-inset child. The dashboard / stat building block.
+fn card_frame(ui: &mut egui::Ui, p: &Palette, w: f32, h: f32, add: impl FnOnce(&mut egui::Ui)) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(10),
+        p.bg_elev,
+        Stroke::new(1.0_f32, p.border),
+        StrokeKind::Inside,
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink(14.0))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    add(&mut child);
+}
+
+/// A dashboard stat card: an accent dot + title, a big MONO value, a dim sub.
+fn stat_card(
     ui: &mut egui::Ui,
     p: &Palette,
+    size: Vec2,
     title: &str,
-    frac: f32,
+    accent: Color32,
     big: &str,
-    sub: &str,
-    color: Color32,
+    small: &str,
 ) {
-    ui.vertical(|ui| {
-        ui.label(RichText::new(title).color(p.text_dim).size(12.0));
-        ui.add_space(4.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(120.0, 120.0), Sense::hover());
-        let c = rect.center();
-        draw_ring(ui, c, 46.0, frac, color, p.track);
-        ui.painter().text(
-            c,
-            egui::Align2::CENTER_CENTER,
-            big,
-            FontId::proportional(22.0),
-            p.text,
-        );
-        ui.add_space(4.0);
-        ui.label(RichText::new(sub).color(p.text_dim).size(11.0));
+    card_frame(ui, p, size.x, size.y, |ui| {
+        ui.horizontal(|ui| {
+            let (dot, _) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
+            ui.painter().circle_filled(dot.center(), 4.0, accent);
+            ui.add_space(2.0);
+            ui.label(RichText::new(title).size(12.0).color(p.text_dim));
+        });
+        ui.add_space(8.0);
+        ui.label(mono(big).size(25.0).strong().color(p.text));
+        ui.add_space(3.0);
+        ui.label(RichText::new(small).size(11.5).color(p.text_dim));
     });
+}
+
+/// A filled, accent-coloured primary button. Returns true on click.
+fn accent_button(ui: &mut egui::Ui, label: &str, accent: Color32) -> bool {
+    let btn = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong())
+        .fill(accent)
+        .corner_radius(CornerRadius::same(7));
+    ui.add(btn).clicked()
 }
 
 /// An app bundle's display name: the file stem without the `.app` extension.
@@ -1950,6 +2045,7 @@ impl eframe::App for TabibuApp {
         if self.view == View::Dash {
             self.ensure_monitor();
             self.ensure_disk();
+            self.ensure_battery();
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         if let Some(rx) = &self.dupes.scan_rx {
@@ -2139,69 +2235,65 @@ impl eframe::App for TabibuApp {
 
         egui::SidePanel::left("nav")
             .resizable(false)
-            .exact_width(180.0)
+            .exact_width(214.0)
             .frame(egui::Frame {
-                fill: p.bg_elev,
-                inner_margin: egui::Margin::same(12),
+                fill: p.sidebar,
+                inner_margin: egui::Margin::same(10),
+                stroke: Stroke::new(1.0_f32, p.border),
                 ..Default::default()
             })
             .show(ctx, |ui| {
+                // Brand: gourd logo in an accent-gradient square + wordmark.
                 ui.add_space(6.0);
-                ui.label(RichText::new("Tabibu").size(18.0).strong());
-                ui.add_space(14.0);
-                if nav_item(ui, "Dashboard", self.view == View::Dash) {
-                    self.view = View::Dash;
-                }
-                if nav_item(ui, "Smart Scan", self.view == View::Smart) {
-                    self.view = View::Smart;
-                }
-                if nav_item(ui, "Space Analyzer", self.view == View::Space) {
-                    self.view = View::Space;
-                }
-                if nav_item(ui, "Junk", self.view == View::Junk) {
-                    self.view = View::Junk;
-                }
-                if nav_item(ui, "Large & Old", self.view == View::Large) {
-                    self.view = View::Large;
-                }
-                if nav_item(ui, "Security", self.view == View::Security) {
-                    self.view = View::Security;
-                }
-                if nav_item(ui, "Memory & CPU", self.view == View::Memory) {
-                    self.view = View::Memory;
-                }
-                if nav_item(ui, "Duplicates", self.view == View::Dupes) {
-                    self.view = View::Dupes;
-                }
-                if nav_item(ui, "Network", self.view == View::Net) {
-                    self.view = View::Net;
-                }
-                if nav_item(ui, "Battery", self.view == View::Battery) {
-                    self.view = View::Battery;
-                }
-                if nav_item(ui, "Startup", self.view == View::Startup) {
-                    self.view = View::Startup;
-                }
-                if nav_item(ui, "Docker", self.view == View::Docker) {
-                    self.view = View::Docker;
-                }
-                if nav_item(ui, "Build Artifacts", self.view == View::Dev) {
-                    self.view = View::Dev;
-                }
-                if nav_item(ui, "Disk", self.view == View::Disk) {
-                    self.view = View::Disk;
-                }
-                if nav_item(ui, "Universal Binaries", self.view == View::Universal) {
-                    self.view = View::Universal;
-                }
-                if nav_item(ui, "Developer / CLI", self.view == View::Brew) {
-                    self.view = View::Brew;
-                }
-                if nav_item(ui, "Uninstaller", self.view == View::Uninstall) {
-                    self.view = View::Uninstall;
-                }
-                if nav_item(ui, "Settings", self.view == View::Settings) {
-                    self.view = View::Settings;
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    let (lr, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(lr, CornerRadius::same(7), view_accent(View::Dash));
+                    draw_pulse(ui, lr, Color32::WHITE);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Tabibu").size(16.0).strong());
+                });
+                ui.add_space(8.0);
+
+                // Scrolls when the list outgrows a short window (like the webview).
+                let mut next: Option<View> = None;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let mut item = |ui: &mut egui::Ui, label: &str, v: View| {
+                            if nav_item(ui, &p, label, self.view == v, view_accent(v)) {
+                                next = Some(v);
+                            }
+                        };
+                        nav_section(ui, &p, "Overview");
+                        item(ui, "Dashboard", View::Dash);
+                        item(ui, "Smart Scan", View::Smart);
+                        nav_section(ui, &p, "Cleanup");
+                        item(ui, "Junk", View::Junk);
+                        item(ui, "Space Analyzer", View::Space);
+                        item(ui, "Duplicates", View::Dupes);
+                        item(ui, "Large & Old", View::Large);
+                        nav_section(ui, &p, "Applications");
+                        item(ui, "Uninstaller", View::Uninstall);
+                        item(ui, "Developer / CLI", View::Brew);
+                        item(ui, "Build Artifacts", View::Dev);
+                        item(ui, "Docker", View::Docker);
+                        item(ui, "Universal Binaries", View::Universal);
+                        item(ui, "Startup", View::Startup);
+                        nav_section(ui, &p, "Health");
+                        item(ui, "Disk", View::Disk);
+                        item(ui, "Memory & CPU", View::Memory);
+                        item(ui, "Battery", View::Battery);
+                        item(ui, "Network", View::Net);
+                        nav_section(ui, &p, "Security");
+                        item(ui, "Security", View::Security);
+                        ui.add_space(10.0);
+                        item(ui, "Settings", View::Settings);
+                        ui.add_space(8.0);
+                    });
+                if let Some(v) = next {
+                    self.view = v;
                 }
             });
 
@@ -2241,13 +2333,72 @@ impl eframe::App for TabibuApp {
     }
 }
 
-/// One navigation-rail entry; returns true on click.
-fn nav_item(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
-    ui.add_sized(
-        [ui.available_width(), 32.0],
-        egui::SelectableLabel::new(active, label),
-    )
-    .clicked()
+/// Per-view accent — ported from the webview's THEME map (app/src/main.js). Each
+/// section carries its own colour (the premium "honest theming" signal); the nav
+/// active state, view headers and rings all tint by it.
+fn view_accent(v: View) -> Color32 {
+    let hex = match v {
+        View::Dash => 0x14b8a6,
+        View::Smart => 0x8b5cf6,
+        View::Junk => 0x16a34a,
+        View::Dupes => 0x3b82f6,
+        View::Large => 0x0ea5e9,
+        View::Space => 0x8b5cf6,
+        View::Uninstall => 0x6366f1,
+        View::Brew => 0xd97706,
+        View::Docker => 0x2496ed,
+        View::Universal => 0x0891b2,
+        View::Startup => 0xf59e0b,
+        View::Dev => 0x10b981,
+        View::Disk => 0xa855f7,
+        View::Memory => 0xf97316,
+        View::Battery => 0x22c55e,
+        View::Net => 0x0284c7,
+        View::Security => 0xec4899,
+        View::Settings => 0x64748b,
+    };
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// An uppercase, faint section header in the nav rail (Overview / Cleanup / …).
+fn nav_section(ui: &mut egui::Ui, p: &Palette, label: &str) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(label.to_uppercase())
+                .size(10.5)
+                .color(p.text_faint)
+                .strong(),
+        );
+    });
+    ui.add_space(2.0);
+}
+
+/// One navigation-rail entry: a full-width row, accent-tinted when active (bg
+/// wash + accent label), subtle hover otherwise. Returns true on click.
+fn nav_item(ui: &mut egui::Ui, p: &Palette, label: &str, active: bool, accent: Color32) -> bool {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click());
+    let r = CornerRadius::same(6);
+    if active {
+        ui.painter().rect_filled(
+            rect,
+            r,
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
+        );
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, r, p.hover);
+    }
+    let color = if active { accent } else { p.text };
+    ui.painter().text(
+        Pos2::new(rect.left() + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.5),
+        color,
+    );
+    resp.clicked()
 }
 
 impl TabibuApp {
@@ -2759,84 +2910,135 @@ impl TabibuApp {
 
     fn ui_dash(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Dashboard").size(16.0).strong());
-            ui.label(RichText::new("· system health at a glance").color(p.text_dim));
-        });
-        ui.add_space(14.0);
+        view_header(ui, &p, "Dashboard", "system health at a glance");
 
+        // Gather live facts (computed before the layout closures borrow `ui`).
         let cpu = self.monitor.latest.as_ref().map_or(0.0, |s| s.cpu_percent);
         let (mu, mt) = self
             .monitor
             .latest
             .as_ref()
             .map_or((0, 0), |s| (s.used_memory_bytes, s.total_memory_bytes));
-        let mem_frac = if mt > 0 { mu as f32 / mt as f32 } else { 0.0 };
-        let (du, dt, dfree) = self.disk.data.map_or((0, 0, 0), |d| {
-            (
-                d.total_bytes.saturating_sub(d.available_bytes),
-                d.total_bytes,
-                d.available_bytes,
-            )
-        });
-        let disk_frac = if dt > 0 { du as f32 / dt as f32 } else { 0.0 };
-
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ring_card(
-                ui,
-                &p,
-                "CPU",
-                cpu / 100.0,
-                &format!("{}%", cpu.round() as i64),
-                "live",
-                Color32::from_rgb(0xf9, 0x73, 0x16),
-            );
-            ui.add_space(20.0);
-            ring_card(
-                ui,
-                &p,
-                "Memory",
-                mem_frac,
-                &format!("{}%", (mem_frac * 100.0).round() as i64),
-                &format!("{} / {}", fmt_ram(mu), fmt_ram(mt)),
-                Color32::from_rgb(0x10, 0xb9, 0x81),
-            );
-            ui.add_space(20.0);
-            ring_card(
-                ui,
-                &p,
-                "Disk",
-                disk_frac,
-                &format!("{}%", (disk_frac * 100.0).round() as i64),
-                &format!("{} free", fmt_bytes(dfree)),
-                Color32::from_rgb(0xa8, 0x55, 0xf7),
-            );
-        });
-
-        // Live CPU history.
+        let mem_pct = if mt > 0 {
+            (mu as f64 / mt as f64 * 100.0).round()
+        } else {
+            0.0
+        };
+        let (dt, dfree) = self
+            .disk
+            .data
+            .map_or((0, 0), |d| (d.total_bytes, d.available_bytes));
+        let dused_pct = if dt > 0 {
+            ((dt - dfree) as f64 / dt as f64 * 100.0).round()
+        } else {
+            0.0
+        };
+        let battery = self.battery.data.clone();
         let hist: Vec<f32> = self.monitor.cpu_hist.iter().copied().collect();
-        if hist.len() >= 2 {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                let w = (ui.available_width() - 8.0).max(60.0);
-                let (strip, _) = ui.allocate_exact_size(Vec2::new(w, 56.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(strip, CornerRadius::same(8), p.bg_elev);
-                draw_sparkline(ui, strip, &hist, 100.0, Color32::from_rgb(0xf9, 0x73, 0x16));
-            });
+
+        // Stat cards (title, accent, big MONO value, small sub).
+        let mut cards: Vec<(&str, Color32, String, String)> = vec![
+            (
+                "Storage",
+                view_accent(View::Disk),
+                format!("{} free", fmt_bytes(dfree)),
+                format!("of {} · {}% used", fmt_bytes(dt), dused_pct as i64),
+            ),
+            (
+                "Memory",
+                view_accent(View::Memory),
+                format!("{}% used", mem_pct as i64),
+                format!("{} of {}", fmt_ram(mu), fmt_ram(mt)),
+            ),
+            (
+                "CPU",
+                view_accent(View::Memory),
+                format!("{}%", cpu.round() as i64),
+                "live utilisation".to_string(),
+            ),
+        ];
+        if let Some(b) = battery.as_ref().filter(|b| b.has_battery) {
+            let state = b.state.clone().unwrap_or_default();
+            let sub = match b.cycle_count {
+                Some(c) if !state.is_empty() => format!("{state} · {c} cycles"),
+                Some(c) => format!("{c} cycles"),
+                None => state,
+            };
+            cards.push((
+                "Battery",
+                view_accent(View::Battery),
+                format!("{}%", b.charge_percent.unwrap_or(0)),
+                sub,
+            ));
         }
 
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Run a Smart Scan to find reclaimable space across your Mac.")
-                    .color(p.text_dim),
-            );
-        });
+        // Responsive grid: as many 240px-min columns as fit (like the webview's
+        // repeat(auto-fit, minmax(240px, 1fr))).
+        let margin = 16.0;
+        let gap = 14.0;
+        let avail = (ui.available_width() - margin * 2.0).max(240.0);
+        let cols = (((avail + gap) / (240.0 + gap)).floor() as usize).clamp(1, 4);
+        let card_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor();
+
+        let mut run_smart = false;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for row in cards.chunks(cols) {
+                    ui.horizontal(|ui| {
+                        ui.add_space(margin);
+                        for (i, (title, accent, big, small)) in row.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(gap);
+                            }
+                            stat_card(ui, &p, Vec2::new(card_w, 110.0), title, *accent, big, small);
+                        }
+                    });
+                    ui.add_space(gap);
+                }
+
+                // Wide live-CPU graph card.
+                if hist.len() >= 2 {
+                    ui.horizontal(|ui| {
+                        ui.add_space(margin);
+                        card_frame(ui, &p, avail, 108.0, |ui| {
+                            ui.label(RichText::new("CPU").size(12.0).color(p.text_dim));
+                            ui.add_space(6.0);
+                            let w = (ui.available_width()).max(60.0);
+                            let (strip, _) =
+                                ui.allocate_exact_size(Vec2::new(w, 56.0), Sense::hover());
+                            draw_sparkline(ui, strip, &hist, 100.0, view_accent(View::Memory));
+                        });
+                    });
+                    ui.add_space(gap);
+                }
+
+                // Smart Scan CTA card.
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    card_frame(ui, &p, avail, 92.0, |ui| {
+                        ui.label(RichText::new("Smart Scan").strong());
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(
+                                "Find reclaimable space across caches, logs, large files and more.",
+                            )
+                            .color(p.text_dim)
+                            .size(12.0),
+                        );
+                        ui.add_space(8.0);
+                        if accent_button(ui, "Run Smart Scan", view_accent(View::Smart)) {
+                            run_smart = true;
+                        }
+                    });
+                });
+                ui.add_space(gap);
+            });
+
+        if run_smart {
+            self.view = View::Smart;
+            self.start_smart_scan();
+        }
     }
 
     fn ui_smart(&mut self, ui: &mut egui::Ui) {
