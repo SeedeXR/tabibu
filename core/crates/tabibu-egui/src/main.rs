@@ -85,25 +85,23 @@ fn palette(dark: bool) -> Palette {
     }
 }
 
-/// Load Space Grotesk — the same brand font the Tauri/webview build uses
-/// (app/src/fonts/SpaceGrotesk.woff2, converted to TTF) — as the proportional
-/// family, so the native app reads identically. For the monospace family (all
-/// numbers, sizes and paths — the webview's `--mono`) we runtime-load the system
-/// SF Mono so the premium "tabular numbers" look matches; it's NOT bundled
-/// (Apple font licensing), and we fall back to egui's default mono if absent.
+/// Fonts: 42dot Sans (bundled, subset to Latin + the symbols the UI uses) as the
+/// proportional UI family — Medium body, SemiBold headings — Inter Bold for every
+/// number metric, and the system SF Mono for file paths/code only (runtime-loaded,
+/// not bundled, per Apple font licensing; falls back to egui's default mono).
 fn install_fonts(ctx: &egui::Context) {
     use egui::FontFamily;
     let mut fonts = egui::FontDefinitions::default();
-    // Space Grotesk instanced heavier for contrast — Medium (500) body, SemiBold
-    // (600) headings — plus Inter Bold (700) for every number metric.
+    // 42dot Sans (subset) — Medium (500) body, SemiBold (600) headings — plus
+    // Inter Bold (700) for every number metric.
     for (name, bytes) in [
         (
-            "SpaceGrotesk",
-            &include_bytes!("../assets/SpaceGrotesk-Medium.ttf")[..],
+            "Sans",
+            &include_bytes!("../assets/42dotSans-Medium.ttf")[..],
         ),
         (
-            "SpaceGroteskSemiBold",
-            &include_bytes!("../assets/SpaceGrotesk-SemiBold.ttf")[..],
+            "SansSemiBold",
+            &include_bytes!("../assets/42dotSans-SemiBold.ttf")[..],
         ),
         ("InterBold", &include_bytes!("../assets/Inter-Bold.ttf")[..]),
     ] {
@@ -116,10 +114,10 @@ fn install_fonts(ctx: &egui::Context) {
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .insert(0, "SpaceGrotesk".to_owned());
+        .insert(0, "Sans".to_owned());
     fonts.families.insert(
         FontFamily::Name("semibold".into()),
-        vec!["SpaceGroteskSemiBold".to_owned(), "SpaceGrotesk".to_owned()],
+        vec!["SansSemiBold".to_owned(), "Sans".to_owned()],
     );
     fonts.families.insert(
         FontFamily::Name("metric".into()),
@@ -524,7 +522,7 @@ fn cleanup_review_ui(
 
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        ui.label(RichText::new(title).size(16.0).strong());
+        ui.label(semibold(title).size(19.0));
         ui.label(
             RichText::new(format!(
                 "· {} found · {} items",
@@ -1066,11 +1064,11 @@ impl Default for TabibuApp {
     }
 }
 
-/// Decode the bundled official app icon (teal pulse mark) into an egui texture,
-/// once, for the brand logo. `None` on any decode surprise (a fallback square is
-/// drawn instead).
+/// Decode the gourd SILHOUETTE (the tray template — a white gourd on alpha) into
+/// an egui texture for the sidebar brand logo: drawn in white over a teal square,
+/// exactly like the webview's `.brand .logo`. `None` on any decode surprise.
 fn load_icon_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    const BYTES: &[u8] = include_bytes!("../assets/icon-64.png");
+    const BYTES: &[u8] = include_bytes!("../assets/gourd-white.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(BYTES));
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0; reader.output_buffer_size()?];
@@ -2321,23 +2319,19 @@ impl eframe::App for TabibuApp {
                 ..Default::default()
             })
             .show(ctx, |ui| {
-                // Brand: gourd logo in an accent-gradient square + wordmark.
+                // Brand: a teal square with the white gourd silhouette + wordmark
+                // (the webview's `.brand .logo`). The Dock icon stays the full
+                // gradient gourd; this in-app mark is white-on-teal.
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
+                    let (lr, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(lr, CornerRadius::same(7), view_accent(View::Dash));
                     if let Some(tex) = &self.icon_tex {
-                        ui.add(
-                            egui::Image::new(tex)
-                                .fit_to_exact_size(Vec2::splat(26.0))
-                                .corner_radius(CornerRadius::same(7)),
-                        );
+                        let g = Rect::from_center_size(lr.center(), Vec2::splat(17.0));
+                        egui::Image::new(tex).tint(Color32::WHITE).paint_at(ui, g);
                     } else {
-                        let (lr, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-                        ui.painter().rect_filled(
-                            lr,
-                            CornerRadius::same(7),
-                            view_accent(View::Dash),
-                        );
                         draw_pulse(ui, lr, Color32::WHITE);
                     }
                     ui.add_space(8.0);
@@ -2351,7 +2345,7 @@ impl eframe::App for TabibuApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let mut item = |ui: &mut egui::Ui, label: &str, v: View| {
-                            if nav_item(ui, &p, label, self.view == v, view_accent(v)) {
+                            if nav_item(ui, &p, label, self.view == v, v) {
                                 next = Some(v);
                             }
                         };
@@ -2422,6 +2416,214 @@ impl eframe::App for TabibuApp {
     }
 }
 
+/// Per-view nav icon — simple painter glyphs echoing the webview's lucide set, so
+/// every nav row carries its symbol (gauge, sparkles, trash, …). `rect` is ~16px.
+#[allow(clippy::too_many_lines)]
+fn draw_nav_icon(ui: &egui::Ui, rect: Rect, view: View, color: Color32) {
+    let p = ui.painter();
+    let st = Stroke::new(1.6_f32, color);
+    let b = Rect::from_center_size(rect.center(), Vec2::splat(rect.width() * 0.76));
+    let c = b.center();
+    let w = b.width();
+    let seg = |a: Pos2, d: Pos2| p.line_segment([a, d], st);
+    let rc = |r: Rect| p.rect_stroke(r, CornerRadius::same(2), st, StrokeKind::Middle);
+    match view {
+        View::Dash => {
+            p.circle_stroke(c, w * 0.44, st);
+            seg(c, Pos2::new(c.x + w * 0.28, c.y - w * 0.28));
+            p.circle_filled(c, 1.4, color);
+        }
+        View::Smart => {
+            let a = w * 0.30;
+            seg(Pos2::new(c.x, c.y - a), Pos2::new(c.x, c.y + a));
+            seg(Pos2::new(c.x - a, c.y), Pos2::new(c.x + a, c.y));
+            let (a2, cc) = (w * 0.15, Pos2::new(b.right() - w * 0.1, b.top() + w * 0.12));
+            seg(Pos2::new(cc.x, cc.y - a2), Pos2::new(cc.x, cc.y + a2));
+            seg(Pos2::new(cc.x - a2, cc.y), Pos2::new(cc.x + a2, cc.y));
+        }
+        View::Junk => {
+            let top = b.top() + h_frac(b, 0.24);
+            seg(Pos2::new(b.left(), top), Pos2::new(b.right(), top));
+            seg(
+                Pos2::new(c.x - w * 0.12, b.top()),
+                Pos2::new(c.x + w * 0.12, b.top()),
+            );
+            seg(
+                Pos2::new(c.x - w * 0.12, b.top()),
+                Pos2::new(c.x - w * 0.12, top),
+            );
+            seg(
+                Pos2::new(c.x + w * 0.12, b.top()),
+                Pos2::new(c.x + w * 0.12, top),
+            );
+            rc(Rect::from_min_max(
+                Pos2::new(b.left() + w * 0.14, top),
+                Pos2::new(b.right() - w * 0.14, b.bottom()),
+            ));
+        }
+        View::Space => {
+            // folder + magnifier
+            rc(Rect::from_min_max(
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.28)),
+                Pos2::new(b.right() - w * 0.1, b.bottom()),
+            ));
+            p.circle_stroke(Pos2::new(c.x + w * 0.12, c.y + w * 0.04), w * 0.16, st);
+            seg(
+                Pos2::new(c.x + w * 0.26, c.y + w * 0.18),
+                Pos2::new(b.right(), b.bottom()),
+            );
+        }
+        View::Dupes | View::Universal => {
+            // overlapping squares / layers
+            rc(Rect::from_min_size(
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.22)),
+                Vec2::splat(w * 0.6),
+            ));
+            rc(Rect::from_min_size(
+                Pos2::new(b.left() + w * 0.3, b.top()),
+                Vec2::splat(w * 0.6),
+            ));
+        }
+        View::Large | View::Dev => {
+            // stacked pages / package
+            rc(Rect::from_min_size(
+                Pos2::new(b.left() + w * 0.18, b.top()),
+                Vec2::new(w * 0.62, h_frac(b, 0.72)),
+            ));
+            seg(
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.22)),
+                Pos2::new(b.left(), b.bottom()),
+            );
+            seg(
+                Pos2::new(b.left(), b.bottom()),
+                Pos2::new(b.left() + w * 0.5, b.bottom()),
+            );
+        }
+        View::Net => {
+            // wifi arcs + dot
+            for (rad, yo) in [(0.44_f32, 0.12_f32), (0.26, 0.26)] {
+                let arc: Vec<Pos2> = (0..=12)
+                    .map(|k| {
+                        let t = std::f32::consts::PI * (1.15 + 0.7 * k as f32 / 12.0);
+                        Pos2::new(
+                            c.x + w * rad * t.cos(),
+                            b.bottom() - h_frac(b, yo) + w * rad * t.sin(),
+                        )
+                    })
+                    .collect();
+                p.add(Shape::line(arc, st));
+            }
+            p.circle_filled(Pos2::new(c.x, b.bottom() - h_frac(b, 0.08)), 1.6, color);
+        }
+        View::Battery => {
+            rc(Rect::from_min_max(
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.28)),
+                Pos2::new(b.right() - w * 0.12, b.bottom() - h_frac(b, 0.28)),
+            ));
+            seg(
+                Pos2::new(b.right() - w * 0.1, c.y - w * 0.1),
+                Pos2::new(b.right() - w * 0.1, c.y + w * 0.1),
+            );
+        }
+        View::Startup | View::Memory => {
+            // activity pulse / chip — a simple waveform
+            let y = c.y;
+            let pts = vec![
+                Pos2::new(b.left(), y),
+                Pos2::new(c.x - w * 0.18, y),
+                Pos2::new(c.x - w * 0.02, b.top()),
+                Pos2::new(c.x + w * 0.14, b.bottom()),
+                Pos2::new(c.x + w * 0.3, y),
+                Pos2::new(b.right(), y),
+            ];
+            p.add(Shape::line(pts, st));
+        }
+        View::Docker => {
+            rc(Rect::from_min_max(
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.38)),
+                Pos2::new(b.right(), b.bottom()),
+            ));
+            for i in 0..3 {
+                let x = b.left() + w * (0.2 + 0.28 * i as f32);
+                seg(
+                    Pos2::new(x, b.top() + h_frac(b, 0.38)),
+                    Pos2::new(x, b.top() + h_frac(b, 0.14)),
+                );
+            }
+        }
+        View::Disk => {
+            rc(Rect::from_min_max(
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.3)),
+                Pos2::new(b.right(), b.bottom() - h_frac(b, 0.1)),
+            ));
+            p.circle_filled(
+                Pos2::new(b.right() - w * 0.18, b.bottom() - h_frac(b, 0.3)),
+                1.4,
+                color,
+            );
+        }
+        View::Brew => {
+            rc(b);
+            seg(
+                Pos2::new(b.left() + w * 0.2, c.y - w * 0.14),
+                Pos2::new(b.left() + w * 0.38, c.y),
+            );
+            seg(
+                Pos2::new(b.left() + w * 0.38, c.y),
+                Pos2::new(b.left() + w * 0.2, c.y + w * 0.14),
+            );
+            seg(
+                Pos2::new(b.left() + w * 0.5, c.y + w * 0.14),
+                Pos2::new(b.right() - w * 0.18, c.y + w * 0.14),
+            );
+        }
+        View::Uninstall => {
+            // rocket: diamond body + fins
+            let tip = Pos2::new(c.x, b.top());
+            seg(
+                tip,
+                Pos2::new(b.right() - w * 0.2, b.bottom() - h_frac(b, 0.2)),
+            );
+            seg(
+                tip,
+                Pos2::new(b.left() + w * 0.2, b.bottom() - h_frac(b, 0.2)),
+            );
+            seg(
+                Pos2::new(b.left() + w * 0.2, b.bottom() - h_frac(b, 0.2)),
+                Pos2::new(b.right() - w * 0.2, b.bottom() - h_frac(b, 0.2)),
+            );
+            p.circle_filled(Pos2::new(c.x, c.y), 1.4, color);
+        }
+        View::Security => {
+            // shield
+            let pts = vec![
+                Pos2::new(c.x, b.top()),
+                Pos2::new(b.right(), b.top() + h_frac(b, 0.2)),
+                Pos2::new(c.x, b.bottom()),
+                Pos2::new(b.left(), b.top() + h_frac(b, 0.2)),
+                Pos2::new(c.x, b.top()),
+            ];
+            p.add(Shape::line(pts, st));
+        }
+        View::Settings => {
+            p.circle_stroke(c, w * 0.22, st);
+            for i in 0..6 {
+                let t = std::f32::consts::TAU * i as f32 / 6.0;
+                let (a, d) = (
+                    Pos2::new(c.x + w * 0.3 * t.cos(), c.y + w * 0.3 * t.sin()),
+                    Pos2::new(c.x + w * 0.46 * t.cos(), c.y + w * 0.46 * t.sin()),
+                );
+                seg(a, d);
+            }
+        }
+    }
+}
+
+/// Fraction of a rect's height (local helper for icon geometry).
+fn h_frac(r: Rect, f: f32) -> f32 {
+    r.height() * f
+}
+
 /// Per-view accent — ported from the webview's THEME map (app/src/main.js). Each
 /// section carries its own colour (the premium "honest theming" signal); the nav
 /// active state, view headers and rings all tint by it.
@@ -2464,9 +2666,10 @@ fn nav_section(ui: &mut egui::Ui, p: &Palette, label: &str) {
     ui.add_space(2.0);
 }
 
-/// One navigation-rail entry: a full-width row, accent-tinted when active (bg
-/// wash + accent label), subtle hover otherwise. Returns true on click.
-fn nav_item(ui: &mut egui::Ui, p: &Palette, label: &str, active: bool, accent: Color32) -> bool {
+/// One navigation-rail entry: a per-view icon + label, accent-tinted when active
+/// (bg wash + accent icon/label), subtle hover otherwise. Returns true on click.
+fn nav_item(ui: &mut egui::Ui, p: &Palette, label: &str, active: bool, view: View) -> bool {
+    let accent = view_accent(view);
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click());
     let r = CornerRadius::same(6);
@@ -2480,11 +2683,21 @@ fn nav_item(ui: &mut egui::Ui, p: &Palette, label: &str, active: bool, accent: C
         ui.painter().rect_filled(rect, r, p.hover);
     }
     let color = if active { accent } else { p.text };
+    let icon = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y - 8.0),
+        Vec2::splat(16.0),
+    );
+    draw_nav_icon(ui, icon, view, color);
+    let font = if active {
+        FontId::new(13.5, egui::FontFamily::Name("semibold".into()))
+    } else {
+        FontId::proportional(13.5)
+    };
     ui.painter().text(
-        Pos2::new(rect.left() + 10.0, rect.center().y),
+        Pos2::new(rect.left() + 34.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
-        FontId::proportional(13.5),
+        font,
         color,
     );
     resp.clicked()
@@ -2495,7 +2708,7 @@ impl TabibuApp {
         let p = palette(self.dark);
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.3);
-            ui.label(RichText::new("Space Analyzer").size(26.0).strong());
+            ui.label(semibold("Space Analyzer").size(26.0));
             ui.add_space(8.0);
             ui.label(
                 RichText::new(
@@ -2533,7 +2746,7 @@ impl TabibuApp {
         let p = palette(self.dark);
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.35);
-            ui.label(RichText::new("Removal complete").size(22.0).strong());
+            ui.label(semibold("Removal complete").size(22.0));
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!(
@@ -2555,7 +2768,7 @@ impl TabibuApp {
             JunkPhase::Idle => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new("Junk Cleanup").size(26.0).strong());
+                    ui.label(semibold("Junk Cleanup").size(26.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -2584,7 +2797,7 @@ impl TabibuApp {
                 let (freed, items) = (*freed, *items);
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
-                    ui.label(RichText::new("Cleanup complete").size(22.0).strong());
+                    ui.label(semibold("Cleanup complete").size(22.0));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
@@ -2620,7 +2833,7 @@ impl TabibuApp {
             JunkPhase::Idle => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new("Large & Old Files").size(26.0).strong());
+                    ui.label(semibold("Large & Old Files").size(26.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -2649,7 +2862,7 @@ impl TabibuApp {
                 let (freed, items) = (*freed, *items);
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
-                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.label(semibold("Done").size(22.0));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
@@ -2683,7 +2896,7 @@ impl TabibuApp {
             JunkPhase::Idle => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new("Security Scan").size(26.0).strong());
+                    ui.label(semibold("Security Scan").size(26.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -2713,7 +2926,7 @@ impl TabibuApp {
                 let (freed, items) = (*freed, *items);
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
-                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.label(semibold("Done").size(22.0));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
@@ -2745,7 +2958,7 @@ impl TabibuApp {
         let accent = Color32::from_rgb(0x22, 0xc5, 0x5e); // green — webview battery accent
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Battery").size(16.0).strong());
+            ui.label(semibold("Battery").size(19.0));
         });
         ui.add_space(10.0);
 
@@ -2816,7 +3029,7 @@ impl TabibuApp {
         let p = palette(self.dark);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Startup Items").size(16.0).strong());
+            ui.label(semibold("Startup Items").size(19.0));
         });
         ui.add_space(6.0);
         ui.separator();
@@ -2888,7 +3101,7 @@ impl TabibuApp {
             JunkPhase::Idle => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new("Build Artifacts").size(26.0).strong());
+                    ui.label(semibold("Build Artifacts").size(26.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -2918,7 +3131,7 @@ impl TabibuApp {
                 let (freed, items) = (*freed, *items);
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
-                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.label(semibold("Done").size(22.0));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
@@ -2950,7 +3163,7 @@ impl TabibuApp {
         let accent = Color32::from_rgb(0xa8, 0x55, 0xf7); // purple
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Disk").size(16.0).strong());
+            ui.label(semibold("Disk").size(19.0));
         });
         ui.add_space(10.0);
 
@@ -3145,7 +3358,7 @@ impl TabibuApp {
             JunkPhase::Idle => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new("Smart Scan").size(26.0).strong());
+                    ui.label(semibold("Smart Scan").size(26.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -3175,7 +3388,7 @@ impl TabibuApp {
                 let (freed, items) = (*freed, *items);
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
-                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.label(semibold("Done").size(22.0));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
@@ -3207,7 +3420,7 @@ impl TabibuApp {
         let accent = Color32::from_rgb(0x63, 0x66, 0xf1); // indigo
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Uninstaller").size(16.0).strong());
+            ui.label(semibold("Uninstaller").size(19.0));
             if self.uninstall.loaded {
                 ui.label(
                     RichText::new(format!("· {} apps", self.uninstall.apps.len()))
@@ -3281,7 +3494,7 @@ impl TabibuApp {
         let p = palette(self.dark);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Settings").size(16.0).strong());
+            ui.label(semibold("Settings").size(19.0));
         });
         ui.add_space(10.0);
         ui.separator();
@@ -3346,7 +3559,7 @@ impl TabibuApp {
         let accent = Color32::from_rgb(0x08, 0x91, 0xb2); // cyan
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Universal Binaries").size(16.0).strong());
+            ui.label(semibold("Universal Binaries").size(19.0));
         });
         ui.add_space(10.0);
 
@@ -3360,12 +3573,11 @@ impl TabibuApp {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(
-                RichText::new(format!(
+                metric(format!(
                     "{} safely reclaimable",
                     fmt_bytes(rep.safe_reclaimable_bytes)
                 ))
                 .size(22.0)
-                .strong()
                 .color(accent),
             );
             ui.label(
@@ -3449,7 +3661,7 @@ impl TabibuApp {
         let accent = Color32::from_rgb(0xd9, 0x77, 0x06); // amber
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Developer / CLI").size(16.0).strong());
+            ui.label(semibold("Developer / CLI").size(19.0));
         });
         ui.add_space(10.0);
 
@@ -3467,12 +3679,11 @@ impl TabibuApp {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(
-                RichText::new(format!(
+                metric(format!(
                     "{} reclaimable",
                     fmt_bytes(rep.cleanup.freeable_bytes)
                 ))
                 .size(22.0)
-                .strong()
                 .color(accent),
             );
             // The version string already includes "Homebrew …"; don't double it.
@@ -3532,7 +3743,7 @@ impl TabibuApp {
         let accent = Color32::from_rgb(0x24, 0x96, 0xed); // docker blue
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Docker").size(16.0).strong());
+            ui.label(semibold("Docker").size(19.0));
         });
         ui.add_space(10.0);
 
@@ -3563,12 +3774,11 @@ impl TabibuApp {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             ui.label(
-                RichText::new(format!(
+                metric(format!(
                     "{} reclaimable",
                     fmt_bytes(rep.total_reclaimable_bytes)
                 ))
                 .size(22.0)
-                .strong()
                 .color(accent),
             );
             if let Some(v) = &rep.status.version {
@@ -3624,7 +3834,7 @@ impl TabibuApp {
 
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Memory & CPU").size(16.0).strong());
+            ui.label(semibold("Memory & CPU").size(19.0));
         });
         ui.add_space(8.0);
 
@@ -3749,7 +3959,7 @@ impl TabibuApp {
             DupePhase::Idle => {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.3);
-                    ui.label(RichText::new("Find Duplicate Files").size(26.0).strong());
+                    ui.label(semibold("Find Duplicate Files").size(26.0));
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(
@@ -3778,7 +3988,7 @@ impl TabibuApp {
                 let (freed, items) = (*freed, *items);
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
-                    ui.label(RichText::new("Done").size(22.0).strong());
+                    ui.label(semibold("Done").size(22.0));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(format!(
@@ -3926,7 +4136,7 @@ impl TabibuApp {
 
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Network").size(16.0).strong());
+            ui.label(semibold("Network").size(19.0));
         });
         ui.add_space(10.0);
 
@@ -3941,9 +4151,8 @@ impl TabibuApp {
             ui.vertical(|ui| {
                 ui.label(RichText::new("Download").color(p.text_dim));
                 ui.label(
-                    RichText::new(format!("{}/s", fmt_bytes(down)))
+                    metric(format!("{}/s", fmt_bytes(down)))
                         .size(22.0)
-                        .strong()
                         .color(accent),
                 );
                 ui.label(
@@ -3955,11 +4164,7 @@ impl TabibuApp {
             ui.add_space(40.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new("Upload").color(p.text_dim));
-                ui.label(
-                    RichText::new(format!("{}/s", fmt_bytes(up)))
-                        .size(22.0)
-                        .strong(),
-                );
+                ui.label(metric(format!("{}/s", fmt_bytes(up))).size(22.0));
                 ui.label(
                     RichText::new(format!("{} total", fmt_bytes(tup)))
                         .size(11.0)
@@ -4084,7 +4289,7 @@ impl TabibuApp {
         // Header
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.label(RichText::new("Macintosh HD").size(16.0).strong());
+            ui.label(semibold("Macintosh HD").size(19.0));
             ui.label(
                 RichText::new(format!("· {} on disk · {} items", fmt_bytes(total), count))
                     .color(p.text_dim),
