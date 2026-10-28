@@ -950,6 +950,53 @@ fn open_fda_settings() {
         .spawn();
 }
 
+/// LaunchAgent label / plist filename stem — the app's bundle id.
+const AUTOSTART_LABEL: &str = "xr.seede.tabibu";
+
+/// Path to the per-user LaunchAgent plist that enables launch-at-login.
+fn autostart_plist_path() -> PathBuf {
+    tabibu_sys::home_dir()
+        .join("Library/LaunchAgents")
+        .join(format!("{AUTOSTART_LABEL}.plist"))
+}
+
+/// Whether launch-at-login is currently enabled (the LaunchAgent plist exists).
+fn autostart_enabled() -> bool {
+    autostart_plist_path().exists()
+}
+
+/// Render a LaunchAgent plist that runs `exe` at login. The `--from-autostart`
+/// marker matches the Tauri shell's convention (a login start can be told from a
+/// manual open) and is harmless until the egui build acts on it.
+fn autostart_plist(exe: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \t<key>Label</key>\n\t<string>{AUTOSTART_LABEL}</string>\n\
+         \t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{exe}</string>\n\t\t<string>--from-autostart</string>\n\t</array>\n\
+         \t<key>RunAtLoad</key>\n\t<true/>\n\
+         </dict>\n</plist>\n"
+    )
+}
+
+/// Enable or disable launch-at-login by writing / removing the LaunchAgent plist
+/// (pointed at the current executable). Best-effort; returns whether it changed.
+fn set_autostart(enabled: bool) -> bool {
+    let path = autostart_plist_path();
+    if enabled {
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&path, autostart_plist(&exe.to_string_lossy())).is_ok()
+    } else {
+        std::fs::remove_file(&path).is_ok()
+    }
+}
+
 const ROW_H: f32 = 34.0;
 
 /// Scan root: the whole startup disk by default; overridable via `TABIBU_SCAN_ROOT`
@@ -2958,6 +3005,28 @@ impl TabibuApp {
         ui.add_space(16.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
+            ui.label(RichText::new("Startup").strong());
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let mut on = autostart_enabled();
+            if ui.checkbox(&mut on, "Launch Tabibu at login").changed() {
+                set_autostart(on);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(
+                RichText::new("Starts quietly in the menu bar when you log in.")
+                    .color(p.text_dim)
+                    .size(11.0),
+            );
+        });
+
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
             ui.label(RichText::new("About").strong());
         });
         ui.add_space(4.0);
@@ -4065,6 +4134,20 @@ mod tests {
         assert_eq!(fmt_ram(1_024), "1.0 KB");
         // 16 GiB of physical RAM must read "16 GB", not 17.2.
         assert_eq!(fmt_ram(16 * 1_024 * 1_024 * 1_024), "16 GB");
+    }
+
+    #[test]
+    fn autostart_plist_has_exe_label_and_runatload() {
+        let xml = autostart_plist("/Applications/Tabibu.app/Contents/MacOS/Tabibu");
+        assert!(xml.contains("<string>xr.seede.tabibu</string>"), "label");
+        assert!(
+            xml.contains("<string>/Applications/Tabibu.app/Contents/MacOS/Tabibu</string>"),
+            "exe path in ProgramArguments"
+        );
+        assert!(xml.contains("--from-autostart"), "login-start marker");
+        assert!(xml.contains("<key>RunAtLoad</key>"), "runs at load");
+        // Well-formed enough to parse as a plist (lint via plutil in CI is overkill).
+        assert!(xml.trim_start().starts_with("<?xml"));
     }
 
     #[test]
