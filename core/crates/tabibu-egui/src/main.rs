@@ -520,26 +520,18 @@ fn cleanup_review_ui(
     let sel_n = items.iter().filter(|i| i.selected).count();
     let mut action = CleanupAction::default();
 
+    // Header: title + Rescan.
     ui.horizontal(|ui| {
-        ui.add_space(8.0);
+        ui.add_space(16.0);
         ui.label(semibold(title).size(19.0));
-        ui.label(
-            RichText::new(format!(
-                "· {} found · {} items",
-                fmt_bytes(total_found),
-                n_found
-            ))
-            .color(p.text_dim),
-        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(8.0);
+            ui.add_space(16.0);
             if ui.button("Rescan").clicked() {
                 action.rescan = true;
             }
         });
     });
-    ui.add_space(4.0);
-    ui.separator();
+    ui.add_space(10.0);
 
     if n_found == 0 {
         ui.add_space(20.0);
@@ -549,13 +541,57 @@ fn cleanup_review_ui(
         return action;
     }
 
-    // Category order (items already sorted biggest-first).
+    // Category order (items already sorted biggest-first) + per-category totals.
     let mut order: Vec<Category> = Vec::new();
     for it in items.iter() {
         if !order.contains(&it.category) {
             order.push(it.category);
         }
     }
+    let cat_total = |cat: Category| -> (u64, usize) {
+        let mut b = 0u64;
+        let mut n = 0usize;
+        for it in items.iter().filter(|it| it.category == cat) {
+            b += it.size_bytes;
+            n += 1;
+        }
+        (b, n)
+    };
+
+    // Summary card: Found + Selected stats, then a proportion tally per category
+    // (parity with the webview's `.summary` block).
+    let inner_w = (ui.available_width() - 32.0).max(240.0);
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        card_frame(ui, &p, inner_w, 0.0, |ui| {
+            ui.horizontal(|ui| {
+                stat_pair(
+                    ui,
+                    &p,
+                    "Found",
+                    &fmt_bytes(total_found),
+                    &format!("{n_found} items"),
+                    false,
+                );
+                ui.add_space(32.0);
+                stat_pair(
+                    ui,
+                    &p,
+                    "Selected",
+                    &fmt_bytes(sel_bytes),
+                    &format!("{sel_n} items"),
+                    sel_n > 0,
+                );
+            });
+            ui.add_space(12.0);
+            let total = total_found.max(1);
+            for cat in &order {
+                let (cb, cn) = cat_total(*cat);
+                tally_row(ui, &p, cat_label(*cat), cb, cn, total);
+            }
+        });
+    });
+    ui.add_space(10.0);
 
     let mut toggle: Option<usize> = None;
     let mut bulk: Option<(Category, bool)> = None;
@@ -572,22 +608,28 @@ fn cleanup_review_ui(
                     .filter(|(_, it)| it.category == *cat)
                     .map(|(i, _)| i)
                     .collect();
-                let cat_bytes: u64 = idxs.iter().map(|&i| items[i].size_bytes).sum();
+                let (cat_bytes, cat_n) = cat_total(*cat);
                 let all_sel = idxs.iter().all(|&i| items[i].selected);
 
-                ui.add_space(8.0);
+                // Sticky-ish category head: select-all + name + "N · size".
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(16.0);
                     let mut checked = all_sel;
                     if ui.checkbox(&mut checked, "").changed() {
                         bulk = Some((*cat, checked));
                     }
-                    ui.label(RichText::new(cat_label(*cat)).strong());
-                    ui.label(
-                        RichText::new(format!("· {} · {} items", fmt_bytes(cat_bytes), idxs.len()))
-                            .color(p.text_dim),
-                    );
+                    ui.label(semibold(cat_label(*cat)).size(13.0));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(16.0);
+                        ui.label(
+                            metric(format!("{cat_n} · {}", fmt_bytes(cat_bytes)))
+                                .size(12.0)
+                                .color(p.text_dim),
+                        );
+                    });
                 });
+                ui.separator();
 
                 for &i in &idxs {
                     let it = &items[i];
@@ -596,28 +638,48 @@ fn cleanup_review_ui(
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| it.path.to_string_lossy().into_owned());
-                    let tip = it.path.to_string_lossy().into_owned();
+                    let reason = it.reason.clone();
+                    let path = it.path.clone();
+                    let tier = it.tier;
+                    let size = it.size_bytes;
+                    let mut checked = it.selected;
                     ui.horizontal(|ui| {
-                        ui.add_space(24.0);
-                        let mut checked = it.selected;
+                        ui.add_space(28.0);
                         if ui.checkbox(&mut checked, "").changed() {
                             toggle = Some(i);
                         }
                         let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                         ui.painter()
-                            .circle_filled(dot.center(), 4.0, tier_color(it.tier));
-                        ui.label(name);
+                            .circle_filled(dot.center(), 4.0, tier_color(tier));
+                        // Right side: Reveal + size.
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.add_space(8.0);
-                            ui.label(
-                                metric(fmt_bytes(it.size_bytes))
-                                    .size(12.0)
-                                    .color(p.text_dim),
-                            );
+                            ui.add_space(16.0);
+                            ui.label(metric(fmt_bytes(size)).size(12.0).color(p.text_dim));
+                            ui.add_space(10.0);
+                            if ui
+                                .add(egui::Button::new(
+                                    RichText::new("Reveal").size(11.0).color(p.text_dim),
+                                ))
+                                .clicked()
+                            {
+                                let _ = std::process::Command::new("open")
+                                    .arg("-R")
+                                    .arg(&path)
+                                    .spawn();
+                            }
+                            // Left-flow name + reason fills the remaining space.
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                ui.label(RichText::new(name).size(13.0));
+                                if !reason.is_empty() {
+                                    ui.label(
+                                        RichText::new(truncate_mid(&reason, 48))
+                                            .color(p.text_dim)
+                                            .size(11.0),
+                                    );
+                                }
+                            });
                         });
-                    })
-                    .response
-                    .on_hover_text(tip);
+                    });
                 }
             }
         });
@@ -633,29 +695,84 @@ fn cleanup_review_ui(
 
     ui.separator();
     ui.horizontal(|ui| {
-        ui.add_space(8.0);
+        ui.add_space(16.0);
         if sel_n == 0 {
             ui.label(RichText::new("Tick anything to remove it (reversible).").color(p.text_dim));
         } else {
-            ui.label(
-                RichText::new(format!("{sel_n} selected · {}", fmt_bytes(sel_bytes))).strong(),
-            );
+            ui.label(semibold(format!(
+                "{sel_n} selected · {}",
+                fmt_bytes(sel_bytes)
+            )));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(8.0);
-            let btn = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE)).fill(
-                if sel_n == 0 {
-                    p.text_faint
-                } else {
-                    Color32::from_rgb(0xdc, 0x26, 0x26)
-                },
-            );
+            ui.add_space(16.0);
+            let danger = Color32::from_rgb(0xdc, 0x26, 0x26);
+            let btn = egui::Button::new(RichText::new("Move to Trash").color(Color32::WHITE))
+                .fill(if sel_n == 0 { p.text_faint } else { danger })
+                .corner_radius(CornerRadius::same(7));
             if ui.add_enabled(sel_n > 0, btn).clicked() {
                 action.trash = true;
             }
         });
     });
     action
+}
+
+/// A summary stat block: a dim key, a big Inter-bold value (accent when `sel`),
+/// and a dim sub — the webview's `.summary .stat`.
+fn stat_pair(ui: &mut egui::Ui, p: &Palette, k: &str, v: &str, sub: &str, sel: bool) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new(k).size(11.0).color(p.text_dim));
+        ui.label(
+            metric(v)
+                .size(24.0)
+                .color(if sel { p.accent } else { p.text }),
+        );
+        ui.label(RichText::new(sub).size(11.0).color(p.text_dim));
+    });
+}
+
+/// One category tally row: name, a proportional bar, count and size — the
+/// webview's `.tally`.
+fn tally_row(ui: &mut egui::Ui, p: &Palette, name: &str, bytes: u64, count: usize, total: u64) {
+    let frac = (bytes as f32 / total as f32).clamp(0.02, 1.0);
+    ui.horizontal(|ui| {
+        ui.allocate_ui(Vec2::new(150.0, 16.0), |ui| {
+            ui.label(RichText::new(name).size(12.0));
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(metric(fmt_bytes(bytes)).size(11.0));
+            ui.add_space(10.0);
+            ui.label(metric(count.to_string()).size(11.0).color(p.text_dim));
+            ui.add_space(12.0);
+            let w = (ui.available_width() - 6.0).max(20.0);
+            let (bar, _) = ui.allocate_exact_size(Vec2::new(w, 8.0), Sense::hover());
+            ui.painter()
+                .rect_filled(bar, CornerRadius::same(4), p.track);
+            let fill = Rect::from_min_size(bar.min, Vec2::new(bar.width() * frac, bar.height()));
+            ui.painter()
+                .rect_filled(fill, CornerRadius::same(4), p.accent);
+        });
+    });
+    ui.add_space(4.0);
+}
+
+/// Middle-truncate a string to `max` chars (keeps the informative head + tail).
+fn truncate_mid(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(1) / 2;
+    let head: String = s.chars().take(keep).collect();
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
 }
 
 /// Standard view header: a bold title + a dim "· subtitle", left-inset to match
