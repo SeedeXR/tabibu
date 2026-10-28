@@ -3015,26 +3015,45 @@ impl TabibuApp {
     fn ui_startup(&mut self, ui: &mut egui::Ui) {
         let p = palette(self.dark);
         view_header(ui, &p, "Startup Items", "what launches at login");
-        ui.separator();
 
         let Some(rep) = self.startup.data.clone() else {
             self.ui_center(ui, "Reading login items…", true);
             return;
         };
+
+        // Count + Open Login Items Settings (matches the webview header row).
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            let n = rep.items.len();
+            ui.label(
+                semibold(format!("{n} startup item{}", if n == 1 { "" } else { "s" })).size(13.0),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(16.0);
+                if ui.button("Open Login Items Settings").clicked() {
+                    let _ = std::process::Command::new("open")
+                        .arg("x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+                        .spawn();
+                }
+            });
+        });
         if rep.partial {
-            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
+                ui.add_space(16.0);
                 ui.label(
-                    RichText::new("Some system items need Full Disk Access to read.")
-                        .color(tier_color(SafetyTier::Review)),
+                    RichText::new("Some system items need Full Disk Access to read — this list may be incomplete.")
+                        .color(tier_color(SafetyTier::Review))
+                        .size(11.5),
                 );
             });
         }
+        ui.add_space(6.0);
+        ui.separator();
+
         if rep.items.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("No login items found.").color(p.text_dim));
+                ui.label(RichText::new("No startup items found.").color(p.text_dim));
             });
             return;
         }
@@ -3042,37 +3061,45 @@ impl TabibuApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let mut scopes: Vec<&str> = Vec::new();
                 for it in &rep.items {
-                    if !scopes.contains(&it.scope.as_str()) {
-                        scopes.push(it.scope.as_str());
-                    }
-                }
-                for scope in scopes {
-                    ui.add_space(8.0);
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new(scope).strong());
+                        ui.add_space(16.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(it.label.as_str()).size(13.0));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(it.program.as_str())
+                                        .color(p.text_dim)
+                                        .monospace()
+                                        .size(11.0),
+                                )
+                                .truncate(),
+                            );
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(16.0);
+                            if ui
+                                .add(egui::Button::new(
+                                    RichText::new("Reveal").size(11.0).color(p.text_dim),
+                                ))
+                                .clicked()
+                            {
+                                let _ = std::process::Command::new("open")
+                                    .arg("-R")
+                                    .arg(&it.path)
+                                    .spawn();
+                            }
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(it.scope.as_str())
+                                    .color(p.text_faint)
+                                    .size(11.0),
+                            );
+                        });
                     });
-                    for it in rep.items.iter().filter(|i| i.scope == scope) {
-                        ui.horizontal(|ui| {
-                            ui.add_space(24.0);
-                            ui.label(it.label.as_str());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.add_space(8.0);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(it.program.as_str())
-                                            .color(p.text_dim)
-                                            .monospace(),
-                                    )
-                                    .truncate(),
-                                );
-                            });
-                        })
-                        .response
-                        .on_hover_text(it.path.clone());
-                    }
+                    ui.add_space(4.0);
+                    ui.separator();
                 }
             });
     }
