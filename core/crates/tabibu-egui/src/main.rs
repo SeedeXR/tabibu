@@ -867,7 +867,15 @@ struct TabibuApp {
     /// Full Disk Access granted? Shown as a top banner when false. Defaults to
     /// `true` so no banner flashes before the real probe runs on frame 1.
     fda: bool,
+    /// Floating health popover (a borderless always-on-top viewport under the
+    /// tray) open? Toggled by tray left-click / Ctrl+Cmd+N.
+    popover_open: bool,
+    popover_pos: Pos2,
 }
+
+/// Floating health popover size (logical points).
+const POPOVER_W: f32 = 300.0;
+const POPOVER_H: f32 = 196.0;
 
 impl Default for TabibuApp {
     fn default() -> Self {
@@ -898,8 +906,35 @@ impl Default for TabibuApp {
             shell: None,
             shell_init: false,
             fda: true,
+            popover_open: false,
+            popover_pos: Pos2::ZERO,
         }
     }
+}
+
+/// A compact ring for the menu-bar popover (smaller than the Dashboard's
+/// `ring_card`): a labelled dial with the percentage in the middle.
+fn mini_ring(ui: &mut egui::Ui, p: &Palette, title: &str, frac: f32, big: &str, color: Color32) {
+    // Fixed-width centered column — a bare `vertical_centered` inside a
+    // `horizontal` layout grabs the full remaining width, crowding out the
+    // sibling rings.
+    ui.allocate_ui_with_layout(
+        Vec2::new(82.0, 102.0),
+        Layout::top_down(Align::Center),
+        |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(82.0, 82.0), Sense::hover());
+            let c = rect.center();
+            draw_ring(ui, c, 30.0, frac, color, p.track);
+            ui.painter().text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                big,
+                FontId::proportional(15.0),
+                p.text,
+            );
+            ui.label(RichText::new(title).color(p.text_dim).size(10.0));
+        },
+    );
 }
 
 /// Re-probe Full Disk Access (reads a TCC-gated path). Cheap but does IO, so
@@ -1558,11 +1593,133 @@ impl TabibuApp {
     /// optionally navigating to a view. The window is only ever hidden (on
     /// close), never destroyed, so making it visible brings it right back.
     fn show_window(&mut self, ctx: &egui::Context, view: Option<View>) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        // Target the ROOT viewport explicitly so this also works when called from
+        // inside the popover viewport's closure (where the bare context refers to
+        // the popover, not the main window).
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         if let Some(v) = view {
             self.view = v;
         }
+    }
+
+    /// Toggle the floating health popover. On open, start the samplers (so it has
+    /// live data on any view) and anchor it top-right, just under the menu bar.
+    fn toggle_popover(&mut self, ctx: &egui::Context) {
+        self.popover_open = !self.popover_open;
+        if self.popover_open {
+            self.ensure_monitor();
+            self.ensure_disk();
+            let mw = ctx
+                .input(|i| i.viewport().monitor_size)
+                .map_or(1440.0, |s| s.x);
+            self.popover_pos = Pos2::new((mw - POPOVER_W - 12.0).max(12.0), 36.0);
+        }
+    }
+
+    /// Render the floating health popover as a borderless, always-on-top
+    /// viewport. Uses `show_viewport_immediate` so the closure can read the live
+    /// monitor/disk state directly. Auto-hides when it loses focus.
+    fn popover_viewport(&mut self, ctx: &egui::Context) {
+        let pos = self.popover_pos;
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("tabibu_popover"),
+            egui::ViewportBuilder::default()
+                .with_title("Tabibu")
+                .with_inner_size([POPOVER_W, POPOVER_H])
+                .with_position(pos)
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_always_on_top(),
+            |vp, _class| {
+                let p = palette(self.dark);
+                egui::CentralPanel::default()
+                    .frame(egui::Frame {
+                        fill: p.bg_elev,
+                        inner_margin: egui::Margin::same(14),
+                        stroke: Stroke::new(1.0_f32, p.border),
+                        corner_radius: CornerRadius::same(10),
+                        ..Default::default()
+                    })
+                    .show(vp, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Tabibu").strong());
+                            ui.label(
+                                RichText::new("· system health")
+                                    .color(p.text_dim)
+                                    .size(12.0),
+                            );
+                        });
+                        ui.add_space(10.0);
+
+                        let cpu = self.monitor.latest.as_ref().map_or(0.0, |s| s.cpu_percent);
+                        let (mu, mt) = self
+                            .monitor
+                            .latest
+                            .as_ref()
+                            .map_or((0, 0), |s| (s.used_memory_bytes, s.total_memory_bytes));
+                        let mem_frac = if mt > 0 { mu as f32 / mt as f32 } else { 0.0 };
+                        let (du, dt, dfree) = self.disk.data.map_or((0, 0, 0), |d| {
+                            (
+                                d.total_bytes.saturating_sub(d.available_bytes),
+                                d.total_bytes,
+                                d.available_bytes,
+                            )
+                        });
+                        let disk_frac = if dt > 0 { du as f32 / dt as f32 } else { 0.0 };
+
+                        ui.horizontal(|ui| {
+                            mini_ring(
+                                ui,
+                                &p,
+                                "CPU",
+                                cpu / 100.0,
+                                &format!("{}%", cpu.round() as i64),
+                                Color32::from_rgb(0xf9, 0x73, 0x16),
+                            );
+                            mini_ring(
+                                ui,
+                                &p,
+                                "Memory",
+                                mem_frac,
+                                &format!("{}%", (mem_frac * 100.0).round() as i64),
+                                Color32::from_rgb(0x10, 0xb9, 0x81),
+                            );
+                            mini_ring(
+                                ui,
+                                &p,
+                                "Disk",
+                                disk_frac,
+                                &format!("{}%", (disk_frac * 100.0).round() as i64),
+                                Color32::from_rgb(0xa8, 0x55, 0xf7),
+                            );
+                        });
+                        ui.add_space(10.0);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Open Dashboard").clicked() {
+                                self.popover_open = false;
+                                self.show_window(vp, Some(View::Dash));
+                            }
+                            ui.label(
+                                RichText::new(format!("{} free", fmt_bytes(dfree)))
+                                    .color(p.text_dim)
+                                    .size(11.0),
+                            );
+                        });
+                    });
+
+                // Dismiss predictably: Escape, the window close button, or
+                // toggling again from the tray / hotkey. (Blur-based auto-hide is
+                // deferred — it needs the Tauri shell's click-debounce to stop a
+                // tray-click dismiss from immediately reopening the popover.)
+                if vp.input(|i| i.viewport().close_requested())
+                    || vp.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    self.popover_open = false;
+                }
+                vp.request_repaint_after(Duration::from_millis(500));
+            },
+        );
     }
 }
 
@@ -1578,15 +1735,23 @@ impl eframe::App for TabibuApp {
             if std::env::var_os("TABIBU_NO_TRAY").is_none() {
                 self.shell = Shell::new();
             }
+            // Test seam: open the health popover on launch for a headless shot.
+            if std::env::var_os("TABIBU_POPOVER").is_some() {
+                self.toggle_popover(ctx);
+            }
         }
         if self.shell.is_some() {
             let events = self.shell.as_ref().map(Shell::poll).unwrap_or_default();
             for ev in events {
                 match ev {
                     ShellEvent::Open => self.show_window(ctx, None),
+                    ShellEvent::TogglePopover => self.toggle_popover(ctx),
                     ShellEvent::Settings => self.show_window(ctx, Some(View::Settings)),
                     ShellEvent::Quit => std::process::exit(0),
                 }
+            }
+            if self.popover_open {
+                self.popover_viewport(ctx);
             }
             ctx.request_repaint_after(Duration::from_millis(150));
             // Closing the dashboard hides it and keeps the app alive in the menu

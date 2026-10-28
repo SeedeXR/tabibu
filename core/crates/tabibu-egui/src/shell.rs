@@ -38,8 +38,11 @@ const PROCESS_RAM_ALERT_BYTES: u64 = 2_000_000_000;
 /// these onto its own view state + viewport commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellEvent {
-    /// Show + focus the dashboard window (tray left-click, menu "Open", hotkey).
+    /// Show + focus the dashboard window (menu "Open Dashboard").
     Open,
+    /// Toggle the floating health popover (tray left-click, Ctrl+Cmd+N) — a
+    /// quick glance without opening the full dashboard.
+    TogglePopover,
     /// Show the dashboard and navigate it to Settings.
     Settings,
     /// Quit the whole app.
@@ -181,8 +184,7 @@ impl Shell {
                 });
             }
         }
-        // Left-click on the tray icon opens the dashboard (the floating popover
-        // is deferred; see the module note).
+        // Left-click on the tray icon toggles the health popover.
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click {
                 button: tray_icon::MouseButton::Left,
@@ -190,12 +192,14 @@ impl Shell {
                 ..
             } = ev
             {
-                events.push(ShellEvent::Open);
+                events.push(ShellEvent::TogglePopover);
             }
         }
+        // Ctrl+Cmd+N also toggles the popover — the reliable way in when the tray
+        // icon is hidden behind the notch on a crowded menu bar.
         while let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
             if ev.id == self.hotkey_id && ev.state == global_hotkey::HotKeyState::Pressed {
-                events.push(ShellEvent::Open);
+                events.push(ShellEvent::TogglePopover);
             }
         }
         events
