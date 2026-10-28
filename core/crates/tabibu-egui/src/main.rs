@@ -92,22 +92,43 @@ fn palette(dark: bool) -> Palette {
 /// SF Mono so the premium "tabular numbers" look matches; it's NOT bundled
 /// (Apple font licensing), and we fall back to egui's default mono if absent.
 fn install_fonts(ctx: &egui::Context) {
+    use egui::FontFamily;
     let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "SpaceGrotesk".to_owned(),
-        Arc::new(egui::FontData::from_static(include_bytes!(
-            "../assets/SpaceGrotesk.ttf"
-        ))),
-    );
+    // Space Grotesk instanced heavier for contrast — Medium (500) body, SemiBold
+    // (600) headings — plus Inter Bold (700) for every number metric.
+    for (name, bytes) in [
+        (
+            "SpaceGrotesk",
+            &include_bytes!("../assets/SpaceGrotesk-Medium.ttf")[..],
+        ),
+        (
+            "SpaceGroteskSemiBold",
+            &include_bytes!("../assets/SpaceGrotesk-SemiBold.ttf")[..],
+        ),
+        ("InterBold", &include_bytes!("../assets/Inter-Bold.ttf")[..]),
+    ] {
+        fonts.font_data.insert(
+            name.to_owned(),
+            Arc::new(egui::FontData::from_static(bytes)),
+        );
+    }
     fonts
         .families
-        .entry(egui::FontFamily::Proportional)
+        .entry(FontFamily::Proportional)
         .or_default()
         .insert(0, "SpaceGrotesk".to_owned());
-    // System SF Mono — the same `--mono` family the webview used for values.
+    fonts.families.insert(
+        FontFamily::Name("semibold".into()),
+        vec!["SpaceGroteskSemiBold".to_owned(), "SpaceGrotesk".to_owned()],
+    );
+    fonts.families.insert(
+        FontFamily::Name("metric".into()),
+        vec!["InterBold".to_owned()],
+    );
+    // System SF Mono — kept for file paths / code only (not number metrics).
     for path in [
         "/System/Library/Fonts/SFNSMono.ttf",
-        "/System/Library/Fonts/Menlo.ttc", // fallback (also a clean mono)
+        "/System/Library/Fonts/Menlo.ttc",
     ] {
         if let Ok(bytes) = std::fs::read(path) {
             fonts.font_data.insert(
@@ -116,7 +137,7 @@ fn install_fonts(ctx: &egui::Context) {
             );
             fonts
                 .families
-                .entry(egui::FontFamily::Monospace)
+                .entry(FontFamily::Monospace)
                 .or_default()
                 .insert(0, "Mono".to_owned());
             break;
@@ -125,10 +146,16 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// A monospace `RichText` — Tabibu uses SF Mono for every number, size and path
-/// (the webview's `--mono`), which is most of the "premium, tabular" feel.
-fn mono(text: impl Into<String>) -> RichText {
-    RichText::new(text).monospace()
+/// A number metric: Inter Bold (the chosen numeric face) — every value, size,
+/// percentage and count.
+fn metric(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(egui::FontFamily::Name("metric".into()))
+}
+
+/// Semibold `RichText` (Space Grotesk 600) for headings/emphasis — real weight
+/// contrast over the Medium body (egui's `.strong()` only recolours).
+fn semibold(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(egui::FontFamily::Name("semibold".into()))
 }
 
 fn apply_theme(ctx: &egui::Context, dark: bool) {
@@ -164,6 +191,29 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(12.0, 6.0);
+    // Match the webview's type scale (13px base, SF Mono for values) instead of
+    // egui's looser 14px default — the biggest single lever on "designed" text.
+    use egui::{FontFamily, FontId, TextStyle};
+    style.text_styles = [
+        (
+            TextStyle::Heading,
+            FontId::new(17.0, FontFamily::Proportional),
+        ),
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+        (
+            TextStyle::Button,
+            FontId::new(13.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(11.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.5, FontFamily::Monospace),
+        ),
+    ]
+    .into();
     ctx.set_style(style);
 }
 
@@ -362,29 +412,35 @@ fn draw_sparkline(ui: &egui::Ui, rect: Rect, values: &[f32], max_hint: f32, acce
         Pos2::new(rect.min.x + pad, rect.min.y + pad),
         Pos2::new(rect.max.x - pad, rect.max.y - pad),
     );
-    let maxv = values
-        .iter()
-        .copied()
-        .fold(0.0_f32, f32::max)
-        .max(max_hint)
-        .max(1.0);
+    // Scale: honour the floor (`max_hint`, e.g. 100 for a %) but give the line
+    // headroom above the observed peak so it never clips, and reserve a little
+    // vertical room at the bottom so an idle trace still reads as a line, not a
+    // smear glued to the floor.
+    let observed = values.iter().copied().fold(0.0_f32, f32::max);
+    let maxv = observed.max(max_hint).max(1.0) * 1.12;
     let n = values.len();
     let dx = inner.width() / (n as f32 - 1.0);
+    let floor_gap = 3.0_f32; // keeps a near-zero line just off the baseline
+    let plot_h = (inner.height() - floor_gap).max(1.0);
+    let y_of = |v: f32| inner.max.y - floor_gap - (v / maxv).clamp(0.0, 1.0) * plot_h;
     let line: Vec<Pos2> = values
         .iter()
         .enumerate()
-        .map(|(i, &v)| {
-            Pos2::new(
-                inner.min.x + i as f32 * dx,
-                inner.max.y - (v / maxv).clamp(0.0, 1.0) * inner.height(),
-            )
-        })
+        .map(|(i, &v)| Pos2::new(inner.min.x + i as f32 * dx, y_of(v)))
         .collect();
+    // Faint baseline so the plot reads as a chart even when flat.
+    p.line_segment(
+        [
+            Pos2::new(inner.min.x, inner.max.y),
+            Pos2::new(inner.max.x, inner.max.y),
+        ],
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(128, 128, 128, 40)),
+    );
     // Area fill: the line, closed down to the baseline.
     let mut area = line.clone();
     area.push(Pos2::new(inner.max.x, inner.max.y));
     area.push(Pos2::new(inner.min.x, inner.max.y));
-    let fill = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38);
+    let fill = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 55);
     p.add(Shape::Path(egui::epaint::PathShape {
         points: area,
         closed: true,
@@ -392,7 +448,7 @@ fn draw_sparkline(ui: &egui::Ui, rect: Rect, values: &[f32], max_hint: f32, acce
         stroke: egui::epaint::PathStroke::NONE,
     }));
     // Round-capped line on top.
-    let cap = 1.0_f32;
+    let cap = 1.25_f32;
     p.circle_filled(line[0], cap, accent);
     p.circle_filled(line[line.len() - 1], cap, accent);
     p.add(Shape::line(line, Stroke::new(2.0_f32, accent)));
@@ -556,9 +612,9 @@ fn cleanup_review_ui(
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_space(8.0);
                             ui.label(
-                                RichText::new(fmt_bytes(it.size_bytes))
-                                    .color(p.text_dim)
-                                    .monospace(),
+                                metric(fmt_bytes(it.size_bytes))
+                                    .size(12.0)
+                                    .color(p.text_dim),
                             );
                         });
                     })
@@ -610,7 +666,7 @@ fn view_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(16.0);
-        ui.label(RichText::new(title).size(20.0).strong());
+        ui.label(semibold(title).size(20.0));
         if !subtitle.is_empty() {
             ui.add_space(6.0);
             ui.label(
@@ -623,23 +679,23 @@ fn view_header(ui: &mut egui::Ui, p: &Palette, title: &str, subtitle: &str) {
     ui.add_space(12.0);
 }
 
-/// A card surface (elevated fill + hairline border + 10px radius) of fixed size;
-/// runs `add` in a 14px-inset child. The dashboard / stat building block.
-fn card_frame(ui: &mut egui::Ui, p: &Palette, w: f32, h: f32, add: impl FnOnce(&mut egui::Ui)) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(10),
-        p.bg_elev,
-        Stroke::new(1.0_f32, p.border),
-        StrokeKind::Inside,
-    );
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink(14.0))
-            .layout(Layout::top_down(Align::Min)),
-    );
-    add(&mut child);
+/// A card surface (elevated fill + hairline border + 10px radius) sized `w` wide
+/// and AT LEAST `min_h` tall, growing to fit its content (so a button can never
+/// spill past the border). Uses egui's native `Frame` for correct bg-behind-
+/// content + inner margin.
+fn card_frame(ui: &mut egui::Ui, p: &Palette, w: f32, min_h: f32, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(p.bg_elev)
+        .stroke(Stroke::new(1.0_f32, p.border))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(w - 28.0);
+            ui.set_min_height((min_h - 28.0).max(0.0));
+            // Force top-down: the card is often placed inside a horizontal row, and
+            // Frame would otherwise inherit that layout and lay content sideways.
+            ui.with_layout(Layout::top_down(Align::Min), add);
+        });
 }
 
 /// A dashboard stat card: an accent dot + title, a big MONO value, a dim sub.
@@ -660,7 +716,7 @@ fn stat_card(
             ui.label(RichText::new(title).size(12.0).color(p.text_dim));
         });
         ui.add_space(8.0);
-        ui.label(mono(big).size(25.0).strong().color(p.text));
+        ui.label(metric(big).size(25.0).color(p.text));
         ui.add_space(3.0);
         ui.label(RichText::new(small).size(11.5).color(p.text_dim));
     });
@@ -966,6 +1022,8 @@ struct TabibuApp {
     /// tray) open? Toggled by tray left-click / Ctrl+Cmd+N.
     popover_open: bool,
     popover_pos: Pos2,
+    /// The official app icon, loaded once as a texture for the brand logo.
+    icon_tex: Option<egui::TextureHandle>,
 }
 
 /// Floating health popover size (logical points).
@@ -1003,8 +1061,27 @@ impl Default for TabibuApp {
             fda: true,
             popover_open: false,
             popover_pos: Pos2::ZERO,
+            icon_tex: None,
         }
     }
+}
+
+/// Decode the bundled official app icon (teal pulse mark) into an egui texture,
+/// once, for the brand logo. `None` on any decode surprise (a fallback square is
+/// drawn instead).
+fn load_icon_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    const BYTES: &[u8] = include_bytes!("../assets/icon-64.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(BYTES));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    let image =
+        egui::ColorImage::from_rgba_unmultiplied([info.width as usize, info.height as usize], &buf);
+    Some(ctx.load_texture("tabibu_icon", image, egui::TextureOptions::LINEAR))
 }
 
 /// A compact ring for the menu-bar popover (smaller than the Dashboard's
@@ -1874,6 +1951,7 @@ impl eframe::App for TabibuApp {
         if !self.shell_init {
             self.shell_init = true;
             self.fda = probe_fda();
+            self.icon_tex = load_icon_texture(ctx);
             if std::env::var_os("TABIBU_NO_TRAY").is_none() {
                 self.shell = Shell::new();
             }
@@ -2247,12 +2325,23 @@ impl eframe::App for TabibuApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
-                    let (lr, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
-                    ui.painter()
-                        .rect_filled(lr, CornerRadius::same(7), view_accent(View::Dash));
-                    draw_pulse(ui, lr, Color32::WHITE);
+                    if let Some(tex) = &self.icon_tex {
+                        ui.add(
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(Vec2::splat(26.0))
+                                .corner_radius(CornerRadius::same(7)),
+                        );
+                    } else {
+                        let (lr, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                        ui.painter().rect_filled(
+                            lr,
+                            CornerRadius::same(7),
+                            view_accent(View::Dash),
+                        );
+                        draw_pulse(ui, lr, Color32::WHITE);
+                    }
                     ui.add_space(8.0);
-                    ui.label(RichText::new("Tabibu").size(16.0).strong());
+                    ui.label(semibold("Tabibu").size(16.0));
                 });
                 ui.add_space(8.0);
 
@@ -3001,12 +3090,20 @@ impl TabibuApp {
                 if hist.len() >= 2 {
                     ui.horizontal(|ui| {
                         ui.add_space(margin);
-                        card_frame(ui, &p, avail, 108.0, |ui| {
-                            ui.label(RichText::new("CPU").size(12.0).color(p.text_dim));
+                        card_frame(ui, &p, avail, 96.0, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("CPU").size(12.0).color(p.text_dim));
+                                ui.add_space(6.0);
+                                ui.label(
+                                    metric(format!("{}%", cpu.round() as i64))
+                                        .size(12.0)
+                                        .color(p.text_dim),
+                                );
+                            });
                             ui.add_space(6.0);
                             let w = (ui.available_width()).max(60.0);
                             let (strip, _) =
-                                ui.allocate_exact_size(Vec2::new(w, 56.0), Sense::hover());
+                                ui.allocate_exact_size(Vec2::new(w, 50.0), Sense::hover());
                             draw_sparkline(ui, strip, &hist, 100.0, view_accent(View::Memory));
                         });
                     });
@@ -3318,9 +3415,9 @@ impl TabibuApp {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_space(8.0);
                                 ui.label(
-                                    RichText::new(fmt_bytes(a.reclaimable_bytes))
-                                        .color(p.text_dim)
-                                        .monospace(),
+                                    metric(fmt_bytes(a.reclaimable_bytes))
+                                        .size(12.0)
+                                        .color(p.text_dim),
                                 );
                             });
                         })
@@ -3493,9 +3590,9 @@ impl TabibuApp {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new(format!("{} reclaimable", fmt_bytes(a.reclaimable_bytes)))
-                            .color(p.text_dim)
-                            .monospace(),
+                        metric(format!("{} reclaimable", fmt_bytes(a.reclaimable_bytes)))
+                            .size(12.0)
+                            .color(p.text_dim),
                     );
                 });
             });
@@ -3631,14 +3728,13 @@ impl TabibuApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_space(8.0);
                             ui.label(
-                                RichText::new(fmt_bytes(proc.memory_bytes))
-                                    .monospace()
+                                metric(fmt_bytes(proc.memory_bytes))
+                                    .size(12.0)
                                     .color(p.text_dim),
                             );
                             ui.add_space(16.0);
                             ui.label(
-                                RichText::new(format!("{}%", proc.cpu_percent.round() as i64))
-                                    .monospace(),
+                                metric(format!("{}%", proc.cpu_percent.round() as i64)).size(12.0),
                             );
                         });
                     });
@@ -4246,12 +4342,35 @@ fn elide(s: &str, max_w: f32, size: f32) -> String {
     }
 }
 
+/// The official Tabibu app icon (gourd) for the window / Dock, decoded from the
+/// bundled 256px PNG. Without this eframe shows a blank/white default icon.
+fn window_icon() -> Option<egui::IconData> {
+    const BYTES: &[u8] = include_bytes!("../assets/icon-256.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(BYTES));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    Some(egui::IconData {
+        rgba: buf,
+        width: info.width,
+        height: info.height,
+    })
+}
+
 fn main() -> eframe::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1120.0, 740.0])
+        .with_min_inner_size([900.0, 600.0])
+        .with_title("Tabibu");
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 740.0])
-            .with_min_inner_size([900.0, 600.0])
-            .with_title("Tabibu"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
