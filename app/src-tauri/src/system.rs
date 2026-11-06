@@ -178,25 +178,17 @@ fn bundle_identifier(app: &Path) -> Option<String> {
 #[must_use]
 pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     let home = home_dir();
-    let mut allowed_roots: Vec<PathBuf> = [
-        ".Trash",
-        "Library/Caches",
-        "Library/Logs",
-        "Library/Developer/Xcode/DerivedData",
-        "Library/Developer/CoreSimulator/Caches",
-        ".npm",
-        ".cargo/registry/cache",
-        // Hidden dot-directory caches surfaced by DevCacheScanner (must be
-        // allowed roots or the GuardedSink drops their items). Scoped to the
-        // exact cache subdir — NOT all of ~/.gradle, which also holds
-        // gradle.properties (signing keys) and init scripts.
-        ".cache",
-        ".gradle/caches",
-        "Downloads",
-    ]
-    .iter()
-    .map(|r| home.join(r))
-    .collect();
+    let mut allowed_roots: Vec<PathBuf> = [".Trash", "Library/Caches", "Library/Logs", "Downloads"]
+        .iter()
+        .map(|r| home.join(r))
+        .collect();
+    // Developer cache dirs surfaced by DevCacheScanner (Xcode DerivedData/
+    // DeviceSupport, CoreSimulator caches, ~/.npm/_cacache, ~/.cargo registry
+    // cache, ~/.cache, ~/.gradle/caches, ~/go/pkg/mod). Single source of truth
+    // with the scanner — scoped to the EXACT cache subdirs, never all of
+    // ~/.gradle (holds gradle.properties signing keys) or ~/.cargo (holds the
+    // git index/config) — so reclaim permits those leaves and nothing else.
+    allowed_roots.extend(tabibu_junk::dev_cache_roots(&home));
     allowed_roots.push(std::env::temp_dir());
     // Per-volume trashes only — the SPECIFIC `/Volumes/*/.Trashes/<uid>` dirs,
     // NOT all of `/Volumes`. Whitelisting the whole mount root would let
@@ -211,10 +203,10 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     // reclaim permits the user-owned stale entries TempScanner emits there.
     allowed_roots.extend(tabibu_junk::shared_temp_roots());
     // Chromium/Electron cache leaves under ~/Library/Application Support (the
-    // EXACT dirs AppSupportCacheScanner emits) + the Go module cache — so reclaim
-    // permits those and nothing else under Application Support / ~/go.
+    // EXACT dirs AppSupportCacheScanner emits) — so reclaim permits those and
+    // nothing else under Application Support. (The Go module cache is covered by
+    // dev_cache_roots above.)
     allowed_roots.extend(tabibu_junk::app_support_cache_roots(&home));
-    allowed_roots.push(home.join("go/pkg/mod"));
     // System-wide caches + logs that SystemCacheScanner / LogScanner surface
     // (user-owned entries only); reclaim permits exactly these roots.
     allowed_roots.push(PathBuf::from("/Library/Caches"));

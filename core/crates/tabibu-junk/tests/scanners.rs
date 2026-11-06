@@ -190,9 +190,12 @@ fn dev_cache_reports_only_existing_locations() {
     write_file(&derived.join("MyApp-abc/Build/out.o"), b"123456"); // 6 B
     let npm = home.path().join(".npm/_cacache");
     write_file(&npm.join("content-v2/blob"), b"12"); // 2 B
-    let brew = home.path().join("Library/Caches/Homebrew");
-    fs::create_dir_all(&brew).unwrap(); // empty dir still reported, size 0
-                                        // Hidden dot-directory caches (surfaced via Cmd+Shift+G in Finder).
+                                                     // Xcode device debug symbols — regenerated when a device reconnects.
+    let devsupport = home
+        .path()
+        .join("Library/Developer/Xcode/iOS DeviceSupport");
+    fs::create_dir_all(&devsupport).unwrap(); // empty dir still reported, size 0
+                                              // Hidden dot-directory caches (surfaced via Cmd+Shift+G in Finder).
     let xdg = home.path().join(".cache");
     write_file(&xdg.join("uv/blob"), b"1234"); // 4 B
     let gradle = home.path().join(".gradle/caches");
@@ -220,9 +223,9 @@ fn dev_cache_reports_only_existing_locations() {
     assert_eq!(npm_item.tier, SafetyTier::Safe);
     assert_eq!(npm_item.size_bytes, 2);
 
-    let brew_item = items.iter().find(|i| i.path == brew).unwrap();
-    assert_eq!(brew_item.tier, SafetyTier::Safe);
-    assert_eq!(brew_item.size_bytes, 0);
+    let devsupport_item = items.iter().find(|i| i.path == devsupport).unwrap();
+    assert_eq!(devsupport_item.tier, SafetyTier::Review);
+    assert_eq!(devsupport_item.size_bytes, 0);
 
     // Hidden caches: found, Review tier (broad → never auto-selected).
     let xdg_item = items.iter().find(|i| i.path == xdg).unwrap();

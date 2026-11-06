@@ -34,11 +34,23 @@ const BROWSER_BUNDLE_IDS: &[&str] = &[
 ];
 
 /// Developer cache locations relative to the user home: (path, tier, reason).
+///
+/// INVARIANT: no entry may live under `Library/Caches` — `UserCacheScanner`
+/// already emits every top-level folder there, so a `Library/Caches/*` entry
+/// here would double-emit the same path (the engine does not dedup). Regenerable
+/// caches under `Library/Caches` (Homebrew, Yarn, pip, CocoaPods, …) are instead
+/// tiered `Safe` by [`KNOWN_SAFE_CACHE_NAMES`] in `UserCacheScanner`. A test
+/// (`dev_targets_never_under_library_caches`) enforces this.
 const DEV_CACHE_TARGETS: &[(&str, SafetyTier, &str)] = &[
     (
         "Library/Developer/Xcode/DerivedData",
         SafetyTier::Review,
         "Xcode build products — regenerated on next build",
+    ),
+    (
+        "Library/Developer/Xcode/iOS DeviceSupport",
+        SafetyTier::Review,
+        "Xcode device debug symbols — re-downloaded when a device reconnects",
     ),
     (
         "Library/Developer/CoreSimulator/Caches",
@@ -51,24 +63,9 @@ const DEV_CACHE_TARGETS: &[(&str, SafetyTier, &str)] = &[
         "npm package cache — packages are re-downloaded on demand",
     ),
     (
-        "Library/Caches/Yarn",
-        SafetyTier::Safe,
-        "Yarn package cache — packages are re-downloaded on demand",
-    ),
-    (
-        "Library/Caches/pip",
-        SafetyTier::Safe,
-        "pip package cache — packages are re-downloaded on demand",
-    ),
-    (
         ".cargo/registry/cache",
         SafetyTier::Review,
         "Cargo registry cache — crates are re-downloaded on demand",
-    ),
-    (
-        "Library/Caches/Homebrew",
-        SafetyTier::Safe,
-        "Homebrew download cache — formulae are re-downloaded on demand",
     ),
     // Hidden dot-directory caches (Finder hides these; users reach them via
     // Cmd+Shift+G). Review tier — broad, so surfaced but never auto-selected.
@@ -87,6 +84,40 @@ const DEV_CACHE_TARGETS: &[(&str, SafetyTier, &str)] = &[
         SafetyTier::Review,
         "Go module cache — modules are re-downloaded on demand (go clean -modcache)",
     ),
+];
+
+/// Absolute developer-cache roots for this home, derived from
+/// [`DEV_CACHE_TARGETS`]. This is the SINGLE source of truth the reclaim
+/// allowed-roots builders (`system::default_scan_ctx`, the CLI `junk_ctx`) use,
+/// so adding a dev target automatically permits reclaiming it — no hand-kept
+/// parallel list to drift. Mirrors [`container_cache_roots`] /
+/// [`app_support_cache_roots`].
+#[must_use]
+pub fn dev_cache_roots(home: &Path) -> Vec<PathBuf> {
+    DEV_CACHE_TARGETS
+        .iter()
+        .map(|(rel, _, _)| home.join(rel))
+        .collect()
+}
+
+/// Folder names directly under `~/Library/Caches` that are NOT reverse-DNS
+/// bundle IDs but are well-known regenerable tool/package caches — tiered
+/// `Safe` (auto-selectable) with a clear reason instead of the generic
+/// `Review` fallback. Kept tight: only caches that are unambiguously
+/// re-downloaded/rebuilt on demand.
+const KNOWN_SAFE_CACHE_NAMES: &[&str] = &[
+    "Homebrew",
+    "Yarn",
+    "pip",
+    "pipenv",
+    "pnpm",
+    "CocoaPods",
+    "go-build",
+    "ms-playwright",
+    "node-gyp",
+    "deno",
+    "typescript",
+    "puppeteer",
 ];
 
 pub mod large_old;
@@ -458,6 +489,11 @@ impl Scanner for UserCacheScanner {
                     format!("Cache for {name} (not running)")
                 };
                 (SafetyTier::Safe, reason)
+            } else if KNOWN_SAFE_CACHE_NAMES.contains(&name.as_str()) {
+                (
+                    SafetyTier::Safe,
+                    format!("{name} cache — regenerated/re-downloaded on demand"),
+                )
             } else {
                 (
                     SafetyTier::Review,
@@ -1301,6 +1337,64 @@ mod unit_tests {
                 .any(|r| r.to_string_lossy().contains("Application Support")),
             "only Caches subdirs — never the container's app data"
         );
+    }
+
+    #[test]
+    fn dev_targets_never_under_library_caches() {
+        // Guards against re-introducing the double-emit: UserCacheScanner already
+        // emits every ~/Library/Caches folder, so a DEV_CACHE_TARGETS entry there
+        // would emit the same path twice (the engine does not dedup).
+        for (rel, _, _) in super::DEV_CACHE_TARGETS {
+            assert!(
+                !rel.starts_with("Library/Caches"),
+                "{rel} is under Library/Caches — would double-emit with UserCacheScanner"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_cache_roots_cover_every_target() {
+        let home = std::path::Path::new("/Users/test");
+        let roots = super::dev_cache_roots(home);
+        assert_eq!(roots.len(), super::DEV_CACHE_TARGETS.len());
+        for (rel, _, _) in super::DEV_CACHE_TARGETS {
+            assert!(
+                roots.contains(&home.join(rel)),
+                "missing reclaim root for {rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_cache_tiers_known_regenerable_folders_safe() {
+        use tabibu_engine::{CancelToken, SafetyTier, ScanCtx, Scanner};
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        for (folder, file) in [("Homebrew", "x"), ("SomeRandomThing", "y")] {
+            std::fs::create_dir_all(h.join("Library/Caches").join(folder)).unwrap();
+            std::fs::write(h.join("Library/Caches").join(folder).join(file), b"z").unwrap();
+        }
+        let ctx = ScanCtx {
+            home: h.to_path_buf(),
+            allowed_roots: vec![h.join("Library/Caches")],
+            running_bundle_ids: std::collections::HashSet::new(),
+            full_disk_access: true,
+        };
+        let mut items = Vec::new();
+        super::UserCacheScanner
+            .scan(&ctx, &CancelToken::new(), &mut |it| items.push(it))
+            .unwrap();
+        let tier_of = |needle: &str| {
+            items
+                .iter()
+                .find(|i| i.path.ends_with(needle))
+                .unwrap_or_else(|| panic!("no item for {needle}"))
+                .tier
+        };
+        // Known regenerable tool cache → Safe (auto-selectable); unknown
+        // non-bundle-id folder → Review (surfaced, never auto-selected).
+        assert_eq!(tier_of("Homebrew"), SafetyTier::Safe);
+        assert_eq!(tier_of("SomeRandomThing"), SafetyTier::Review);
     }
 
     #[test]

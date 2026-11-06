@@ -814,21 +814,12 @@ fn junk_ctx() -> ScanCtx {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let mut roots: Vec<PathBuf> = [
-        "Library/Caches",
-        "Library/Logs",
-        "Library/Developer/Xcode/DerivedData",
-        "Library/Developer/CoreSimulator/Caches",
-        ".npm",
-        ".cargo/registry/cache",
-        ".cache",
-        ".gradle/caches",
-        "Downloads",
-        ".Trash",
-    ]
-    .iter()
-    .map(|r| home.join(r))
-    .collect();
+    let mut roots: Vec<PathBuf> = ["Library/Caches", "Library/Logs", "Downloads", ".Trash"]
+        .iter()
+        .map(|r| home.join(r))
+        .collect();
+    // Dev caches (single source of truth with DevCacheScanner) — see system.rs.
+    roots.extend(tabibu_junk::dev_cache_roots(&home));
     roots.push(std::env::temp_dir());
     if let Ok(uid) = std::fs::metadata(&home).map(|m| m.uid()) {
         roots.extend(tabibu_junk::per_volume_trash_dirs(
@@ -842,10 +833,10 @@ fn junk_ctx() -> ScanCtx {
     // Shared world-writable temp dirs (/private/tmp, /private/var/tmp) so
     // reclaim permits the user-owned stale entries TempScanner emits there.
     roots.extend(tabibu_junk::shared_temp_roots());
-    // Chromium/Electron cache leaves under ~/Library/Application Support + the Go
-    // module cache — reclaim permits exactly these, matching the app ctx.
+    // Chromium/Electron cache leaves under ~/Library/Application Support —
+    // reclaim permits exactly these, matching the app ctx. (Go module cache is
+    // covered by dev_cache_roots above.)
     roots.extend(tabibu_junk::app_support_cache_roots(&home));
-    roots.push(home.join("go/pkg/mod"));
     // System-wide caches + logs (user-owned entries only) that the system cache /
     // log scanners surface — reclaim permits exactly these roots.
     roots.push(std::path::PathBuf::from("/Library/Caches"));
