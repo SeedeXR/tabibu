@@ -612,6 +612,9 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
             let ctx = junk_ctx();
             let scanners: Vec<Box<dyn Scanner>> = vec![
                 Box::new(tabibu_junk::UserCacheScanner::new()),
+                Box::new(tabibu_junk::ContainerCacheScanner),
+                Box::new(tabibu_junk::AppSupportCacheScanner),
+                Box::new(tabibu_junk::SystemCacheScanner::new()),
                 Box::new(tabibu_junk::DevCacheScanner),
             ];
             let items = collect_sorted(&scanners, &ctx);

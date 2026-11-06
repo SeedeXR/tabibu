@@ -698,7 +698,12 @@ impl Scanner for ContainerCacheScanner {
                     format!("Shared (group) cache for {id} — review before removing"),
                 )
             } else if belongs_to_running(&id, &ctx.running_bundle_ids) {
-                continue; // running-process guard
+                // Surface (Review), don't skip — running sandboxed apps' caches
+                // are reclaimable too; quitting the app gives a full clean.
+                (
+                    SafetyTier::Review,
+                    format!("Cache for {id} (sandboxed app running — quit it for a full clean)"),
+                )
             } else if looks_like_bundle_id(&id) {
                 (
                     SafetyTier::Safe,
@@ -740,33 +745,30 @@ impl Scanner for ContainerCacheScanner {
 // AppSupportCacheScanner — Chromium/Electron caches under Application Support
 // ---------------------------------------------------------------------------
 
-/// Cache directory basenames used by Chromium- and Electron-based apps (Chrome,
-/// Brave, Edge, Vivaldi, Opera, Slack, Discord, VS Code, …). These live under
-/// `~/Library/Application Support/<app>/…`, OUTSIDE `~/Library/Caches` and the
-/// sandbox containers, so the other cache scanners miss them entirely — often
-/// the largest reclaimable caches on a disk. Each is disposable and regenerated
-/// on next launch. Matched by EXACT basename so app *data* dirs (Local Storage,
-/// Session Storage, blob_storage, IndexedDB, Spotify's PersistentCache) are
-/// never caught.
-const CHROMIUM_CACHE_LEAVES: &[&str] = &[
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "GrShaderCache",
-    "Component Cache",
-    "DawnCache",
-    "DawnGraphiteCache",
-    "DawnWebGPUCache",
-    "CacheStorage", // under Service Worker/
-    "ScriptCache",  // under Service Worker/
-];
+/// Directory basenames that CONTAIN "cache" but are NOT disposable caches — app
+/// *data* that merely uses the word. Matched case-insensitively and excluded
+/// from the sweep (e.g. Spotify's `PersistentCache` holds downloaded offline
+/// media; deleting it loses the downloads).
+const CACHE_NAME_EXCLUDES: &[&str] = &["persistentcache"];
+
+/// True when a directory basename denotes a disposable cache: it contains
+/// "cache" (case-insensitive) and isn't a known data dir ([`CACHE_NAME_EXCLUDES`]).
+/// Deliberately BROAD so we catch what a fixed list misses — `Cache`, `Code
+/// Cache`, `GPUCache`, `GrShaderCache`, `CacheStorage`, `crx_cache`,
+/// `download-cache`, `CachedData`, `CachedExtensionVSIXs`, `bincache*`,
+/// `WebViewCache`, `DerivedDataCache`, … — all regenerated on demand.
+fn is_cache_dir_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("cache") && !CACHE_NAME_EXCLUDES.contains(&lower.as_str())
+}
 
 /// Max directory depth searched below each Application Support app dir for a
-/// cache leaf (`Google/Chrome/Default/Cache` = depth 3; a Service Worker leaf =
-/// depth 4). Bounded so the search stays shallow and fast.
-const APP_SUPPORT_MAX_DEPTH: usize = 4;
+/// cache dir (`Google/Chrome/Default/Cache` = 3; `Code/WebStorage/N/CacheStorage`
+/// and `Figma/DesktopProfile/v43/Code Cache` = 4). Bounded so the search stays
+/// shallow and fast — and matched cache dirs are never descended into anyway.
+const APP_SUPPORT_MAX_DEPTH: usize = 5;
 
-/// Recursively collect cache-leaf dirs under `dir`. A matched leaf is pushed and
+/// Recursively collect cache dirs under `dir`. A matched cache dir is pushed and
 /// NOT descended into (so we never walk the cache's own contents here); other
 /// dirs are followed until [`APP_SUPPORT_MAX_DEPTH`]. Symlinks are not followed.
 fn collect_cache_leaves(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
@@ -778,8 +780,7 @@ fn collect_cache_leaves(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if !ft.is_dir() {
             continue;
         }
-        let name = entry.file_name();
-        if CHROMIUM_CACHE_LEAVES.contains(&name.to_string_lossy().as_ref()) {
+        if is_cache_dir_name(&entry.file_name().to_string_lossy()) {
             out.push(entry.path());
         } else if depth < APP_SUPPORT_MAX_DEPTH {
             collect_cache_leaves(&entry.path(), depth + 1, out);
@@ -1528,7 +1529,7 @@ mod unit_tests {
             std::fs::write(&f, b"data").unwrap();
         };
         mk("Library/Containers/com.foo.bar/Data/Library/Caches/c1"); // not running → Safe
-        mk("Library/Containers/com.run.ning/Data/Library/Caches/c2"); // running → skipped
+        mk("Library/Containers/com.run.ning/Data/Library/Caches/c2"); // running → Review (surfaced)
         mk("Library/Group Containers/GRP.com.foo/Library/Caches/g1"); // group → Review
                                                                       // App data alongside a cache — a regression guard that it's never emitted.
         mk("Library/Containers/com.foo.bar/Data/Library/Application Support/db");
@@ -1552,7 +1553,12 @@ mod unit_tests {
             has("com.foo.bar/Data/Library/Caches"),
             "non-running cache swept"
         );
-        assert!(!has("com.run.ning"), "running app's cache is skipped");
+        // Running sandboxed apps' caches are surfaced (Review), not skipped.
+        let running = items
+            .iter()
+            .find(|i| i.path.to_string_lossy().contains("com.run.ning"))
+            .expect("running sandboxed cache is surfaced, not skipped");
+        assert_eq!(running.tier, SafetyTier::Review);
         assert!(has("GRP.com.foo/Library/Caches"), "group cache swept");
         assert!(
             items.iter().all(|i| i.path.ends_with("Caches")),
