@@ -945,6 +945,7 @@ function spaceView() {
   if (s.error) return setView(centered("circle-alert", "Couldn't read your home folder", s.error, "Back", () => { s.phase = "idle"; s.error = null; spaceView(); }));
   if (s.phase === "scanning") return setView(cancellableSpinner("Measuring your home folder…"));
   if (s.phase === "reclaiming") return setView(centeredSpinner("Moving selected items to the Trash…"));
+  if (s.phase === "review") return setView(spaceReview());
   if (s.phase === "done") return setView(spaceResult());
   if (!s.root) { s.phase = "idle"; return spaceView(); } // defensive: nothing to show → landing
   setView(spaceTree());
@@ -1125,7 +1126,7 @@ function spaceRow(c, depth, total, ancestorsLast, isLast) {
     h("div", { class: "path" },
       h("div", { class: "nm", title: displayPath(c.path) }, name),
       h("div", { class: "reason" }, c.is_dir ? `${Number(c.count).toLocaleString()} items` : "File")),
-    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of home` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%` })),
+    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of total` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%;background:${szBarColor(frac)}` })),
     h("span", { class: "isize" }, fmtBytes(szOf(c))),
     revealBtn(c.path));
 }
@@ -1139,6 +1140,10 @@ function spaceSelTotals() {
   return { paths, bytes, items };
 }
 
+// Size-bar colour keyed to magnitude so the eye jumps straight to space hogs:
+// amber for a big slice of the disk, accent for medium, a faded accent for small.
+const szBarColor = (f) => f >= 0.15 ? "#f59e0b" : f >= 0.05 ? "var(--accent)" : "color-mix(in srgb, var(--accent) 50%, transparent)";
+
 function spaceFooter() {
   const s = spaceState;
   const { paths, bytes, items } = spaceSelTotals();
@@ -1149,15 +1154,55 @@ function spaceFooter() {
       : h("span", { class: "dim" }, "Open folders to explore; tick anything to remove it (reversible).")),
     h("div", { style: "flex:1" }),
     n ? h("button", { onClick: () => { s.sel.clear(); spaceView(); } }, "Clear") : null,
-    h("button", { class: "danger", disabled: n ? null : "", onClick: doSpaceRemove }, "Review and Remove"));
+    // Two paths, as requested: review the exact list first, OR trash directly.
+    n ? h("button", { style: "margin-left:8px", onClick: () => { s.phase = "review"; spaceView(); } }, "Review…") : null,
+    h("button", { class: "danger", style: "margin-left:8px", disabled: n ? null : "", onClick: doSpaceRemove }, "Move to Trash"));
 }
 
-async function doSpaceRemove() {
+// Review screen: the exact de-duped list that will be trashed, with per-item
+// removal and an out-of-home flag, before committing. Reached via "Review…".
+function spaceReview() {
   const s = spaceState;
+  const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
+  const refresh = () => { if (!spaceSelTotals().paths.length) s.phase = "browse"; spaceView(); };
+  const { paths, bytes, items } = spaceSelTotals();
+  const outside = paths.filter((p) => !underHome(p)).length;
+  const wrap = h("div", { class: "review" });
+  wrap.append(h("div", { class: "notice", style: "margin:16px 24px 0;align-items:center" },
+    icon("trash-2"),
+    h("div", { class: "body", style: "margin:0" },
+      h("h3", {}, "Review before removing"),
+      h("p", { style: "margin:0" },
+        `${paths.length} item(s) · ${fmtBytes(bytes)} · ${items.toLocaleString()} files — all reversible (Trash).`
+        + (outside ? `  ⚠️ ${outside} outside your home folder.` : ""))),
+    h("div", { style: "flex:1" }),
+    h("button", { onClick: () => { s.phase = "browse"; spaceView(); } }, "Back")));
+  const list = h("div", { class: "list" });
+  for (const p of paths) {
+    const v = s.sel.get(p) || {};
+    const name = p.split("/").pop() || p;
+    list.append(h("div", { class: "item" },
+      icon(underHome(p) ? "folder" : "circle-alert", "ficon"),
+      h("div", { class: "path" },
+        h("div", { class: "nm", title: displayPath(p) }, name),
+        h("div", { class: "reason" }, displayPath(p))),
+      underHome(p) ? null : h("span", { class: "badge Review" }, "outside home"),
+      h("span", { class: "isize" }, fmtBytes(v.bytes || 0)),
+      h("button", { title: "Remove from selection", onClick: () => { s.sel.delete(p); refresh(); } }, "✕")));
+  }
+  wrap.append(list);
+  wrap.append(h("div", { class: "reclaim-bar" },
+    h("div", {}, `${paths.length} selected · ${fmtBytes(bytes)}`),
+    h("div", { style: "flex:1" }),
+    h("button", { onClick: () => { s.phase = "browse"; spaceView(); } }, "Back"),
+    h("button", { class: "danger", style: "margin-left:8px", disabled: paths.length ? null : "", onClick: spaceReclaim }, "Move to Trash")));
+  return wrap;
+}
+
+// Direct path: a quick confirm (flagging anything outside home), then trash.
+async function doSpaceRemove() {
   const { paths, bytes, items } = spaceSelTotals(); // de-duped, physical bytes
   if (!paths.length) return;
-  // Flag anything outside your home folder (/Applications, /Library, other users…)
-  // so a whole-disk selection can't be trashed thinking it's ordinary junk.
   const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
   const outside = paths.filter((p) => !underHome(p));
   const warn = outside.length
@@ -1167,6 +1212,15 @@ async function doSpaceRemove() {
     `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?${warn}\n\nReversible — everything goes to the Trash, restore it anytime.`,
     { danger: true, okLabel: "Move to Trash" });
   if (!ok) return;
+  spaceReclaim();
+}
+
+// Shared trash routine for both the direct "Move to Trash" and the Review
+// screen. Operates on the de-duped selection with physical on-disk bytes.
+async function spaceReclaim() {
+  const s = spaceState;
+  const { paths, bytes } = spaceSelTotals();
+  if (!paths.length) return;
   // Category DevCache so reclaim's user-data override lets explicit picks inside
   // Documents/Desktop/etc. go to the Trash (the user asked for no protection).
   // reclaim still forces action=Trash (reversible) and still refuses true system
