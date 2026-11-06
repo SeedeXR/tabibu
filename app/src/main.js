@@ -496,12 +496,24 @@ function selectableRow({ rowClass = "item selectable", checked, path, content, o
   return row;
 }
 // Shared "items left untouched, with reason" box for any reclaim report. Returns
+// Condense a backend error to a short, human line (the raw string is a verbose
+// Rust Debug dump that blows out the container). "doesn't exist" means the entry
+// vanished between scan and remove (e.g. a daemon rewrote its cache) — already gone.
+function tidyError(e) {
+  const s = String(e);
+  if (/does(?:n'|n’|n)?t exist/i.test(s)) return "already removed";
+  if (/permission denied|not permitted|EACCES|EPERM/i.test(s)) return "permission denied";
+  const m = s.match(/description:\s*"([\s\S]*?)"\s*}\s*$/);
+  return (m ? m[1] : s).trim();
+}
 // null when there's nothing skipped, so callers can `if (box) c.append(box)`.
 function skippedBox(report, heading) {
   const fails = (report.outcomes || []).filter((o) => o.error);
   if (!fails.length) return null;
   const box = h("div", { class: "toast-fail" }, h("div", { style: "font-weight:600;margin-bottom:6px" }, heading));
-  fails.forEach((f) => box.append(h("div", { class: "ln" }, `• ${displayPath(f.path)} — ${f.error}`)));
+  fails.forEach((f) => box.append(h("div", { class: "ln" },
+    h("span", { style: "color:var(--text)" }, displayPath(f.path)),
+    ` — ${tidyError(f.error)}`)));
   return box;
 }
 // Telemetry: unchecking a Safe suggestion is a false-positive signal. Backend

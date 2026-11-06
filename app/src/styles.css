@@ -411,8 +411,8 @@ button.sm { font-size: 12px; padding: 4px 12px; }
 .filter-row .seg button { font-size: 12px; padding: 4px 10px; }
 .filter-row .showing { margin-left: auto; font-size: 11px; }
 
-.toast-fail { margin-top: var(--space-m); padding: var(--space-m); background: var(--bar); border-radius: var(--radius-s); max-width: 560px; text-align: left; }
-.toast-fail .ln { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.toast-fail { margin-top: var(--space-m); padding: var(--space-m); background: var(--bar); border-radius: var(--radius-s); max-width: 560px; text-align: left; max-height: 320px; overflow-y: auto; }
+.toast-fail .ln { font-family: var(--mono); font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-bottom: 6px; overflow-wrap: anywhere; word-break: break-word; }
 .popover-note { position: fixed; z-index: 50; max-width: 320px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-s); padding: var(--space-m); box-shadow: 0 8px 28px rgba(0,0,0,0.25); font-size: 12px; line-height: 1.45; }
 
 /* ============ v0.1.2: theming, hero, dashboard, settings ============ */
