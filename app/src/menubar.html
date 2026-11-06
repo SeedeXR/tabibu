@@ -14,27 +14,22 @@
     src: url("fonts/SpaceGrotesk.woff2") format("woff2");
     font-weight: 300 700; font-style: normal; font-display: swap;
   }
+  /* Always a DARK popover (as usual) — only the COMPONENTS inside borrow the
+     cleaner's language: translucent tiles, gold metric numbers, cyan action
+     links, violet selection. The background is neutral dark, not purple. */
   :root {
-    --accent: #8b5cf6;   /* violet — matches the redesigned dashboard */
-    --accent2: #a8d44f;  /* lime */
-    --tier-review: #d97706;
-    --tier-risky: #dc2626;
+    --accent: #8b5cf6;   /* violet — selection / primary */
+    --gold: #f5b544;     /* key metric numbers */
+    --link: #5aa7ff;     /* action links (Scan / Test / status) */
+    --tier-review: #f5b544;
+    --tier-risky: #ff6b86;
     --font: "Space Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
     --mono: "SF Mono", ui-monospace, Menlo, monospace;
-    --bg-elev: rgba(0,0,0,0.035); --panel: #f4f5f7;
-    --text: #1c1c1e; --text-dim: #6b6b70; --text-faint: #9a9aa0;
-    --border: rgba(0,0,0,0.10); --hover: rgba(0,0,0,0.05);
-    --track: rgba(0,0,0,0.10);
-    --hi: rgba(255,255,255,0.5);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg-elev: rgba(255,255,255,0.05); --panel: #16171b;
-      --text: #f2f2f5; --text-dim: #a3a3ab; --text-faint: #6e6e78;
-      --border: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.07);
-      --track: rgba(255,255,255,0.13);
-      --hi: rgba(255,255,255,0.06);
-    }
+    --bg-elev: rgba(255,255,255,0.05); --panel: #16171b;
+    --text: #f2f2f5; --text-dim: #a3a3ab; --text-faint: #6e6e78;
+    --border: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.07);
+    --track: rgba(255,255,255,0.13);
+    --hi: rgba(255,255,255,0.06);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { background: transparent; }
@@ -44,9 +39,10 @@
   }
   .wrap { display: flex; gap: 8px; margin: 6px; height: calc(100vh - 12px); }
   .floating {
-    border-radius: 14px; overflow: hidden;
-    background: var(--panel); border: 1px solid var(--border);
-    box-shadow: 0 18px 50px -12px rgba(0,0,0,0.45);
+    border-radius: 18px; overflow: hidden;
+    background: linear-gradient(165deg, #1c1d22 0%, #141418 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: 0 18px 50px -12px rgba(0,0,0,0.55);
     display: flex; flex-direction: column;
   }
   .panel { width: 348px; flex: none; margin-left: auto; }
@@ -57,7 +53,7 @@
   header .mark svg { width: 100%; height: 100%; display: block; }
   header h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
   header p { font-size: 11px; color: var(--text-dim); }
-  .status-good b { color: var(--accent); }
+  .status-good b { color: var(--link); }
   .status-warn b { color: var(--tier-review); }
 
   /* flex:0 1 auto + min-height:0 + overflow lets the cards shrink and scroll
@@ -67,24 +63,17 @@
     flex: 0 1 auto; min-height: 0; overflow-y: auto; }
   .card {
     position: relative; background: var(--bg-elev); border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px 12px; transition: background 0.15s, border-color 0.15s;
+    border-radius: 14px; padding: 11px 13px; transition: background 0.15s, border-color 0.15s;
     box-shadow: inset 0 1px 0 var(--hi);
   }
   .card:hover { background: var(--hover); }
-  .card.sel { border-color: var(--accent); box-shadow: inset 0 1px 0 var(--hi), 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
-  /* Conic ring gauge in the corner of each metric tile — fill = --frac (0..1),
-     colour = --ring (violet by default). Fed from the live ticks in JS. */
-  .card[data-detail="disk"]::after, .card[data-detail="memory"]::after,
-  .card[data-detail="cpu"]::after, .card[data-detail="battery"]::after {
-    content: ""; position: absolute; top: 9px; right: 10px; width: 26px; height: 26px;
-    border-radius: 50%;
-    background: conic-gradient(var(--ring, var(--accent)) calc(var(--frac, 0) * 360deg), var(--track) 0);
-    -webkit-mask: radial-gradient(farthest-side, transparent 58%, #000 60%);
-            mask: radial-gradient(farthest-side, transparent 58%, #000 60%);
-  }
+  /* Selected tile: cyan ring + glow, like the reference's highlighted tile. */
+  .card.sel { border-color: color-mix(in srgb, var(--link) 70%, transparent);
+    box-shadow: inset 0 1px 0 var(--hi), 0 0 0 1px color-mix(in srgb, var(--link) 55%, transparent), 0 0 18px -6px var(--link); }
   .card .t { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; }
   .card .t svg { width: 13px; height: 13px; color: var(--text-dim); flex: none; }
-  .card .v { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  /* Gold metric numbers (reference colour). */
+  .card .v { font-size: 17px; font-weight: 700; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; color: var(--gold); }
   .card .v .unit { font-size: 11px; font-weight: 500; color: var(--text-dim); margin-left: 2px; }
   .card .s { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; min-height: 13px; }
   .card .warn { color: var(--tier-review); }
@@ -94,7 +83,7 @@
   .card.net .netrates { display: flex; align-items: center; gap: 16px; margin-top: 8px; font-variant-numeric: tabular-nums; }
   .card.net .nr { display: flex; align-items: baseline; gap: 5px; font-size: 14px; font-weight: 700; letter-spacing: -0.02em; }
   .card.net .nr .ar { font-size: 11px; font-weight: 600; color: var(--text-dim); }
-  .card.net .net-test { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--accent); cursor: pointer; }
+  .card.net .net-test { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--link); cursor: pointer; }
   .card.net .net-test:hover { text-decoration: underline; }
   .card.sal { grid-column: 1 / -1; }
   .card.sal .salrow { display: flex; align-items: center; gap: 12px; }
@@ -112,7 +101,7 @@
   .switch:disabled { opacity: .55; cursor: default; }
 
   .reco {
-    margin: 2px 12px 10px; padding: 10px 12px; border-radius: 8px;
+    margin: 2px 12px 10px; padding: 10px 12px; border-radius: 14px;
     background: var(--bg-elev); border: 1px solid var(--border);
     display: flex; align-items: center; gap: 10px;
   }
@@ -150,13 +139,13 @@
   .detail[hidden] { display: none; }
   .detail h2 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 10px; }
   .detail .graph {
-    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
     padding: 8px; margin-bottom: 8px;
   }
   .detail .graph canvas { display: block; width: 100%; height: 84px; }
   .detail .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
   .mini {
-    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
     padding: 9px 11px;
   }
   .mini .k { font-size: 10.5px; color: var(--text-faint); }
@@ -269,16 +258,6 @@
   import { BRAND_PATH } from "./icons.js";
   const invoke = window.__TAURI__.core.invoke;
   const $ = (id) => document.getElementById(id);
-
-  // Metric-tile corner ring gauge: fraction 0..1 + a severity colour (violet by
-  // default). Driven from the live ticks — see fastTick/slowTick.
-  const RING_WARN = "#f59e0b", RING_BAD = "#ef4444";
-  function setRing(detailKey, frac, color) {
-    const card = document.querySelector(`.card[data-detail="${detailKey}"]`);
-    if (!card) return;
-    card.style.setProperty("--frac", Math.max(0, Math.min(frac || 0, 1)));
-    card.style.setProperty("--ring", color || "var(--accent)");
-  }
 
   $("mark").innerHTML = `<path d="${BRAND_PATH}" />`;
 
@@ -548,8 +527,6 @@
       $("cpu-v").innerHTML = `${Math.round(s.cpu_percent)}<span class="unit">%</span>`;
       $("mem-v").innerHTML = `${memPct}<span class="unit">%</span>`;
       $("mem-s").textContent = `${gb(s.used_memory_bytes)} of ${gb(s.total_memory_bytes)} GB`;
-      setRing("cpu", s.cpu_percent / 100, s.cpu_percent >= 85 ? RING_BAD : s.cpu_percent >= 60 ? RING_WARN : null);
-      setRing("memory", memPct / 100, memPct >= 90 ? RING_BAD : memPct >= 85 ? RING_WARN : null);
       verdict();
       renderDetail();
     } catch { /* popover stays on last values */ }
@@ -567,7 +544,6 @@
       last.diskFrac = disk.available_bytes / disk.total_bytes;
       $("disk-v").innerHTML = `${gbDisk(disk.available_bytes)}<span class="unit">GB</span>`;
       $("disk-s").textContent = `of ${gbDisk(disk.total_bytes)} GB available`;
-      setRing("disk", 1 - last.diskFrac, last.diskFrac < 0.1 ? RING_BAD : last.diskFrac < 0.2 ? RING_WARN : null);
     }
     if (bat) {
       last.bat = bat;
@@ -575,11 +551,9 @@
         $("bat-v").innerHTML = `${bat.charge_percent}<span class="unit">%</span>`;
         $("bat-s").textContent = [bat.state, bat.health_percent != null ? `health ${bat.health_percent}%` : null]
           .filter(Boolean).join(" · ") || "—";
-        setRing("battery", bat.charge_percent / 100, bat.charge_percent < 20 ? RING_BAD : null);
       } else {
         $("bat-v").textContent = "—";
         $("bat-s").textContent = "no battery";
-        setRing("battery", 0);
       }
     }
     if (therm) {

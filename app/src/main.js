@@ -1058,15 +1058,17 @@ function spaceTree() {
 // Flatten expanded branches into rows (children already sorted largest-first).
 // An expanded folder that failed to read shows an error row instead of looking
 // deceptively empty (the tool exists to surface disk usage, not hide it).
-function flattenTree(node, depth, total, out, ancestorsLast) {
+// `parentTotal` is the size of THIS node (the children's parent), so each row's
+// bar is sized relative to its own folder — magnitude reads at every depth.
+function flattenTree(node, depth, parentTotal, out, ancestorsLast) {
   const kids = node.children || [];
   for (let j = 0; j < kids.length; j++) {
     const c = kids[j];
     const isLast = j === kids.length - 1;
-    out.push(spaceRow(c, depth, total, ancestorsLast, isLast));
+    out.push(spaceRow(c, depth, parentTotal, ancestorsLast, isLast));
     if (!spaceState.expanded.has(c.path)) continue;
     const childAnc = ancestorsLast.concat(isLast);
-    if (c.children && c.children.length) flattenTree(c, depth + 1, total, out, childAnc);
+    if (c.children && c.children.length) flattenTree(c, depth + 1, szOf(c), out, childAnc);
     else if (c._error) out.push(spaceErrorRow(depth + 1, childAnc));
   }
 }
@@ -1100,12 +1102,12 @@ function spaceErrorRow(depth, ancestorsLast) {
       h("div", { class: "reason" }, "Couldn't read this folder — it may need Full Disk Access.")));
 }
 
-function spaceRow(c, depth, total, ancestorsLast, isLast) {
+function spaceRow(c, depth, parentTotal, ancestorsLast, isLast) {
   const s = spaceState;
   const expandable = c.is_dir && szOf(c) > 0;
   const open = s.expanded.has(c.path);
   const loading = spaceInflight.has(c.path);
-  const frac = total > 0 ? szOf(c) / total : 0;
+  const frac = parentTotal > 0 ? szOf(c) / parentTotal : 0;
   const name = c.path.split("/").pop() || c.path;
 
   const disclosure = expandable
@@ -1126,7 +1128,7 @@ function spaceRow(c, depth, total, ancestorsLast, isLast) {
     h("div", { class: "path" },
       h("div", { class: "nm", title: displayPath(c.path) }, name),
       h("div", { class: "reason" }, c.is_dir ? `${Number(c.count).toLocaleString()} items` : "File")),
-    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of total` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%;background:${szBarColor(frac)}` })),
+    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of folder` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%;background:${szBarColor(frac)}` })),
     h("span", { class: "isize" }, fmtBytes(szOf(c))),
     revealBtn(c.path));
 }
@@ -1140,9 +1142,14 @@ function spaceSelTotals() {
   return { paths, bytes, items };
 }
 
-// Size-bar colour keyed to magnitude so the eye jumps straight to space hogs:
-// amber for a big slice of the disk, accent for medium, a faded accent for small.
-const szBarColor = (f) => f >= 0.15 ? "#f59e0b" : f >= 0.05 ? "var(--accent)" : "color-mix(in srgb, var(--accent) 50%, transparent)";
+// Size-bar colour keyed to magnitude (fraction of the PARENT folder, so it's
+// meaningful at every depth — not drowned out by the whole-disk total): amber
+// for a big slice of its folder, accent for medium, a faded accent for small.
+const szBarColor = (f) => f >= 0.4 ? "#f59e0b" : f >= 0.15 ? "var(--accent)" : "color-mix(in srgb, var(--accent) 50%, transparent)";
+
+// Is a path inside the user's home folder? One definition shared by the Review
+// screen and the direct-remove confirm so their out-of-home detection can't drift.
+const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
 
 function spaceFooter() {
   const s = spaceState;
@@ -1163,7 +1170,6 @@ function spaceFooter() {
 // removal and an out-of-home flag, before committing. Reached via "Review…".
 function spaceReview() {
   const s = spaceState;
-  const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
   const refresh = () => { if (!spaceSelTotals().paths.length) s.phase = "browse"; spaceView(); };
   const { paths, bytes, items } = spaceSelTotals();
   const outside = paths.filter((p) => !underHome(p)).length;
@@ -1195,7 +1201,11 @@ function spaceReview() {
     h("div", {}, `${paths.length} selected · ${fmtBytes(bytes)}`),
     h("div", { style: "flex:1" }),
     h("button", { onClick: () => { s.phase = "browse"; spaceView(); } }, "Back"),
-    h("button", { class: "danger", style: "margin-left:8px", disabled: paths.length ? null : "", onClick: spaceReclaim }, "Move to Trash")));
+    // Reviewed items go straight to Trash — EXCEPT any outside the home folder,
+    // which still route through the strong out-of-home confirm (doSpaceRemove),
+    // so the Review path never silently narrows that guard.
+    h("button", { class: "danger", style: "margin-left:8px", disabled: paths.length ? null : "",
+      onClick: () => (spaceSelTotals().paths.some((p) => !underHome(p)) ? doSpaceRemove() : spaceReclaim()) }, "Move to Trash")));
   return wrap;
 }
 
@@ -1203,7 +1213,6 @@ function spaceReview() {
 async function doSpaceRemove() {
   const { paths, bytes, items } = spaceSelTotals(); // de-duped, physical bytes
   if (!paths.length) return;
-  const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
   const outside = paths.filter((p) => !underHome(p));
   const warn = outside.length
     ? `\n\n⚠️ ${outside.length} of these are OUTSIDE your home folder (e.g. ${displayPath(outside[0])}) — system, app, or other-user locations. Only move them if you're sure.`
