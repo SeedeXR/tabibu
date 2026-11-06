@@ -144,12 +144,25 @@
   }
   .detail .graph canvas { display: block; width: 100%; height: 84px; }
   .detail .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  /* Donut block (Memory / Disk detail) — matches the reference's hero chart:
+     a ring on the left, a colour-dotted legend on the right. */
+  .donut-row { display: flex; align-items: center; gap: 14px; margin-bottom: 8px;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px; box-shadow: inset 0 1px 0 var(--hi); }
+  .donut-wrap { width: 118px; height: 118px; flex: none; }
+  .donut-wrap svg { width: 100%; height: 100%; display: block; }
+  .legend { flex: 1; display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+  .leg { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .leg .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .leg .lk { color: var(--text-dim); }
+  .leg .lv { margin-left: auto; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
   .mini {
     background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px;
     padding: 9px 11px;
   }
   .mini .k { font-size: 10.5px; color: var(--text-faint); }
-  .mini .n { font-size: 15px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  /* Gold metric numbers (reference). */
+  .mini .n { font-size: 15px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; color: var(--gold); }
   .mini .n.warn { color: var(--tier-review); }
   .mini .n.bad { color: var(--tier-risky); }
   .detail h3 { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin: 10px 2px 6px; }
@@ -159,16 +172,14 @@
     background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
   }
   .proc .name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .proc .val { font-family: var(--mono); font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .proc .val { font-family: var(--mono); font-size: 11px; color: var(--gold); font-variant-numeric: tabular-nums; }
   .proc button {
-    font: 600 11px var(--font); color: var(--tier-risky); background: transparent;
+    font: 600 11px var(--font); color: var(--link); background: transparent;
     border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; cursor: pointer;
   }
-  .proc button:hover { background: rgba(220,38,38,0.10); border-color: var(--tier-risky); }
+  .proc button:hover { background: color-mix(in srgb, var(--link) 14%, transparent); border-color: var(--link); }
   .derr { font-size: 11px; color: var(--tier-risky); margin-top: 8px; padding: 7px 10px;
     background: rgba(220,38,38,0.10); border: 1px solid var(--tier-risky); border-radius: 8px; }
-  .capacity { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 6px 0 4px; }
-  .capacity i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
   .drow { display: flex; gap: 8px; margin-top: 10px; }
   .drow button { flex: 1; }
   button.ghosted {
@@ -382,47 +393,99 @@
 
   // Rebuild the detail body from `last`/`hist`. DOM-built (no innerHTML for
   // dynamic values — process names are attacker-adjacent strings).
+  // Donut ring: `segments` are filled arcs (fraction 0..1, colour) drawn over a
+  // track that represents the remainder. Centre shows a big number + unit + sub.
+  function donutSvg(segments, bigNum, unit, sub) {
+    const R = 50, C = 2 * Math.PI * R, cx = 60, cy = 60, sw = 13;
+    let off = 0, arcs = "";
+    for (const s of segments) {
+      const len = Math.max(0, Math.min(s.frac, 1)) * C;
+      arcs += `<circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="${s.color}" stroke-width="${sw}"`
+        + ` stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 ${cx} ${cy})"/>`;
+      off += len;
+    }
+    return `<svg viewBox="0 0 120 120">`
+      + `<circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="var(--track)" stroke-width="${sw}"/>`
+      + arcs
+      + `<text x="${cx}" y="${cy + 2}" text-anchor="middle" fill="var(--text)" font-weight="700" font-size="21" font-family="var(--font)">${bigNum}<tspan font-size="10" fill="var(--text-dim)" dx="2">${unit}</tspan></text>`
+      + `<text x="${cx}" y="${cy + 20}" text-anchor="middle" fill="var(--text-faint)" font-size="9.5" font-family="var(--font)">${sub}</text>`
+      + `</svg>`;
+  }
+  // segments feed the ring; legend is [{color,label,value}] rendered beside it.
+  function donutBlock(segments, bigNum, unit, sub, legend) {
+    const wrap = el("div", "donut-row");
+    const d = el("div", "donut-wrap");
+    d.innerHTML = donutSvg(segments, bigNum, unit, sub); // all values are our own numbers
+    wrap.append(d);
+    const leg = el("div", "legend");
+    for (const it of legend) {
+      const row = el("div", "leg");
+      const dot = el("span", "dot"); dot.style.background = it.color;
+      row.append(dot, el("span", "lk", it.label), el("span", "lv", it.value));
+      leg.append(row);
+    }
+    wrap.append(leg);
+    return wrap;
+  }
+
   function renderDetail() {
     if (!detail) return;
     const body = $("d-body");
     body.textContent = "";
 
-    if (detail === "cpu" || detail === "memory") {
-      const isCpu = detail === "cpu";
-      const g = el("div", "graph");
-      const canvas = document.createElement("canvas");
-      g.append(canvas);
-      body.append(g);
-
-      const duo = el("div", "duo");
-      if (isCpu) {
-        const s = last.sample;
-        duo.append(mini("Load", s ? `${Math.round(s.cpu_percent)}%` : "—"));
-        const t = last.therm;
-        const cls = t && (t.pressure === "Serious" || t.pressure === "Critical") ? "bad"
-          : t && t.pressure === "Fair" ? "warn" : "";
-        duo.append(mini("Thermal", t ? t.pressure : "—", cls));
-        duo.append(mini("Speed limit", t && t.speed_limit != null ? `${t.speed_limit}%` : "none"));
-        duo.append(mini("Uptime", last.uptime != null ? fmtUptime(last.uptime) : "—"));
-      } else {
-        const s = last.sample;
-        duo.append(mini("Used", s ? `${gb(s.used_memory_bytes)} GB` : "—",
-          last.memPct >= 90 ? "bad" : last.memPct >= 85 ? "warn" : ""));
-        duo.append(mini("Total", s ? `${gb(s.total_memory_bytes)} GB` : "—"));
-        duo.append(mini("Swap used", s ? `${gb(s.used_swap_bytes)} GB` : "—"));
-        duo.append(mini("Pressure", last.memPct != null ? `${last.memPct}%` : "—"));
-      }
-      body.append(duo);
-
+    // Shared "Top consumers" process list for CPU / Memory.
+    const topConsumers = (byCpu) => {
       body.append(el("h3", null, "Top consumers"));
       const list = el("div", "procs");
       const procs = last.sample ? last.sample.top_processes : [];
       if (procs.length === 0) list.append(el("div", "empty", "Sampling…"));
-      procs.forEach((p) => list.append(procRow(p, isCpu)));
+      procs.forEach((p) => list.append(procRow(p, byCpu)));
       body.append(list);
       if (quitErr && Date.now() - quitErr.at < 6000) body.append(el("div", "derr", quitErr.msg));
       else quitErr = null;
-      drawGraph(canvas, isCpu ? hist.cpu : hist.mem, 100);
+    };
+
+    // CPU keeps a live line graph (matches the reference's CPU panel).
+    if (detail === "cpu") {
+      const g = el("div", "graph");
+      const canvas = document.createElement("canvas");
+      g.append(canvas);
+      body.append(g);
+      const s = last.sample;
+      const duo = el("div", "duo");
+      duo.append(mini("Load", s ? `${Math.round(s.cpu_percent)}%` : "—"));
+      const t = last.therm;
+      const cls = t && (t.pressure === "Serious" || t.pressure === "Critical") ? "bad"
+        : t && t.pressure === "Fair" ? "warn" : "";
+      duo.append(mini("Thermal", t ? t.pressure : "—", cls));
+      duo.append(mini("Speed limit", t && t.speed_limit != null ? `${t.speed_limit}%` : "none"));
+      duo.append(mini("Uptime", last.uptime != null ? fmtUptime(last.uptime) : "—"));
+      body.append(duo);
+      topConsumers(true);
+      drawGraph(canvas, hist.cpu, 100);
+    }
+
+    // Memory shows a donut (used vs free, swap in the legend) like the reference.
+    if (detail === "memory") {
+      const s = last.sample;
+      if (s && s.total_memory_bytes) {
+        const total = s.total_memory_bytes, used = s.used_memory_bytes;
+        const free = Math.max(total - used, 0), swap = s.used_swap_bytes || 0;
+        body.append(donutBlock(
+          [{ frac: used / total, color: "var(--accent)" }],
+          `${gb(free)}`, "GB", `of ${gb(total)} free`,
+          [
+            { color: "var(--accent)", label: "Used", value: `${gb(used)} GB` },
+            { color: "var(--track)", label: "Free", value: `${gb(free)} GB` },
+            { color: "var(--link)", label: "Swap", value: `${gb(swap)} GB` },
+          ]));
+      }
+      const duo = el("div", "duo");
+      duo.append(mini("Pressure", last.memPct != null ? `${last.memPct}%` : "—",
+        last.memPct >= 90 ? "bad" : last.memPct >= 85 ? "warn" : ""));
+      duo.append(mini("Swap used", s ? `${gb(s.used_swap_bytes)} GB` : "—"));
+      body.append(duo);
+      topConsumers(false);
     }
 
     if (detail === "battery") {
@@ -445,16 +508,14 @@
     if (detail === "disk") {
       const d = last.disk;
       if (d && d.total_bytes) {
-        const usedFrac = 1 - d.available_bytes / d.total_bytes;
-        const cap = el("div", "capacity");
-        const fill = el("i");
-        fill.style.width = `${Math.round(usedFrac * 100)}%`;
-        cap.append(fill);
-        body.append(cap);
-        const duo = el("div", "duo");
-        duo.append(mini("Available", `${gbDisk(d.available_bytes)} GB`, last.diskFrac < 0.1 ? "warn" : ""));
-        duo.append(mini("Total", `${gbDisk(d.total_bytes)} GB`));
-        body.append(duo);
+        const avail = d.available_bytes, total = d.total_bytes, used = Math.max(total - avail, 0);
+        body.append(donutBlock(
+          [{ frac: used / total, color: "var(--accent)" }],
+          `${gbDisk(avail)}`, "GB", `of ${gbDisk(total)} free`,
+          [
+            { color: "var(--accent)", label: "Used", value: `${gbDisk(used)} GB` },
+            { color: "var(--track)", label: "Available", value: `${gbDisk(avail)} GB` },
+          ]));
       } else {
         body.append(el("div", "empty", "Reading disk…"));
       }
