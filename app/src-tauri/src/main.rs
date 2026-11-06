@@ -137,6 +137,8 @@ fn main() {
             commands::trash_path,
             commands::trash_size,
             commands::empty_trash,
+            commands::system_cache_targets,
+            commands::clean_system_caches,
             commands::flush_dns,
             commands::free_memory,
             commands::relaunch,

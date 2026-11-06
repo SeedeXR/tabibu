@@ -170,7 +170,7 @@ const THEME = {
 // Hero copy + sub-features per scan view.
 const HERO = {
   smart: { feats: ["Caches, temp files & logs", "Large old downloads", "Reviewed before anything is removed"] },
-  junk: { feats: ["User & developer caches", "Temporary files & logs", "Running-app caches are skipped"] },
+  junk: { feats: ["User & developer caches", "Temporary files & logs", "Running-app caches flagged for review"] },
   large: { feats: ["Big files in Downloads", "Suggestions only — nothing pre-selected", "You decide what goes"] },
 };
 
@@ -253,7 +253,7 @@ const SCAN_DEFS = {
   smart: { title: "Smart Scan", icon: "sparkles", scanners: [],
     sub: "One scan across caches, temporary files, logs, and large old files. Nothing is removed until you review and choose." },
   junk: { title: "Junk", icon: "trash-2", scanners: ["trash", "user_cache", "dev_cache", "temp", "log"],
-    sub: "Caches, temporary files, and logs that are safe to clear. Caches of running apps are skipped automatically." },
+    sub: "Caches, temporary files, and logs that are safe to clear. Caches of running apps are flagged for review, not auto-selected." },
   large: { title: "Large & Old", icon: "files", scanners: ["large_old"],
     sub: "Suggestions only — big files in Downloads you may have forgotten. Nothing is selected for you." },
 };
@@ -275,7 +275,7 @@ function scanView(id) {
 
   if (s.phase === "idle") {
     const hero = heroLanding(def.icon, def.title, def.sub, (HERO[id] || {}).feats || [], () => startScan(id));
-    if (id === "junk" || id === "smart") { hero.append(emptyTrashControl()); hero.append(flushDnsControl()); }
+    if (id === "junk" || id === "smart") { hero.append(emptyTrashControl()); hero.append(systemCacheControl()); hero.append(flushDnsControl()); }
     return setView(hero);
   }
   if (s.phase === "scanning") return setView(scanningPanel(id));
@@ -637,6 +637,29 @@ function emptyTrashControl() {
     else { btn.textContent = "Trash is empty"; btn.disabled = true; }
   }).catch(() => {});
   return h("div", { class: "row", style: "gap:8px;justify-content:center;margin-top:14px" }, btn);
+}
+// Clear root-owned system caches (iconservices.store, coresymbolicationd) — the
+// ones a plain scan can't touch without privilege. One admin prompt; the target
+// paths are hardcoded in Rust, never sent from here.
+function systemCacheControl() {
+  const btn = h("button", { onClick: doCleanSystemCaches }, "Clean system caches (admin)");
+  invoke("system_cache_targets").then((ts) => {
+    if (!(ts || []).some((t) => t.exists)) { btn.textContent = "No system caches to clear"; btn.disabled = true; }
+  }).catch(() => {});
+  return h("div", { class: "row", style: "gap:8px;justify-content:center;margin-top:8px" }, btn);
+}
+async function doCleanSystemCaches() {
+  const ts = await invoke("system_cache_targets").catch(() => []);
+  const present = (ts || []).filter((t) => t.exists);
+  if (!present.length) return uiToast("No system caches to clear");
+  if (!(await uiConfirm(
+    `Clear root-owned system caches?\n\n${present.map((t) => `• ${t.label}`).join("\n")}\n\nThese belong to macOS and rebuild automatically. Removal is permanent (not sent to the Trash) and takes your admin password once.`,
+    { danger: true, okLabel: "Clean (admin)" }))) return;
+  let res;
+  try { res = await invoke("clean_system_caches"); }
+  catch (e) { return uiToast(String(e) === "Cancelled." ? "Cancelled." : `Clean failed: ${e}`, { danger: true }); }
+  uiToast(`Reclaimed ${fmtBytes(res.freed_bytes)} of system cache.`);
+  render();
 }
 // Flush the DNS resolver cache — maintenance (non-destructive), one admin prompt.
 function flushDnsControl() {

@@ -1153,6 +1153,106 @@ fn run_admin_shell(script: &str) -> Result<(), String> {
     }
 }
 
+/// Like [`run_admin_shell`] but returns the script's stdout (for commands that
+/// report a result, e.g. bytes freed). One admin prompt; script passed inline.
+fn run_admin_shell_out(script: &str) -> Result<String, String> {
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let osa = format!("do shell script \"{escaped}\" with administrator privileges");
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", &osa])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("-128") {
+            Err("Cancelled.".into())
+        } else {
+            Err(err.trim().to_string())
+        }
+    }
+}
+
+/// Root-owned system cache directories safe to clear from the GUI behind ONE
+/// admin prompt. HARDCODED on purpose: a compromised webview must never be able
+/// to make the root helper delete an arbitrary path, so these live in Rust and
+/// are NEVER taken from the frontend. Each regenerates automatically:
+///   - `iconservices.store`  — the system icon cache (icons rebuild on demand)
+///   - `coresymbolicationd`  — the symbolication cache (rebuilds for crash/lldb)
+///
+/// NEVER add `kernelcaches` or anything on the read-only system volume.
+const SYSTEM_CACHE_TARGETS: &[(&str, &str)] = &[
+    (
+        "/Library/Caches/com.apple.iconservices.store",
+        "System icon cache",
+    ),
+    (
+        "/System/Library/Caches/com.apple.coresymbolicationd",
+        "Symbolication cache",
+    ),
+];
+
+#[derive(serde::Serialize)]
+pub struct SystemCacheTarget {
+    pub path: String,
+    pub label: String,
+    pub exists: bool,
+}
+
+/// The fixed list of admin-cleanable system caches + whether each exists.
+/// Read-only; existence needs no privilege. Sizes are measured during the clean
+/// itself (reading these dirs needs root, so pre-sizing would cost a prompt).
+#[tauri::command]
+#[must_use]
+pub fn system_cache_targets() -> Vec<SystemCacheTarget> {
+    SYSTEM_CACHE_TARGETS
+        .iter()
+        .map(|(p, label)| SystemCacheTarget {
+            path: (*p).to_string(),
+            label: (*label).to_string(),
+            exists: std::path::Path::new(p).exists(),
+        })
+        .collect()
+}
+
+#[derive(serde::Serialize)]
+pub struct SystemCacheResult {
+    pub freed_bytes: u64,
+}
+
+/// Clear the hardcoded [`SYSTEM_CACHE_TARGETS`] as root via one admin prompt.
+/// Measures (`du`) then removes the CONTENTS of each existing target — keeping
+/// the directory and its ownership so the owning daemon just rebuilds it — and
+/// reports the bytes freed. Permanent (system caches regenerate, so there's
+/// nothing to Trash, and root-owned cross-volume Trash is unreliable).
+#[tauri::command]
+pub fn clean_system_caches() -> Result<SystemCacheResult, String> {
+    // FIXED script built from the constant list — no frontend input anywhere.
+    let mut body = String::from("total=0\n");
+    for (p, _) in SYSTEM_CACHE_TARGETS {
+        let q = sh_quote(p);
+        body.push_str(&format!(
+            "T={q}\nif [ -d \"$T\" ]; then \
+             sz=$(/usr/bin/du -sk \"$T\" 2>/dev/null | /usr/bin/awk '{{print $1}}'); \
+             total=$((total + ${{sz:-0}})); \
+             /bin/rm -rf \"$T\"/* \"$T\"/.[!.]* 2>/dev/null; fi\n"
+        ));
+    }
+    body.push_str("echo \"$total\"\n");
+    let out = run_admin_shell_out(&body)?;
+    let freed_kb: u64 = out
+        .lines()
+        .last()
+        .unwrap_or("0")
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    Ok(SystemCacheResult {
+        freed_bytes: freed_kb.saturating_mul(1024),
+    })
+}
+
 /// Build the install script: copy the daemon, write the KeepAlive plist,
 /// bootstrap it, VERIFY it resolves, then (only then) switch system DNS.
 fn install_script(bin: &str, doh: &str) -> String {
