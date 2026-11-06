@@ -481,14 +481,28 @@ impl Scanner for UserCacheScanner {
             let name = entry.file_name().to_string_lossy().into_owned();
             let (tier, reason) = if looks_like_bundle_id(&name) {
                 if belongs_to_running(&name, &ctx.running_bundle_ids) {
-                    continue; // running-process guard (incl. sub-identifiers)
-                }
-                let reason = if BROWSER_BUNDLE_IDS.contains(&name.as_str()) {
-                    format!("Browser cache for {name} (not running)")
+                    // Running-process guard: previously these were SKIPPED
+                    // entirely, which silently missed the largest user caches —
+                    // always-on com.apple.* daemons (mediaanalysisd, metal,
+                    // iconservicesagent, photolibraryd, quicklook, replayd,
+                    // Safari.SafeBrowsing …) and any app that happens to be open
+                    // (Edge, Blender, Lightroom …). Surface them as Review (never
+                    // auto-selected): clearing is safe, but the live process may
+                    // rebuild them immediately, so quitting it gives a full clean.
+                    (
+                        SafetyTier::Review,
+                        format!(
+                            "Cache for {name} — app/process running (quit it for a full clean)"
+                        ),
+                    )
                 } else {
-                    format!("Cache for {name} (not running)")
-                };
-                (SafetyTier::Safe, reason)
+                    let reason = if BROWSER_BUNDLE_IDS.contains(&name.as_str()) {
+                        format!("Browser cache for {name} (not running)")
+                    } else {
+                        format!("Cache for {name} (not running)")
+                    };
+                    (SafetyTier::Safe, reason)
+                }
             } else if KNOWN_SAFE_CACHE_NAMES.contains(&name.as_str()) {
                 (
                     SafetyTier::Safe,

@@ -144,14 +144,18 @@ fn user_cache_tiers_and_running_guard() {
 
     assert_eq!(
         items.len(),
-        3,
-        "running app cache and loose file must be skipped"
+        4,
+        "only the loose (non-dir) file is skipped; the running-app cache is surfaced"
     );
     assert_all_under(&items, home.path());
-    assert!(
-        !items.iter().any(|i| i.path.ends_with("com.running.app")),
-        "running-process guard failed"
-    );
+    // Running-app caches are no longer SKIPPED (that missed large always-on
+    // daemon caches) — they are surfaced as Review, never auto-selected.
+    let running = items
+        .iter()
+        .find(|i| i.path.ends_with("com.running.app"))
+        .expect("running-app cache must be surfaced, not skipped");
+    assert_eq!(running.tier, SafetyTier::Review);
+    assert!(running.reason.contains("running"));
 
     let example = items
         .iter()
