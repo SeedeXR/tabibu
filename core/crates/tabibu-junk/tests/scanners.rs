@@ -139,7 +139,7 @@ fn user_cache_tiers_and_running_guard() {
     let mut ctx = make_ctx(home.path());
     ctx.running_bundle_ids.insert("com.running.app".to_owned());
 
-    let mut items = run(&UserCacheScanner, &ctx);
+    let mut items = run(&UserCacheScanner::home_only(), &ctx);
     items.sort_by(|a, b| a.path.cmp(&b.path));
 
     assert_eq!(

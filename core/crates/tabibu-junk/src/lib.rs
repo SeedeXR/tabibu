@@ -120,6 +120,27 @@ const KNOWN_SAFE_CACHE_NAMES: &[&str] = &[
     "puppeteer",
 ];
 
+/// The per-user Darwin *confined cache* dir (`/var/folders/<..>/C`) — sibling of
+/// the Darwin temp dir macOS exposes as `$TMPDIR` (`.../T`). macOS stores a large
+/// share of daemon/app caches HERE, outside `~/Library/Caches`:
+/// `com.apple.mediaanalysisd`, `com.apple.metal`, `com.apple.Safari.SafeBrowsing`,
+/// `com.apple.iconservicesagent`, Lightroom, Electron helpers, … — all of which a
+/// scan of only `~/Library/Caches` misses. Derived from `std::env::temp_dir()`
+/// (no `confstr`/unsafe): the temp dir ends in `/T`; the cache dir is its sibling
+/// `/C`. Returns `None` when `$TMPDIR` isn't a `/var/folders` path (nothing
+/// macOS-specific to add, e.g. a cron run with `TMPDIR` unset).
+#[must_use]
+pub fn darwin_user_cache_dir() -> Option<PathBuf> {
+    let t = std::env::temp_dir();
+    if !t.to_string_lossy().contains("/var/folders/") {
+        return None;
+    }
+    if t.file_name().is_some_and(|n| n == "T") {
+        return t.parent().map(|p| p.join("C"));
+    }
+    None
+}
+
 pub mod large_old;
 pub use large_old::LargeOldScanner;
 
@@ -128,7 +149,7 @@ pub use large_old::LargeOldScanner;
 pub fn scanners() -> Vec<Box<dyn Scanner>> {
     vec![
         Box::new(TrashScanner::new()),
-        Box::new(UserCacheScanner),
+        Box::new(UserCacheScanner::new()),
         Box::new(ContainerCacheScanner),
         Box::new(AppSupportCacheScanner),
         Box::new(SystemCacheScanner::new()),
@@ -402,7 +423,37 @@ pub fn empty_trash_dirs(dirs: &[PathBuf]) -> EmptyTrashOutcome {
 /// Lists per-app cache folders under `~/Library/Caches`. Folders named after
 /// a bundle ID whose app is currently running are skipped entirely
 /// (running-process guard).
-pub struct UserCacheScanner;
+pub struct UserCacheScanner {
+    /// Cache roots to scan IN ADDITION to `~/Library/Caches`. `new()` fills this
+    /// with [`darwin_user_cache_dir`]; tests use [`UserCacheScanner::home_only`]
+    /// to stay hermetic (no machine-wide dirs).
+    extra_roots: Vec<PathBuf>,
+}
+
+impl Default for UserCacheScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UserCacheScanner {
+    /// Scans `~/Library/Caches` plus the Darwin confined cache dir
+    /// (`/var/folders/<..>/C`), the two per-user cache roots macOS uses.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            extra_roots: darwin_user_cache_dir().into_iter().collect(),
+        }
+    }
+
+    /// Only `~/Library/Caches` — no machine-wide dirs. For hermetic tests.
+    #[must_use]
+    pub fn home_only() -> Self {
+        Self {
+            extra_roots: Vec::new(),
+        }
+    }
+}
 
 /// A cache folder selected for sizing — tier/reason decided up front so the
 /// expensive sizing can run in parallel without touching the sink.
@@ -458,69 +509,77 @@ impl Scanner for UserCacheScanner {
         if cancel.is_cancelled() {
             return Err(ScanError::Cancelled);
         }
-        let root = ctx.home.join("Library/Caches");
-        let Ok(entries) = fs::read_dir(&root) else {
-            return Ok(());
-        };
+        // Scan BOTH per-user cache roots: ~/Library/Caches AND the Darwin confined
+        // cache dir (/var/folders/<..>/C). macOS keeps many daemon/app caches in
+        // the latter (com.apple.mediaanalysisd, com.apple.metal, Safari.SafeBrowsing,
+        // iconservicesagent, Lightroom, …) — missed entirely by a scan of only
+        // ~/Library/Caches. Same per-entry tiering applies to both.
+        let mut roots = vec![ctx.home.join("Library/Caches")];
+        roots.extend(self.extra_roots.iter().cloned());
 
         // Phase 1 (cheap, sequential): decide which folders are candidates and
         // their tier/reason, applying the running-process guard. No sizing yet.
         let mut candidates: Vec<CacheCandidate> = Vec::new();
-        for entry in entries.flatten() {
-            if cancel.is_cancelled() {
-                return Err(ScanError::Cancelled);
-            }
-            // `file_type` does not follow symlinks, so symlinked cache
-            // folders are skipped rather than traversed.
-            let Ok(file_type) = entry.file_type() else {
-                continue;
+        for root in &roots {
+            let Ok(entries) = fs::read_dir(root) else {
+                continue; // a missing/unreadable root is skipped, others still scan
             };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let (tier, reason) = if looks_like_bundle_id(&name) {
-                if belongs_to_running(&name, &ctx.running_bundle_ids) {
-                    // Running-process guard: previously these were SKIPPED
-                    // entirely, which silently missed the largest user caches —
-                    // always-on com.apple.* daemons (mediaanalysisd, metal,
-                    // iconservicesagent, photolibraryd, quicklook, replayd,
-                    // Safari.SafeBrowsing …) and any app that happens to be open
-                    // (Edge, Blender, Lightroom …). Surface them as Review (never
-                    // auto-selected): clearing is safe, but the live process may
-                    // rebuild them immediately, so quitting it gives a full clean.
+            for entry in entries.flatten() {
+                if cancel.is_cancelled() {
+                    return Err(ScanError::Cancelled);
+                }
+                // `file_type` does not follow symlinks, so symlinked cache
+                // folders are skipped rather than traversed.
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let (tier, reason) = if looks_like_bundle_id(&name) {
+                    if belongs_to_running(&name, &ctx.running_bundle_ids) {
+                        // Running-process guard: previously these were SKIPPED
+                        // entirely, which silently missed the largest user caches —
+                        // always-on com.apple.* daemons (mediaanalysisd, metal,
+                        // iconservicesagent, photolibraryd, quicklook, replayd,
+                        // Safari.SafeBrowsing …) and any app that happens to be open
+                        // (Edge, Blender, Lightroom …). Surface them as Review (never
+                        // auto-selected): clearing is safe, but the live process may
+                        // rebuild them immediately, so quitting it gives a full clean.
+                        (
+                            SafetyTier::Review,
+                            format!(
+                                "Cache for {name} — app/process running (quit it for a full clean)"
+                            ),
+                        )
+                    } else {
+                        let reason = if BROWSER_BUNDLE_IDS.contains(&name.as_str()) {
+                            format!("Browser cache for {name} (not running)")
+                        } else {
+                            format!("Cache for {name} (not running)")
+                        };
+                        (SafetyTier::Safe, reason)
+                    }
+                } else if KNOWN_SAFE_CACHE_NAMES.contains(&name.as_str()) {
                     (
-                        SafetyTier::Review,
-                        format!(
-                            "Cache for {name} — app/process running (quit it for a full clean)"
-                        ),
+                        SafetyTier::Safe,
+                        format!("{name} cache — regenerated/re-downloaded on demand"),
                     )
                 } else {
-                    let reason = if BROWSER_BUNDLE_IDS.contains(&name.as_str()) {
-                        format!("Browser cache for {name} (not running)")
-                    } else {
-                        format!("Cache for {name} (not running)")
-                    };
-                    (SafetyTier::Safe, reason)
-                }
-            } else if KNOWN_SAFE_CACHE_NAMES.contains(&name.as_str()) {
-                (
-                    SafetyTier::Safe,
-                    format!("{name} cache — regenerated/re-downloaded on demand"),
-                )
-            } else {
-                (
+                    (
                     SafetyTier::Review,
                     format!(
                         "Cache folder \"{name}\" — owning app not identified, review before removing"
                     ),
                 )
-            };
-            candidates.push(CacheCandidate {
-                path: entry.path(),
-                tier,
-                reason,
-            });
+                };
+                candidates.push(CacheCandidate {
+                    path: entry.path(),
+                    tier,
+                    reason,
+                });
+            }
         }
 
         // Phase 2 (the expensive part): size every candidate concurrently.
@@ -1395,7 +1454,7 @@ mod unit_tests {
             full_disk_access: true,
         };
         let mut items = Vec::new();
-        super::UserCacheScanner
+        super::UserCacheScanner::home_only()
             .scan(&ctx, &CancelToken::new(), &mut |it| items.push(it))
             .unwrap();
         let tier_of = |needle: &str| {

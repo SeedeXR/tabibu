@@ -611,7 +611,7 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
         CleanCmd::Caches { yes } => {
             let ctx = junk_ctx();
             let scanners: Vec<Box<dyn Scanner>> = vec![
-                Box::new(tabibu_junk::UserCacheScanner),
+                Box::new(tabibu_junk::UserCacheScanner::new()),
                 Box::new(tabibu_junk::DevCacheScanner),
             ];
             let items = collect_sorted(&scanners, &ctx);
@@ -821,6 +821,10 @@ fn junk_ctx() -> ScanCtx {
     // Dev caches (single source of truth with DevCacheScanner) — see system.rs.
     roots.extend(tabibu_junk::dev_cache_roots(&home));
     roots.push(std::env::temp_dir());
+    // Darwin confined cache dir (/var/folders/<..>/C) — see system.rs.
+    if let Some(c) = tabibu_junk::darwin_user_cache_dir() {
+        roots.push(c);
+    }
     if let Ok(uid) = std::fs::metadata(&home).map(|m| m.uid()) {
         roots.extend(tabibu_junk::per_volume_trash_dirs(
             std::path::Path::new("/Volumes"),

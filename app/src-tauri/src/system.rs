@@ -190,6 +190,12 @@ pub fn default_scan_ctx(extra_roots: &[String]) -> ScanCtx {
     // git index/config) — so reclaim permits those leaves and nothing else.
     allowed_roots.extend(tabibu_junk::dev_cache_roots(&home));
     allowed_roots.push(std::env::temp_dir());
+    // Darwin confined cache dir (/var/folders/<..>/C) — the EXACT root
+    // UserCacheScanner now also scans for com.apple.* daemon / app caches — so
+    // reclaim permits trashing those leaves (and nothing else there).
+    if let Some(c) = tabibu_junk::darwin_user_cache_dir() {
+        allowed_roots.push(c);
+    }
     // Per-volume trashes only — the SPECIFIC `/Volumes/*/.Trashes/<uid>` dirs,
     // NOT all of `/Volumes`. Whitelisting the whole mount root would let
     // reclaim trash arbitrary external-drive files (the denylist has no
