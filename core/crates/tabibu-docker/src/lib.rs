@@ -11,8 +11,9 @@
 //!   - Build Cache      → `docker builder prune`   (rebuilt on next build)
 //!   - Unused images    → `docker image prune`     (`-a` = all unused, not just dangling)
 //!   - Stopped containers → `docker container prune`
-//!   - Unused volumes   → `docker volume prune`    ⚠ volumes hold PERSISTENT
-//!     DATA (databases, etc.); the UI tiers this as risky and confirms hard.
+//!   - Unused volumes   → `docker volume rm <the ones the user picked>` ⚠ volumes
+//!     hold PERSISTENT DATA (databases, etc.), so they are listed one by one
+//!     and never bulk-pruned; the UI tiers this as risky and confirms hard.
 //!
 //! On macOS, Docker keeps everything inside a VM disk image; pruning frees
 //! space *inside* the VM (and Docker Desktop reclaims it), which is exactly
@@ -60,7 +61,17 @@ pub struct Report {
     pub total_reclaimable_bytes: u64,
 }
 
-/// Result of a `docker … prune` action.
+/// One UNUSED Docker volume — no container references it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Volume {
+    pub name: String,
+    pub size_bytes: u64,
+    /// Docker-generated (64-hex name): nobody named it, so it is usually
+    /// disposable. A NAMED volume is someone's database / persistent data.
+    pub anonymous: bool,
+}
+
+/// Result of a `docker … prune` / `docker volume rm` action.
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionOutcome {
     pub ok: bool,
@@ -172,12 +183,57 @@ impl Docker {
         self.action(&["container", "prune", "-f"], "docker container prune")
     }
 
-    /// `docker volume prune` — unused ANONYMOUS volumes only. Deliberately NOT
-    /// `-a`: named volumes hold persistent data (databases), so the product
-    /// never bulk-removes them; the caller still confirms hard.
+    /// Read-only: every volume no container references, largest first, from
+    /// `docker system df -v` — the same accounting as the "reclaimable" figure
+    /// [`Docker::analyze`] reports, so this list adds up to the number shown.
     #[must_use]
-    pub fn prune_volumes(&self) -> ActionOutcome {
-        self.action(&["volume", "prune", "-f"], "docker volume prune")
+    pub fn unused_volumes(&self) -> Vec<Volume> {
+        self.stdout(&["system", "df", "-v", "--format", "json"])
+            .map(|json| parse_unused_volumes(&json))
+            .unwrap_or_default()
+    }
+
+    /// `docker volume rm` the requested volumes — but ONLY those unused right
+    /// now. The unused set is re-read here, so a stale or hostile request can
+    /// never name an in-use volume (Docker also refuses those without `-f`,
+    /// which is never passed). Volumes are removed one by one by explicit
+    /// choice rather than with a bulk `docker volume prune`: plain `prune` only
+    /// takes anonymous volumes (so it freed nothing of what `system df` calls
+    /// reclaimable when the unused volumes are named), and `prune -a` would
+    /// take every named database at once. ⚠ PERMANENT — nothing goes to the Trash.
+    #[must_use]
+    pub fn remove_volumes(&self, names: &[String]) -> ActionOutcome {
+        // ponytail: the re-check re-reads `system df -v` (one more disk-usage
+        // pass, ~0.2 s on a typical install) because it yields names AND sizes.
+        // If a huge install makes that slow, validate with the cheap
+        // `docker volume ls -q -f dangling=true` and take sizes from the caller.
+        let targets: Vec<Volume> = self
+            .unused_volumes()
+            .into_iter()
+            .filter(|v| names.contains(&v.name))
+            .collect();
+        if targets.is_empty() {
+            return ActionOutcome {
+                ok: false,
+                freed_bytes: 0,
+                message: "None of the selected volumes is unused any more — nothing removed."
+                    .to_string(),
+            };
+        }
+        let mut args = vec!["volume", "rm"];
+        args.extend(targets.iter().map(|v| v.name.as_str()));
+        match self.combined(&args) {
+            Some((ok, text)) => ActionOutcome {
+                ok,
+                freed_bytes: freed_by_removal(&targets, &text),
+                message: summarize(&text),
+            },
+            None => ActionOutcome {
+                ok: false,
+                freed_bytes: 0,
+                message: "could not run docker volume rm".to_string(),
+            },
+        }
     }
 
     fn action(&self, args: &[&str], label: &str) -> ActionOutcome {
@@ -245,6 +301,63 @@ pub fn parse_df(json: &str) -> Vec<Artifact> {
             })
         })
         .collect()
+}
+
+/// The part of `docker system df -v --format json` we read: one JSON object
+/// whose `Volumes` array carries every volume as string fields.
+#[derive(Deserialize)]
+struct DfVerbose {
+    #[serde(rename = "Volumes", default)]
+    volumes: Vec<DfVolume>,
+}
+
+#[derive(Deserialize)]
+struct DfVolume {
+    #[serde(rename = "Name")]
+    name: String,
+    /// Number of containers referencing the volume, as a string.
+    #[serde(rename = "Links", default)]
+    links: String,
+    #[serde(rename = "Size", default)]
+    size: String,
+}
+
+/// The unused volumes (`Links == "0"`) in `docker system df -v --format json`,
+/// largest first. A volume whose link count is missing or unreadable is treated
+/// as IN USE — it is simply not offered, never offered by mistake.
+#[must_use]
+pub fn parse_unused_volumes(json: &str) -> Vec<Volume> {
+    let Ok(df) = serde_json::from_str::<DfVerbose>(json.trim()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Volume> = df
+        .volumes
+        .into_iter()
+        .filter(|v| v.links.trim() == "0")
+        .map(|v| Volume {
+            // Anonymous volumes get a Docker-generated 64-hex name.
+            anonymous: v.name.len() == 64 && v.name.bytes().all(|b| b.is_ascii_hexdigit()),
+            size_bytes: parse_size(&v.size),
+            name: v.name,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.size_bytes
+            .cmp(&a.size_bytes)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+/// Bytes freed by `docker volume rm`: it echoes each removed volume's name on
+/// its own line (a refusal is an `Error response …` line instead), so sum the
+/// sizes of the targets that were echoed back.
+fn freed_by_removal(targets: &[Volume], output: &str) -> u64 {
+    targets
+        .iter()
+        .filter(|v| output.lines().any(|l| l.trim() == v.name))
+        .map(|v| v.size_bytes)
+        .sum()
 }
 
 /// Parse a Docker human size to bytes. Docker uses **decimal** units
@@ -368,6 +481,32 @@ mod tests {
         assert_eq!(a[0].kind, "images");
         assert_eq!(a[1].kind, "build_cache");
         assert_eq!(a[1].reclaimable_bytes, 4_328_000_000);
+    }
+
+    #[test]
+    fn unused_volumes_are_only_unlinked_and_freed_counts_only_removed() {
+        // Real shape from `docker system df -v --format json` (one object).
+        let anon = "5e9d02490fa48505529eaa5eddaece2152b2f525314711372cc01aefb49946d9";
+        let json = format!(
+            r#"{{"Images":[],"Containers":[],"BuildCache":[],"Volumes":[
+              {{"Links":"1","Name":"fulusi_pgdata","Size":"208.7MB"}},
+              {{"Links":"0","Name":"njozi_pgdata","Size":"86.34MB"}},
+              {{"Links":"0","Name":"docker_sonarqube_data","Size":"576.5MB"}},
+              {{"Links":"0","Name":"{anon}","Size":"1kB"}},
+              {{"Name":"no_link_count","Size":"9GB"}}]}}"#
+        );
+        let v = parse_unused_volumes(&json);
+        // In-use (Links 1) and unknown-link volumes are never offered.
+        let names: Vec<&str> = v.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["docker_sonarqube_data", "njozi_pgdata", anon]); // largest first
+        assert_eq!(v[0].size_bytes, 576_500_000);
+        assert!(!v[0].anonymous && v[2].anonymous);
+        assert!(parse_unused_volumes("not json").is_empty());
+
+        // `docker volume rm` echoed one name and refused the other: only the
+        // echoed volume counts as freed.
+        let out = "njozi_pgdata\nError response from daemon: remove docker_sonarqube_data: volume is in use\n";
+        assert_eq!(freed_by_removal(&v, out), 86_340_000);
     }
 
     #[test]

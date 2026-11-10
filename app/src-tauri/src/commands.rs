@@ -1021,11 +1021,22 @@ pub fn docker_prune_containers() -> tabibu_docker::ActionOutcome {
     with_docker(tabibu_docker::Docker::prune_containers)
 }
 
-/// `docker volume prune` (unused anonymous volumes only). ⚠ Volumes may hold
-/// persistent data — the UI confirms this hard before calling.
+/// Read-only: the unused Docker volumes (name, size, anonymous?) for the
+/// per-volume review list. Empty if the CLI is absent or the daemon is down.
 #[tauri::command(async)]
-pub fn docker_prune_volumes() -> tabibu_docker::ActionOutcome {
-    with_docker(tabibu_docker::Docker::prune_volumes)
+pub fn docker_unused_volumes() -> Vec<tabibu_docker::Volume> {
+    tabibu_docker::Docker::detect()
+        .map(|d| d.unused_volumes())
+        .unwrap_or_default()
+}
+
+/// `docker volume rm` the selected volumes. ⚠ PERMANENT (volumes hold
+/// persistent data and don't go to the Trash) — the UI names each volume in a
+/// hard confirm first. The crate re-checks that every name is an unused volume
+/// right now, so nothing in use (or not a volume) can be removed from here.
+#[tauri::command(async)]
+pub fn docker_remove_volumes(names: Vec<String>) -> tabibu_docker::ActionOutcome {
+    with_docker(|d| d.remove_volumes(&names))
 }
 
 // ---------------------------------------------------------------------

@@ -117,8 +117,12 @@ function fmtRam(n) {
   do { n /= 1024; i++; } while (n >= 1023.5 && i < u.length - 1);
   return `${n.toFixed(n < 10 ? 1 : 0)} ${u[i]}`;
 }
+// Is a path the user's home folder or inside it? ONE definition for the "~"
+// shorthand and for every out-of-home warning, so they can't drift apart. (A
+// bare prefix test would also match a sibling like /Users/alex.backup.)
+const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
 function displayPath(p) {
-  return state.home && p.startsWith(state.home) ? "~" + p.slice(state.home.length) : p;
+  return underHome(p) ? "~" + p.slice(state.home.length) : p;
 }
 const CAT_NAMES = {
   Trash: "Trash", UserCache: "User Caches", DevCache: "Developer Caches",
@@ -231,10 +235,18 @@ function setTitle(t, actions = []) {
   a.innerHTML = "";
   actions.forEach((btn) => a.append(btn));
 }
+// A view that re-renders in place (tick a row, open a folder) rebuilds its list,
+// which used to snap the scroll position back to the top on every click. A list
+// opts in with `data-keep-scroll="<name>"`; the position carries over only to a
+// list with the SAME name, so it never leaks from one screen to another.
 function setView(node) {
   const v = document.getElementById("view");
+  const old = v.querySelector("[data-keep-scroll]");
+  const kept = old && { name: old.dataset.keepScroll, top: old.scrollTop };
   v.innerHTML = "";
   v.append(node);
+  const list = kept && v.querySelector(`[data-keep-scroll="${kept.name}"]`);
+  if (list) list.scrollTop = kept.top;
 }
 
 // timers (monitor polling) cleanup on navigation
@@ -252,7 +264,7 @@ function clearScanTimer() { if (scanTimer) { clearInterval(scanTimer); scanTimer
 const SCAN_DEFS = {
   smart: { title: "Smart Scan", icon: "sparkles", scanners: [],
     sub: "One scan across caches, temporary files, logs, and large old files. Nothing is removed until you review and choose." },
-  junk: { title: "Junk", icon: "trash-2", scanners: ["trash", "user_cache", "dev_cache", "temp", "log"],
+  junk: { title: "Junk", icon: "trash-2", scanners: ["trash", "user_cache", "container_cache", "app_support_cache", "system_cache", "dev_cache", "temp", "log"],
     sub: "Caches, temporary files, and logs that are safe to clear. Caches of running apps are flagged for review, not auto-selected." },
   large: { title: "Large & Old", icon: "files", scanners: ["large_old"],
     sub: "Suggestions only — big files in Downloads you may have forgotten. Nothing is selected for you." },
@@ -483,7 +495,8 @@ function revealBtn(path) {
 // selection. Used by every review screen so the click/stop-propagation contract
 // lives in one place. `onToggle(on)` mutates the owning selection set + bar; the
 // factory owns the checkbox state. `path` also tags the checkbox so a bulk
-// action can re-sync checkboxes in place without a full re-render.
+// action can re-sync checkboxes in place without a full re-render; a row with
+// no `path` (e.g. a Docker volume — not a file) simply has no Reveal button.
 function selectableRow({ rowClass = "item selectable", checked, path, content, onToggle }) {
   const cb = h("input", { type: "checkbox" });
   cb.checked = checked;
@@ -491,7 +504,7 @@ function selectableRow({ rowClass = "item selectable", checked, path, content, o
   const setSel = (on) => { cb.checked = on; onToggle(on); };
   cb.addEventListener("click", (e) => e.stopPropagation());
   cb.addEventListener("change", () => setSel(cb.checked));
-  const row = h("div", { class: rowClass }, cb, ...content, revealBtn(path));
+  const row = h("div", { class: rowClass }, cb, ...content, path === undefined ? null : revealBtn(path));
   row.addEventListener("click", () => setSel(!cb.checked));
   return row;
 }
@@ -950,14 +963,17 @@ function treemap(node) {
 // =====================================================================
 // Space Analyzer — nested disk explorer with reversible removal
 // =====================================================================
-// A fully expandable tree rooted at the home folder: open any folder in place to
-// see what's nested inside, and move ANYTHING to the Trash (reversible). Nothing
-// is locked — every folder and file is viewable and removable, to match a
-// dedicated disk-space tool. Sizes are real on-disk usage (alloc_bytes, du-style),
-// never inflated logical size. The backend `reclaim` still routes through the
-// Trash (reversible) and refuses only true system paths, which are unreachable
-// from a home-rooted walk anyway.
-const spaceState = { phase: "idle", root: null, expanded: new Set(), sel: new Map(), error: null, report: null, freedBytes: 0 };
+// A fully expandable tree rooted at the WHOLE DISK ("/"): open any folder in
+// place to see what's nested inside, and move what you pick to the Trash
+// (reversible). Every folder and file is viewable, and user data is removable by
+// explicit choice, to match a dedicated disk-space tool. Sizes are real on-disk
+// usage (alloc_bytes, du-style), never inflated logical size. The backend
+// `reclaim` always routes through the Trash and REFUSES system paths and anything
+// that contains one (/System, /usr, /Library, /Users, ~/Library…) — those ARE
+// reachable from a "/" walk, so that refusal is the real guard, not the UI.
+// `gen` counts scans: an async result (scan or lazy expand) that started under an
+// older generation is stale and must not touch the current tree's state.
+const spaceState = { phase: "idle", root: null, expanded: new Set(), sel: new Map(), error: null, report: null, freedBytes: 0, gen: 0 };
 // Physical (on-disk) size of a node — the du-style number. Falls back to logical
 // only if an older payload lacks alloc_bytes. The whole view sizes/sorts on this.
 const szOf = (n) => Number(n.alloc_bytes ?? n.size_bytes) || 0;
@@ -977,8 +993,8 @@ function spaceView() {
   }
   // Error is checked BEFORE the busy phases so a failed scan isn't trapped behind
   // the scanning spinner (phase stays "scanning" on a rejected walk).
-  if (s.error) return setView(centered("circle-alert", "Couldn't read your home folder", s.error, "Back", () => { s.phase = "idle"; s.error = null; spaceView(); }));
-  if (s.phase === "scanning") return setView(cancellableSpinner("Measuring your home folder…"));
+  if (s.error) return setView(centered("circle-alert", "Couldn't scan the disk", s.error, "Back", () => { s.phase = "idle"; s.error = null; spaceView(); }));
+  if (s.phase === "scanning") return setView(cancellableSpinner("Measuring your disk…"));
   if (s.phase === "reclaiming") return setView(centeredSpinner("Moving selected items to the Trash…"));
   if (s.phase === "review") return setView(spaceReview());
   if (s.phase === "done") return setView(spaceResult());
@@ -989,6 +1005,8 @@ function spaceView() {
 function startSpaceScan() {
   const s = spaceState;
   s.phase = "scanning"; s.error = null; s.expanded = new Set(); s.sel.clear(); s.root = null;
+  spaceInflight.clear(); // an expand still in flight belongs to the old tree
+  const gen = ++s.gen;
   spaceView();
   // Load several levels up front (the walk already sizes the WHOLE subtree
   // regardless of depth — maxDepth only bounds how many levels are retained), so
@@ -996,20 +1014,23 @@ function startSpaceScan() {
   // anything deeper than this still lazy-loads on expand.
   invoke("size_tree", { root: DISK_ROOT, maxDepth: 3 })
     .then((root) => {
+      if (gen !== s.gen) return; // superseded by a newer scan
       s.root = root;
       // Pre-expand the top-level folders so the disk shows as a populated tree
       // immediately, not a flat row you have to click open.
       for (const c of (root.children || [])) if (c.is_dir && Number(c.size_bytes) > 0) s.expanded.add(c.path);
       s.phase = "browse";
     })
-    .catch((e) => { s.error = String(e); })
-    .finally(() => { if (state.current === "space") spaceView(); });
+    // Stop is not a failure: go back to the landing, don't show an error screen.
+    .catch((e) => { if (gen !== s.gen) return; if (isWalkCancel(e)) s.phase = "idle"; else s.error = String(e); })
+    .finally(() => { if (gen === s.gen && state.current === "space") spaceView(); });
 }
+// The walker's error text when a scan is stopped (`WalkError::Cancelled`).
+const isWalkCancel = (e) => String(e).includes("walk cancelled");
 
 // Expand/collapse a folder in place; lazy-load its children on first expand.
-// ponytail: each expand re-walks that subtree to size its children (bounded per
-// folder, cached in-node after). Fine interactively; deepen the initial fetch
-// only if expansion feels slow.
+// Two levels per fetch: every fetch walks the whole subtree to size it whatever
+// depth is kept, so keeping two means half as many walks while drilling down.
 const spaceInflight = new Set();
 function toggleExpand(node) {
   const s = spaceState;
@@ -1017,11 +1038,22 @@ function toggleExpand(node) {
   s.expanded.add(node.path);
   if (node._loaded || (node.children && node.children.length) || spaceInflight.has(node.path)) { spaceView(); return; }
   spaceInflight.add(node.path);
+  const gen = s.gen;
   spaceView();
-  invoke("size_tree", { root: node.path, maxDepth: 1 })
+  invoke("size_tree", { root: node.path, maxDepth: 2 })
     .then((fresh) => { node.children = fresh.children || []; node._loaded = true; node._error = null; })
-    .catch((e) => { node.children = []; node._loaded = true; node._error = String(e); }) // surfaced as an error row, not a silent empty
-    .finally(() => { spaceInflight.delete(node.path); if (state.current === "space") spaceView(); });
+    .catch((e) => {
+      if (gen !== s.gen) return; // this folder belonged to an older scan
+      // A stopped walk just closes the folder again (it can be reopened); only a
+      // real failure is remembered and shown as an error row, not a silent empty.
+      if (isWalkCancel(e)) s.expanded.delete(node.path);
+      else { node.children = []; node._loaded = true; node._error = String(e); }
+    })
+    .finally(() => {
+      if (gen !== s.gen) return;
+      spaceInflight.delete(node.path);
+      if (state.current === "space") spaceView();
+    });
 }
 
 // Selected paths with nested descendants removed: if a folder AND something
@@ -1043,20 +1075,6 @@ function toggleSel(c) {
   else s.sel.set(c.path, selEntry(c));
   spaceView();
 }
-// Top-level children + whether all are selected — one derivation, used by both
-// the header button and the toggle so their state can't drift.
-const spaceTopKids = () => (spaceState.root && spaceState.root.children) || [];
-const spaceTopAllSelected = () => {
-  const t = spaceTopKids();
-  return t.length > 0 && t.every((c) => spaceState.sel.has(c.path));
-};
-function selectAllTop() {
-  const s = spaceState;
-  const top = spaceTopKids();
-  if (spaceTopAllSelected()) top.forEach((c) => s.sel.delete(c.path));
-  else top.forEach((c) => s.sel.set(c.path, selEntry(c)));
-  spaceView();
-}
 
 function spaceTree() {
   const s = spaceState;
@@ -1064,10 +1082,8 @@ function spaceTree() {
   const total = szOf(root);
   const wrap = h("div", { class: "review" });
 
-  // header: home summary + rescan + select-all (top level; prunedSelection makes
-  // that equivalent to everything)
-  const top = spaceTopKids();
-  const allSel = spaceTopAllSelected();
+  // header: disk summary + rescan. (No "Select all": the root is the boot disk,
+  // and one click selecting /Applications, /Users, /Library… is never the intent.)
   const rootName = root.path === "/" ? "Macintosh HD" : (root.path.split("/").pop() || root.path);
   wrap.append(h("div", { class: "notice", style: "margin:16px 24px 0;align-items:center" },
     icon("folder-search"),
@@ -1075,11 +1091,13 @@ function spaceTree() {
       h("h3", {}, rootName),
       h("p", { style: "margin:0" }, `${fmtBytes(total)} on disk · ${Number(root.count).toLocaleString()} items`)),
     h("div", { style: "flex:1" }),
-    h("button", { onClick: startSpaceScan }, "Rescan"),
-    top.length ? h("button", { style: "margin-left:8px", onClick: selectAllTop }, allSel ? "Deselect all" : "Select all") : null));
+    h("button", { onClick: startSpaceScan }, "Rescan")));
+  // Without Full Disk Access, protected folders (Mail, other apps' data, the
+  // Trash…) can't be read and show as empty — say so instead of under-reporting.
+  if (!state.fda) wrap.append(fdaNotice());
 
   // nested list — depth-first over expanded branches
-  const list = h("div", { class: "list" });
+  const list = h("div", { class: "list", "data-keep-scroll": "space-tree" });
   const rows = [];
   flattenTree(root, 0, total, rows, []);
   if (!rows.length) list.append(h("div", { class: "dim", style: "padding:24px;text-align:center" }, "This folder is empty or unreadable."));
@@ -1097,7 +1115,11 @@ function spaceTree() {
 // bar is sized relative to its own folder — magnitude reads at every depth.
 function flattenTree(node, depth, parentTotal, out, ancestorsLast) {
   const kids = node.children || [];
-  for (let j = 0; j < kids.length; j++) {
+  // Children are sorted largest-first, so the first page holds what matters. A
+  // folder with 10,000 entries would otherwise put 10,000 rows in the DOM and
+  // rebuild them on every click.
+  const shown = Math.min(kids.length, node._limit || SPACE_PAGE);
+  for (let j = 0; j < shown; j++) {
     const c = kids[j];
     const isLast = j === kids.length - 1;
     out.push(spaceRow(c, depth, parentTotal, ancestorsLast, isLast));
@@ -1106,6 +1128,22 @@ function flattenTree(node, depth, parentTotal, out, ancestorsLast) {
     if (c.children && c.children.length) flattenTree(c, depth + 1, szOf(c), out, childAnc);
     else if (c._error) out.push(spaceErrorRow(depth + 1, childAnc));
   }
+  if (shown < kids.length) out.push(spaceMoreRow(node, kids.slice(shown), depth, ancestorsLast));
+}
+const SPACE_PAGE = 200; // rows shown per folder before a "show more" row
+
+// The tail of a long folder: one row standing in for the (smaller) entries not
+// rendered yet; clicking it reveals the next page.
+function spaceMoreRow(node, rest, depth, ancestorsLast) {
+  const more = Math.min(rest.length, SPACE_PAGE);
+  return h("div", { class: "item drill",
+    onClick: () => { node._limit = (node._limit || SPACE_PAGE) + SPACE_PAGE; spaceView(); } },
+    treeGuides(depth, ancestorsLast || [], true),
+    h("span", { class: "disc placeholder" }),
+    icon("files", "ficon"),
+    h("div", { class: "path" },
+      h("div", { class: "nm" }, `Show ${more.toLocaleString()} more…`),
+      h("div", { class: "reason" }, `${rest.length.toLocaleString()} smaller items not shown · ${fmtBytes(rest.reduce((a, c) => a + szOf(c), 0))}`)));
 }
 
 // Zed-style tree indent guides: a vertical line per ancestor level that still
@@ -1163,11 +1201,14 @@ function spaceRow(c, depth, parentTotal, ancestorsLast, isLast) {
     h("div", { class: "path" },
       h("div", { class: "nm", title: displayPath(c.path) }, name),
       h("div", { class: "reason" }, c.is_dir ? `${Number(c.count).toLocaleString()} items` : "File")),
-    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of folder` }, h("i", { style: `width:${Math.max(frac * 100, 2)}%;background:${szBarColor(frac)}` })),
+    h("div", { class: "szbar", title: `${(frac * 100).toFixed(1)}% of folder` }, h("i", { style: `width:${Math.min(Math.max(frac * 100, 2), 100)}%;background:${szBarColor(frac)}` })),
     h("span", { class: "isize" }, fmtBytes(szOf(c))),
     revealBtn(c.path));
 }
 
+// "1 item in total" / "12 items in total" — the pick itself plus everything in it
+// (folders included, so not "files").
+const nItems = (n) => `${n.toLocaleString()} item${n === 1 ? "" : "s"} in total`;
 // Totals over the de-duplicated selection, using physical on-disk bytes.
 function spaceSelTotals() {
   const s = spaceState;
@@ -1182,17 +1223,13 @@ function spaceSelTotals() {
 // for a big slice of its folder, accent for medium, a faded accent for small.
 const szBarColor = (f) => f >= 0.4 ? "#f59e0b" : f >= 0.15 ? "var(--accent)" : "color-mix(in srgb, var(--accent) 50%, transparent)";
 
-// Is a path inside the user's home folder? One definition shared by the Review
-// screen and the direct-remove confirm so their out-of-home detection can't drift.
-const underHome = (p) => state.home && (p === state.home || p.startsWith(state.home + "/"));
-
 function spaceFooter() {
   const s = spaceState;
   const { paths, bytes, items } = spaceSelTotals();
   const n = paths.length;
   return h("div", { class: "reclaim-bar" },
     h("div", {}, n
-      ? `${n} selected · ${fmtBytes(bytes)} · ${items.toLocaleString()} files`
+      ? `${n} selected · ${fmtBytes(bytes)} · ${nItems(items)}`
       : h("span", { class: "dim" }, "Open folders to explore; tick anything to remove it (reversible).")),
     h("div", { style: "flex:1" }),
     n ? h("button", { onClick: () => { s.sel.clear(); spaceView(); } }, "Clear") : null,
@@ -1214,7 +1251,7 @@ function spaceReview() {
     h("div", { class: "body", style: "margin:0" },
       h("h3", {}, "Review before removing"),
       h("p", { style: "margin:0" },
-        `${paths.length} item(s) · ${fmtBytes(bytes)} · ${items.toLocaleString()} files — all reversible (Trash).`
+        `${paths.length} item(s) · ${fmtBytes(bytes)} · ${nItems(items)} — all reversible (Trash).`
         + (outside ? `  ⚠️ ${outside} outside your home folder.` : ""))),
     h("div", { style: "flex:1" }),
     h("button", { onClick: () => { s.phase = "browse"; spaceView(); } }, "Back")));
@@ -1227,7 +1264,7 @@ function spaceReview() {
       h("div", { class: "path" },
         h("div", { class: "nm", title: displayPath(p) }, name),
         h("div", { class: "reason" }, displayPath(p))),
-      underHome(p) ? null : h("span", { class: "badge Review" }, "outside home"),
+      underHome(p) ? null : h("span", { class: "badge Review wide" }, "Outside home"),
       h("span", { class: "isize" }, fmtBytes(v.bytes || 0)),
       h("button", { title: "Remove from selection", onClick: () => { s.sel.delete(p); refresh(); } }, "✕")));
   }
@@ -1253,7 +1290,7 @@ async function doSpaceRemove() {
     ? `\n\n⚠️ ${outside.length} of these are OUTSIDE your home folder (e.g. ${displayPath(outside[0])}) — system, app, or other-user locations. Only move them if you're sure.`
     : "";
   const ok = await uiConfirm(
-    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${items.toLocaleString()} files) to the Trash?${warn}\n\nReversible — everything goes to the Trash, restore it anytime.`,
+    `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${nItems(items)}) to the Trash?${warn}\n\nReversible — everything goes to the Trash, restore it anytime.`,
     { danger: true, okLabel: "Move to Trash" });
   if (!ok) return;
   spaceReclaim();
@@ -1287,7 +1324,11 @@ async function spaceReclaim() {
       : bytes;
     s.phase = "done";
     s.sel.clear();
-  } catch (e) { s.error = String(e); s.phase = "browse"; }
+  } catch (e) {
+    // A failed removal is not a failed scan: keep the tree + selection, just say so.
+    s.phase = "browse";
+    uiToast(`Couldn't move the items to the Trash: ${e}`, { danger: true });
+  }
   spaceView();
 }
 
@@ -1946,7 +1987,7 @@ function renderBrewReport() {
     h("button", { onClick: analyzeBrew }, "Re-analyze")));
   if (b.outcome) {
     const o = b.outcome;
-    wrap.append(h("div", { class: o.ok ? "toast" : "toast-fail", style: "margin:0 24px 10px" },
+    wrap.append(h("div", { class: o.ok ? "toast-ok" : "toast-fail", style: "margin:0 24px 10px" },
       h("div", { style: "font-weight:600;margin-bottom:4px" }, o.ok ? (o.freed_bytes ? `Done — about ${fmtBytes(o.freed_bytes)} freed` : "Done") : "Could not complete"),
       h("pre", { class: "brew-out" }, o.message)));
   }
@@ -2066,7 +2107,8 @@ async function brewUninstall(p) {
 // =====================================================================
 // Docker (delegates every prune to the docker CLI)
 // =====================================================================
-const dockerState = { phase: "idle", report: null, error: null, working: null, outcome: null, stale: false };
+const dockerState = { phase: "idle", report: null, error: null, working: null, outcome: null, stale: false,
+  volumes: [], volSel: new Set() };
 
 // What each artifact category means + the exact command it prunes to. `danger`
 // tiers volumes (they hold persistent data). One card per category.
@@ -2083,21 +2125,24 @@ const DOCKER_CARDS = {
     desc: "Containers that have exited. Running containers are never touched.",
     cmd: "docker_prune_containers", label: "Remove stopped",
     confirm: "Remove all stopped containers?\n\nRuns “docker container prune”. Running containers are not affected." },
+  // No blanket prune for volumes: `docker volume prune` only takes ANONYMOUS
+  // volumes, so it freed nothing of the reclaimable figure when the unused
+  // volumes were named. `open` lists them so the user removes the ones they pick.
   volumes: { icon: "package", title: "Volumes", danger: true,
-    desc: "⚠ Anonymous volumes not attached to a container. Volumes can hold databases and other persistent data.",
-    cmd: "docker_prune_volumes", label: "Remove anonymous",
-    confirm: "Remove UNUSED ANONYMOUS Docker volumes?\n\n⚠ Volumes hold persistent data (databases, etc.). This runs “docker volume prune”, which removes only anonymous volumes not attached to any container — NAMED volumes are kept. This is NOT reversible. Continue only if you're sure you don't need that data." },
+    desc: "⚠ Volumes no container uses. They can hold databases and other persistent data — review each one.",
+    label: "Review volumes…", open: openDockerVolumes },
 };
 
 async function dockerView() {
   setTitle("Docker", []);
   const d = dockerState;
   if (d.phase === "idle") return setView(heroLanding("container", "Docker cleanup",
-    "Reclaim space from Docker: build cache, images and containers you no longer use, and unused volumes. Every removal is delegated to Docker's own `prune` commands — read-only analysis first.",
-    ["Safe: every removal is a `docker … prune` you confirm", "Build cache, unused images & stopped containers", "Unused volumes flagged as risky (they hold data)"],
+    "Reclaim space from Docker: build cache, images and containers you no longer use, and unused volumes. Every removal is delegated to the `docker` CLI itself — read-only analysis first.",
+    ["Safe: every removal is a `docker` command you confirm", "Build cache, unused images & stopped containers", "Unused volumes reviewed one by one (they hold data)"],
     analyzeDocker));
   if (d.phase === "analyzing") return setView(centeredSpinner("Reading Docker disk usage…"));
   if (d.phase === "working") return setView(centeredSpinner(d.working || "Working…"));
+  if (d.phase === "volumes") return setView(renderDockerVolumes());
   if (d.phase === "error") return setView(centered("circle-alert", "Docker error", d.error, "Back", () => { d.phase = "idle"; render(); }));
   return setView(renderDockerReport());
 }
@@ -2148,7 +2193,7 @@ function renderDockerReport() {
     h("button", { onClick: analyzeDocker }, "Re-analyze")));
   if (d.outcome) {
     const o = d.outcome;
-    wrap.append(h("div", { class: o.ok ? "toast" : "toast-fail", style: "margin:0 24px 10px" },
+    wrap.append(h("div", { class: o.ok ? "toast-ok" : "toast-fail", style: "margin:0 24px 10px" },
       h("div", { style: "font-weight:600;margin-bottom:4px" }, o.ok ? (o.freed_bytes ? `Done — about ${fmtBytes(o.freed_bytes)} freed` : "Done") : "Could not complete"),
       h("pre", { class: "brew-out" }, o.message)));
   }
@@ -2174,7 +2219,79 @@ function dockerCard(a, card) {
     h("div", { style: "flex:1;min-width:0" },
       h("div", { style: "font-weight:600" }, `${card.title} — ${has ? `${fmtBytes(reclaimable)} reclaimable` : "nothing to reclaim"}`),
       h("div", { class: "dim", style: "font-size:11px" }, `${a.total_count} total · ${a.active_count} active · ${card.desc}`)),
-    has ? h("button", { class: card.danger ? "danger" : "primary", onClick: () => runDockerAction(card) }, card.label) : null);
+    has ? h("button", { class: card.danger ? "danger" : "primary", onClick: () => (card.open ? card.open() : runDockerAction(card)) }, card.label) : null);
+}
+
+// ---- Unused volumes: reviewed and removed one by one (each is someone's data) ----
+const volLabel = (v) => (v.anonymous ? `${v.name.slice(0, 12)}… (anonymous)` : v.name);
+
+async function openDockerVolumes() {
+  const d = dockerState;
+  d.phase = "working"; d.working = "Listing unused volumes…"; render();
+  let err = null;
+  try { d.volumes = await invoke("docker_unused_volumes"); }
+  catch (e) { d.volumes = []; err = e; }
+  // Nothing pre-ticked: removal is permanent, and even an anonymous volume can
+  // be a database's only copy (an image `VOLUME` with no named mount).
+  d.volSel = new Set();
+  d.phase = d.volumes.length ? "volumes" : "ready";
+  if (!d.volumes.length) uiToast(err ? `Couldn't list Docker volumes: ${err}` : "No unused volumes to remove.", { danger: !!err });
+  render();
+}
+
+function renderDockerVolumes() {
+  const d = dockerState;
+  const count = h("div", {});
+  const removeBtn = h("button", { class: "danger", style: "margin-left:8px", onClick: removeDockerVolumes }, "Remove selected");
+  // Ticking updates the footer IN PLACE — a full re-render would rebuild the
+  // list and throw its scroll position back to the top.
+  const sync = () => {
+    const sel = d.volumes.filter((v) => d.volSel.has(v.name));
+    count.textContent = sel.length
+      ? `${sel.length} selected · ${fmtBytes(sel.reduce((a, v) => a + Number(v.size_bytes), 0))}`
+      : "Nothing selected.";
+    count.className = sel.length ? "" : "dim";
+    removeBtn.disabled = !sel.length;
+  };
+  const wrap = h("div", { class: "review" });
+  wrap.append(h("div", { class: "notice", style: "margin:16px 24px 0;align-items:center" },
+    icon("package"),
+    h("div", { class: "body", style: "margin:0" },
+      h("h3", {}, "Unused Docker volumes"),
+      h("p", { style: "margin:0" }, "No container uses these, but a volume can hold a database or other persistent data. Removing one is permanent — it is not moved to the Trash. Tick only what you no longer need."))));
+  const list = h("div", { class: "list" });
+  for (const v of d.volumes) {
+    list.append(selectableRow({
+      checked: d.volSel.has(v.name),
+      content: [
+        icon("package", "ficon"),
+        h("div", { class: "path" },
+          h("div", { class: "nm", title: v.name }, volLabel(v)),
+          h("div", { class: "reason" }, v.anonymous ? "Created without a name — often disposable, but it can still hold data" : "Named volume — may hold a database or app data")),
+        h("span", { class: "isize" }, fmtBytes(v.size_bytes)),
+        h("span", { class: `badge ${v.anonymous ? "Safe" : "Review"}` }, v.anonymous ? "anon" : "named"),
+      ],
+      onToggle: (on) => { if (on) d.volSel.add(v.name); else d.volSel.delete(v.name); sync(); },
+    }));
+  }
+  wrap.append(list);
+  wrap.append(h("div", { class: "reclaim-bar" }, count, h("div", { style: "flex:1" }),
+    h("button", { onClick: () => { d.phase = "ready"; render(); } }, "Back"), removeBtn));
+  sync();
+  return wrap;
+}
+
+async function removeDockerVolumes() {
+  const d = dockerState;
+  const sel = d.volumes.filter((v) => d.volSel.has(v.name));
+  if (!sel.length) return;
+  if (!(await uiConfirm(
+    `Permanently delete ${sel.length} Docker volume${sel.length === 1 ? "" : "s"}?\n\n${sel.map((v) => `• ${volLabel(v)}`).join("\n")}\n\n⚠ This runs “docker volume rm”. Whatever is inside (databases, uploads) is gone for good — it is NOT moved to the Trash.`,
+    { danger: true, okLabel: "Delete volumes" }))) return;
+  d.phase = "working"; d.working = "Removing volumes…"; render();
+  try { d.outcome = await invoke("docker_remove_volumes", { names: sel.map((v) => v.name) }); }
+  catch (e) { d.outcome = { ok: false, freed_bytes: 0, message: String(e) }; }
+  await refreshDockerAfterAction();
 }
 
 // =====================================================================
@@ -2710,7 +2827,9 @@ async function scanDevArtifacts() {
   d.phase = "scanning"; d.report = null; render();
   try {
     d.items = await invoke("scan_dev_artifacts", {});
-    d.selection = new Set(d.items.map((i) => i.path)); // default: all selected
+    // Nothing pre-selected: the scan can't tell an abandoned project's output
+    // from one being built — or run — right now; the user picks.
+    d.selection = new Set();
     d.phase = "review";
   } catch (e) { d.phase = "error"; d.error = String(e); }
   render();
@@ -2742,7 +2861,7 @@ function daReview() {
   wrap.append(h("div", { class: "row", style: "padding:16px 24px;gap:12px;flex-wrap:wrap;align-items:flex-end" },
     h("div", { style: "min-width:0;flex:1 1 220px" },
       h("div", { style: "font-weight:600" }, `${visible.length} of ${d.items.length} artifact dir(s) · ${fmtBytes(selBytes)} selected`),
-      h("div", { class: "dim", style: "font-size:11px" }, "Rebuildable from source. Uncheck to keep; Reveal to inspect a folder before deleting.")),
+      h("div", { class: "dim", style: "font-size:11px" }, "Rebuildable from source. Tick what you no longer need — nothing is pre-selected, since a project you're building right now looks the same as an abandoned one. Reveal to inspect a folder first.")),
     h("div", { class: "row", style: "gap:8px;flex-wrap:wrap;justify-content:flex-end" },
       h("label", { class: "dim", style: "font-size:11px;display:flex;align-items:center;gap:5px;white-space:nowrap" }, "Show", sizeSel),
       h("button", { style: "white-space:nowrap", onClick: () => {
@@ -2753,7 +2872,7 @@ function daReview() {
       h("button", { class: "danger", style: "white-space:nowrap", disabled: selectedVisible.length ? null : "", onClick: doReclaimDevArtifacts },
         `Move ${selectedVisible.length} to Trash`))));
 
-  const list = h("div", { class: "list" });
+  const list = h("div", { class: "list", "data-keep-scroll": "dev-artifacts" });
   for (const i of visible) {
     const on = d.selection.has(i.path);
     list.append(h("div", { class: "item selectable" + (on ? "" : " off"), style: "cursor:pointer",
