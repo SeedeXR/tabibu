@@ -206,7 +206,9 @@ fn excluded(path: &Path, home: &Path) -> bool {
     if path == home.join("Library") || is_home_dotdir(path, home) {
         return true;
     }
-    if tabibu_engine::denylist::denied(path, home).is_some() {
+    // Lexical is enough here: the walk reports on-disk names and never follows
+    // symlinks; reclaim re-judges every pick with the resolving `denied`.
+    if tabibu_engine::denylist::denied_lexical(path, home).is_some() {
         return !path.starts_with(home.join("Documents"))
             && !path.starts_with(home.join("Desktop"));
     }

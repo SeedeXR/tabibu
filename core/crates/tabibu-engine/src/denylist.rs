@@ -79,8 +79,44 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// Returns the reason a path is denied, or `None` if it is permissible.
 /// `home` is the user's home directory (injected for testability).
+///
+/// Judges the path as spelled AND, when it exists, as the filesystem resolves
+/// it: APFS is case-insensitive (`~/library/keychains` IS the keychain folder)
+/// and symlinks reach protected places by other names (`/Volumes/Macintosh HD`
+/// → `/`, an app container's `Data/Library/Keychains` → `~/Library/Keychains`).
+/// A final-component symlink is judged as the link itself — trashing a link
+/// never touches its target.
 #[must_use]
 pub fn denied(path: &Path, home: &Path) -> Option<DenyReason> {
+    denied_lexical(path, home).or_else(|| {
+        let real = resolved(path)?;
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        denied_lexical(&real, &home)
+    })
+}
+
+/// The on-disk spelling of `path` (case and symlinks resolved, except a final
+/// symlink, which stays the link). `None` if nothing on the way exists.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        if let Ok(p) = std::fs::canonicalize(path) {
+            return Some(p);
+        }
+    }
+    Some(
+        std::fs::canonicalize(path.parent()?)
+            .ok()?
+            .join(path.file_name()?),
+    )
+}
+
+/// [`denied`] on the spelling alone, with no filesystem access. Only for a
+/// walker that reports on-disk names and never follows symlinks (devscan),
+/// where resolving every visited folder would be wasted work. Anything that
+/// MUTATES must use [`denied`].
+#[must_use]
+pub fn denied_lexical(path: &Path, home: &Path) -> Option<DenyReason> {
     // Relative paths and any `..` component are rejected outright: a path
     // must be judged by where it truly points.
     if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
@@ -212,9 +248,41 @@ mod tests {
                 "/Users/test/Library/Messages/chat.db",
                 DenyReason::ReviewOnly,
             ),
+            (
+                "/Users/test/Library/Photos/Libraries",
+                DenyReason::ReviewOnly,
+            ),
+            (
+                "/Users/test/Library/Application Support/MobileSync/Backup",
+                DenyReason::ReviewOnly,
+            ),
             ("/Users/test/Documents/a.txt", DenyReason::UserData),
         ] {
             assert_eq!(denied(Path::new(p), &home()), Some(want), "{p}");
+        }
+    }
+
+    /// Other spellings of a protected place are judged by where they point:
+    /// a case variant on a case-insensitive volume, and a symlinked parent.
+    #[test]
+    fn spellings_are_judged_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let keys = home.join("Library/Keychains");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("login.keychain-db"), b"k").unwrap();
+        std::os::unix::fs::symlink(&keys, home.join("alias")).unwrap();
+
+        let via_link = home.join("alias/login.keychain-db");
+        assert_eq!(denied_lexical(&via_link, &home), None);
+        assert_eq!(denied(&via_link, &home), Some(DenyReason::Secrets));
+        // The link itself is not the keychain: trashing it removes only the link.
+        assert_eq!(denied(&home.join("alias"), &home), None);
+
+        let case = home.join("library/keychains");
+        if case.exists() {
+            // case-insensitive volume (the macOS default)
+            assert_eq!(denied(&case, &home), Some(DenyReason::Secrets));
         }
     }
 
