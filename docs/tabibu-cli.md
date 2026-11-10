@@ -195,10 +195,13 @@ tabibu scan malware           Adware / rogue-profile heuristics (report only)
 tabibu scan dev-artifacts [PATH] [--global] [--min-size N]   Rebuildable build dirs (report only)
 tabibu flush-dns              Flush the macOS DNS resolver cache (admin)
 tabibu free-memory            Free inactive/cached memory via macOS purge (admin)
-tabibu clean junk [--yes]     Move junk to the Trash — reports first, --yes acts
-tabibu clean caches [--yes]   App + developer caches only
-tabibu clean logs [--yes]     Log files only
-tabibu clean all [--yes]      All junk + rebuildable dev artifacts across home
+tabibu clean junk [--yes] [--include-review]     Move junk to the Trash — reports first, --yes acts
+tabibu clean caches [--yes] [--include-review]   App + developer caches only
+tabibu clean logs [--yes] [--include-review]     Log files only
+tabibu clean all [--yes] [--include-review]      All junk + rebuildable dev artifacts across home
+                              (--yes only touches items that are safe to remove; anything that
+                               needs review — caches of running apps, large old files, build
+                               artifacts — is reported and left alone unless --include-review)
 tabibu clean dev-artifacts [PATH] [--global] [--min-size N] [--yes]   Trash rebuildable build dirs
 tabibu brew status           Homebrew readout: version, packages, reclaimable cache, orphans
 tabibu brew clean [--yes]    Clear old versions + stale cache (runs `brew cleanup`)

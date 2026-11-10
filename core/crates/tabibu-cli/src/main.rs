@@ -554,7 +554,13 @@ fn cmd_scan(json: bool, what: ScanCmd, cfg: &config::Config) -> i32 {
 /// `--global`, else the current directory.
 fn devscan_roots(path: Option<&str>, global: bool) -> Vec<PathBuf> {
     if let Some(p) = path {
-        vec![PathBuf::from(p)]
+        // Resolved to an absolute path with no `.`/`..`: these roots are also
+        // reclaim's allowed roots, and a relative one (`./proj`) matched no
+        // scanned path — every artifact was then refused as "protected" — while
+        // `../proj` was rejected outright as path traversal.
+        vec![std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| PathBuf::from(p))]
     } else if global {
         vec![std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -603,12 +609,18 @@ fn roots_display(roots: &[PathBuf]) -> String {
 
 fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
     match what {
-        CleanCmd::Junk { yes } => {
+        CleanCmd::Junk {
+            yes,
+            include_review,
+        } => {
             let ctx = junk_ctx();
             let items = collect_sorted(&tabibu_junk::scanners(), &ctx);
-            clean_items(json, &ctx, items, yes)
+            clean_items(json, &ctx, items, yes, include_review)
         }
-        CleanCmd::Caches { yes } => {
+        CleanCmd::Caches {
+            yes,
+            include_review,
+        } => {
             let ctx = junk_ctx();
             let scanners: Vec<Box<dyn Scanner>> = vec![
                 Box::new(tabibu_junk::UserCacheScanner::new()),
@@ -618,15 +630,21 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
                 Box::new(tabibu_junk::DevCacheScanner),
             ];
             let items = collect_sorted(&scanners, &ctx);
-            clean_items(json, &ctx, items, yes)
+            clean_items(json, &ctx, items, yes, include_review)
         }
-        CleanCmd::Logs { yes } => {
+        CleanCmd::Logs {
+            yes,
+            include_review,
+        } => {
             let ctx = junk_ctx();
             let scanners: Vec<Box<dyn Scanner>> = vec![Box::new(tabibu_junk::LogScanner)];
             let items = collect_sorted(&scanners, &ctx);
-            clean_items(json, &ctx, items, yes)
+            clean_items(json, &ctx, items, yes, include_review)
         }
-        CleanCmd::All { yes } => {
+        CleanCmd::All {
+            yes,
+            include_review,
+        } => {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_default();
@@ -645,7 +663,7 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
                 running_bundle_ids: std::collections::HashSet::new(),
                 full_disk_access: false,
             };
-            clean_items(json, &ctx, items, yes)
+            clean_items(json, &ctx, items, yes, include_review)
         }
         CleanCmd::DevArtifacts {
             path,
@@ -677,7 +695,7 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
                 full_disk_access: false,
             };
             let items: Vec<CleanupItem> = arts.iter().map(dev_to_item).collect();
-            reclaim_report(json, &ctx, items)
+            reclaim_report(json, &ctx, items, (0, 0))
         }
     }
 }
@@ -685,14 +703,36 @@ fn cmd_clean(json: bool, what: CleanCmd) -> i32 {
 /// Report-first clean of pre-collected items: with `yes=false` prints a
 /// category summary and touches nothing; with `yes=true` moves them to the
 /// Trash (reversible) via the engine.
-fn clean_items(json: bool, ctx: &ScanCtx, items: Vec<CleanupItem>, yes: bool) -> i32 {
+///
+/// Only `Safe`-tier items are acted on unless `include_review` is set: `Review`
+/// means "a person should look first" (caches of running apps, large old files),
+/// so a bulk `--yes` must not sweep them up. What is held back is always reported.
+fn clean_items(
+    json: bool,
+    ctx: &ScanCtx,
+    items: Vec<CleanupItem>,
+    yes: bool,
+    include_review: bool,
+) -> i32 {
+    let (items, held): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|i| include_review || i.tier == tabibu_engine::SafetyTier::Safe);
+    let held_bytes: u64 = held.iter().map(|i| i.size_bytes).sum();
+    if !json && !held.is_empty() {
+        println!(
+            "{} in {} item(s) need review and are left alone — add --include-review to include them.",
+            human_bytes(held_bytes),
+            held.len()
+        );
+    }
     if yes {
-        return reclaim_report(json, ctx, items);
+        return reclaim_report(json, ctx, items, (held_bytes, held.len()));
     }
     let total: u64 = items.iter().map(|i| i.size_bytes).sum();
     if json {
         print_json(&serde_json::json!({
             "dry_run": true, "would_free_bytes": total, "item_count": items.len(), "items": items,
+            "held_for_review_bytes": held_bytes, "held_for_review_count": held.len(),
         }));
     } else if items.is_empty() {
         println!("Nothing to clean.");
@@ -714,10 +754,15 @@ fn clean_items(json: bool, ctx: &ScanCtx, items: Vec<CleanupItem>, yes: bool) ->
 
 /// Move the given items to the Trash via the engine (undo manifest + denylist),
 /// and print what was freed. Items are forced to `Trash` (reversible) here too.
-fn reclaim_report(json: bool, ctx: &ScanCtx, items: Vec<CleanupItem>) -> i32 {
+/// `held` = (bytes, count) of Review-tier items deliberately left alone — echoed
+/// in the JSON so a script can tell "little to do" from "most of it was withheld".
+fn reclaim_report(json: bool, ctx: &ScanCtx, items: Vec<CleanupItem>, held: (u64, usize)) -> i32 {
     if items.is_empty() {
         if json {
-            print_json(&serde_json::json!({ "reclaimed_bytes": 0, "succeeded": 0, "failed": 0 }));
+            print_json(&serde_json::json!({
+                "reclaimed_bytes": 0, "succeeded": 0, "failed": 0,
+                "held_for_review_bytes": held.0, "held_for_review_count": held.1,
+            }));
         } else {
             println!("Nothing to clean.");
         }
@@ -728,6 +773,7 @@ fn reclaim_report(json: bool, ctx: &ScanCtx, items: Vec<CleanupItem>) -> i32 {
             if json {
                 print_json(&serde_json::json!({
                     "reclaimed_bytes": r.reclaimed_bytes, "succeeded": r.succeeded, "failed": r.failed,
+                    "held_for_review_bytes": held.0, "held_for_review_count": held.1,
                 }));
             } else {
                 println!(
@@ -778,7 +824,10 @@ fn dev_to_item(a: &tabibu_devscan::DevArtifact) -> CleanupItem {
         path: a.path.clone(),
         category: tabibu_engine::Category::DevCache,
         size_bytes: a.size_bytes,
-        tier: tabibu_engine::SafetyTier::Safe,
+        // Review: the scan cannot tell an abandoned project's output from one
+        // being built right now, so `clean all --yes` holds these back unless
+        // `--include-review`. (`clean dev-artifacts --yes` asks for them by name.)
+        tier: tabibu_engine::SafetyTier::Review,
         reason: format!("{} — rebuild: {}", a.kind, a.rebuild),
         selected: true,
         action: tabibu_engine::ReclaimAction::Trash,
@@ -852,7 +901,10 @@ fn junk_ctx() -> ScanCtx {
     ScanCtx {
         home,
         allowed_roots: roots,
-        running_bundle_ids: std::collections::HashSet::new(),
+        // The real running set (same function as the app): without it every
+        // cache read as "not running" → Safe, and `--yes` would have trashed the
+        // caches of apps and daemons that are live right now.
+        running_bundle_ids: tabibu_sys::running_bundle_ids(),
         full_disk_access: false,
     }
 }
@@ -1210,7 +1262,9 @@ fn cmd_uninstall(json: bool, app: String, yes: bool) -> i32 {
         None => {}
     }
     items.sort_by_key(|i| std::cmp::Reverse(i.size_bytes));
-    clean_items(json, &ctx, items, yes)
+    // The user named this app: its bundle and remnants ARE the request, so the
+    // review gate (which holds back unreviewed bulk finds) does not apply.
+    clean_items(json, &ctx, items, yes, true)
 }
 
 /// Resolve a CLI argument to a single `.app` bundle: an existing `.app` path is
@@ -1606,12 +1660,85 @@ mod tests {
     }
 
     #[test]
+    fn clean_holds_review_items_unless_included() {
+        use tabibu_engine::{Category, ReclaimAction, SafetyTier};
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |name: &str, tier| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"x").unwrap();
+            CleanupItem {
+                path,
+                category: Category::UserCache,
+                size_bytes: 1,
+                tier,
+                reason: String::new(),
+                selected: false,
+                action: ReclaimAction::Trash,
+            }
+        };
+        let ctx = ScanCtx {
+            home: dir.path().to_path_buf(),
+            // No allowed root: reclaim refuses whatever reaches it, so this test
+            // never moves a file — it only observes WHICH items got that far.
+            allowed_roots: Vec::new(),
+            running_bundle_ids: std::collections::HashSet::new(),
+            full_disk_access: false,
+        };
+        let items = || {
+            vec![
+                mk("safe", SafetyTier::Safe),
+                mk("review", SafetyTier::Review),
+            ]
+        };
+        // `--yes` alone reaches reclaim with the Safe item only → exactly one
+        // refusal (exit 1). The Review item is held, so both files survive.
+        assert_eq!(clean_items(true, &ctx, items(), true, false), 1);
+        assert!(dir.path().join("safe").exists() && dir.path().join("review").exists());
+        // Nothing Safe to act on → reclaim has no work → exit 0.
+        assert_eq!(
+            clean_items(
+                true,
+                &ctx,
+                vec![mk("review", SafetyTier::Review)],
+                true,
+                false
+            ),
+            0
+        );
+        // With --include-review the Review item reaches reclaim too (refused → 1).
+        assert_eq!(
+            clean_items(
+                true,
+                &ctx,
+                vec![mk("review", SafetyTier::Review)],
+                true,
+                true
+            ),
+            1
+        );
+    }
+
+    #[test]
     fn parses_clean_and_devartifacts() {
+        assert!(matches!(
+            Cli::try_parse_from(["tabibu", "clean", "junk", "--yes", "--include-review"])
+                .unwrap()
+                .command,
+            Command::Clean {
+                what: CleanCmd::Junk {
+                    yes: true,
+                    include_review: true,
+                }
+            }
+        ));
         let c = Cli::try_parse_from(["tabibu", "clean", "junk", "--yes"]).unwrap();
         assert!(matches!(
             c.command,
             Command::Clean {
-                what: CleanCmd::Junk { yes: true }
+                what: CleanCmd::Junk {
+                    yes: true,
+                    include_review: false,
+                }
             }
         ));
         let c = Cli::try_parse_from(["tabibu", "clean", "dev-artifacts", "/p", "--yes"]).unwrap();
@@ -1653,7 +1780,10 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Clean {
-                what: CleanCmd::Caches { yes: true }
+                what: CleanCmd::Caches {
+                    yes: true,
+                    include_review: false,
+                }
             }
         ));
         assert!(matches!(
@@ -1661,7 +1791,10 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Clean {
-                what: CleanCmd::Logs { yes: false }
+                what: CleanCmd::Logs {
+                    yes: false,
+                    include_review: false,
+                }
             }
         ));
         assert!(matches!(
@@ -1669,7 +1802,10 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Clean {
-                what: CleanCmd::All { yes: true }
+                what: CleanCmd::All {
+                    yes: true,
+                    include_review: false,
+                }
             }
         ));
     }

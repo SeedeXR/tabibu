@@ -62,10 +62,29 @@ const DEV_CACHE_TARGETS: &[(&str, SafetyTier, &str)] = &[
         SafetyTier::Safe,
         "npm package cache — packages are re-downloaded on demand",
     ),
+    // Review, not Safe: anything started with `npx` (dev servers, MCP servers)
+    // keeps RUNNING out of this directory, so it must not be auto-selected.
+    (
+        ".npm/_npx",
+        SafetyTier::Review,
+        "npx package cache — re-installed on demand; quit anything started with npx first",
+    ),
+    (
+        "Library/pnpm/store",
+        SafetyTier::Review,
+        "pnpm package store — re-downloaded on demand; projects hard-link into it, so space is only freed once their node_modules are gone too",
+    ),
     (
         ".cargo/registry/cache",
         SafetyTier::Review,
         "Cargo registry cache — crates are re-downloaded on demand",
+    ),
+    // Review for the same reason as its sibling above: a running `cargo build`
+    // or rust-analyzer reads these sources.
+    (
+        ".cargo/registry/src",
+        SafetyTier::Review,
+        "Cargo extracted crate sources — re-extracted from the registry cache on next build",
     ),
     // Hidden dot-directory caches (Finder hides these; users reach them via
     // Cmd+Shift+G). Review tier — broad, so surfaced but never auto-selected.
@@ -485,9 +504,16 @@ fn looks_like_bundle_id(name: &str) -> bool {
 /// is a dotted *sub-identifier* of a running id (e.g. `com.foo.Bar.Helper`
 /// while `com.foo.Bar` runs) or vice-versa, so a running app's helper/XPC cache
 /// is not offered as Safe-to-delete while the app is live.
+///
+/// `running` also carries bare EXECUTABLE names: daemons live outside any `.app`
+/// and so have no bundle id (`/usr/libexec/duetexpertd`). A folder whose last
+/// dotted segment is a running executable's name (`com.apple.duetexpertd`) is
+/// that daemon's cache — without this every daemon cache read as "not running".
 fn belongs_to_running(name: &str, running: &std::collections::HashSet<String>) -> bool {
+    let last_segment = name.rsplit('.').next().unwrap_or(name);
     running.iter().any(|r| {
         name == r
+            || last_segment == r
             || name
                 .strip_prefix(r.as_str())
                 .is_some_and(|s| s.starts_with('.'))
@@ -537,6 +563,14 @@ impl Scanner for UserCacheScanner {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
+                if name == "TemporaryItems" {
+                    // TempScanner owns this folder: it emits the STALE files
+                    // inside. Emitting the whole folder here as well counted
+                    // those bytes twice, and offered the fresh temp files —
+                    // which may be in use — for removal. Fresh ones are meant
+                    // to go unreported.
+                    continue;
+                }
                 let (tier, reason) = if looks_like_bundle_id(&name) {
                     if belongs_to_running(&name, &ctx.running_bundle_ids) {
                         // Running-process guard: previously these were SKIPPED
@@ -597,7 +631,17 @@ impl Scanner for UserCacheScanner {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Phase 3 (cheap, sequential): emit through the single-threaded sink.
-        for (c, size) in sized {
+        emit_caches(sized, sink);
+        Ok(())
+    }
+}
+
+/// Emit sized cache candidates, dropping empty ones: a 0-byte cache folder
+/// frees nothing and is pure noise in the list (dozens exist on a typical Mac),
+/// and a folder that was just trashed sizes to 0 as well.
+fn emit_caches(sized: Vec<(CacheCandidate, u64)>, sink: &mut dyn FnMut(CleanupItem)) {
+    for (c, size) in sized {
+        if size > 0 {
             sink(CleanupItem::new(
                 c.path,
                 Category::UserCache,
@@ -606,7 +650,6 @@ impl Scanner for UserCacheScanner {
                 c.reason,
             ));
         }
-        Ok(())
     }
 }
 
@@ -728,38 +771,36 @@ impl Scanner for ContainerCacheScanner {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Phase 3: emit.
-        for (c, size) in sized {
-            sink(CleanupItem::new(
-                c.path,
-                Category::UserCache,
-                size,
-                c.tier,
-                c.reason,
-            ));
-        }
+        emit_caches(sized, sink);
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// AppSupportCacheScanner — Chromium/Electron caches under Application Support
+// AppSupportCacheScanner — app caches under Application Support
 // ---------------------------------------------------------------------------
 
-/// Directory basenames that CONTAIN "cache" but are NOT disposable caches — app
-/// *data* that merely uses the word. Matched case-insensitively and excluded
-/// from the sweep (e.g. Spotify's `PersistentCache` holds downloaded offline
-/// media; deleting it loses the downloads).
-const CACHE_NAME_EXCLUDES: &[&str] = &["persistentcache"];
+/// Subtrees the Application Support sweep never matches AND never enters
+/// (lowercase names). A name containing "cache" is not proof of a disposable
+/// cache; these are the classes a broad match would wrongly catch:
+///   - dependency trees — packages merely NAMED `…cache…` (`node_modules/
+///     lru-cache`, `…/typescript-auto-import-cache`); removing one breaks the tool
+///   - live stores — Spotify `PersistentCache` (downloaded offline media),
+///     Google Drive `content_cache` (file content that may not be uploaded yet)
+///   - `__pycache__` — bytecode inside an app's own install, not a user cache
+const APP_SUPPORT_SKIP: &[&str] = &[
+    "node_modules",
+    "site-packages",
+    "persistentcache",
+    "content_cache",
+    "__pycache__",
+];
 
-/// True when a directory basename denotes a disposable cache: it contains
-/// "cache" (case-insensitive) and isn't a known data dir ([`CACHE_NAME_EXCLUDES`]).
-/// Deliberately BROAD so we catch what a fixed list misses — `Cache`, `Code
-/// Cache`, `GPUCache`, `GrShaderCache`, `CacheStorage`, `crx_cache`,
-/// `download-cache`, `CachedData`, `CachedExtensionVSIXs`, `bincache*`,
-/// `WebViewCache`, `DerivedDataCache`, … — all regenerated on demand.
-fn is_cache_dir_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("cache") && !CACHE_NAME_EXCLUDES.contains(&lower.as_str())
+/// Whether the sweep must stay out of this directory entirely: a listed name
+/// ([`APP_SUPPORT_SKIP`]) or a hidden dot-directory (app-internal state such as
+/// a key-value store named `.cache` or an install-identity `.hwcache`).
+fn skip_subtree(name: &str) -> bool {
+    name.starts_with('.') || APP_SUPPORT_SKIP.contains(&name.to_ascii_lowercase().as_str())
 }
 
 /// Max directory depth searched below each Application Support app dir for a
@@ -780,7 +821,16 @@ fn collect_cache_leaves(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         if !ft.is_dir() {
             continue;
         }
-        if is_cache_dir_name(&entry.file_name().to_string_lossy()) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if skip_subtree(&name) {
+            continue; // neither matched nor descended into
+        }
+        // A cache dir is any (non-skipped) directory with "cache" in its name.
+        // Deliberately BROAD so we catch what a fixed list misses — `Cache`,
+        // `Code Cache`, `GPUCache`, `CacheStorage`, `crx_cache`, `download-cache`,
+        // `CachedData`, `bincache*`, `DerivedDataCache`, … all regenerated on demand.
+        if name.to_ascii_lowercase().contains("cache") {
             out.push(entry.path());
         } else if depth < APP_SUPPORT_MAX_DEPTH {
             collect_cache_leaves(&entry.path(), depth + 1, out);
@@ -844,7 +894,7 @@ fn app_support_owner(path: &Path, home: &Path) -> String {
         .unwrap_or_else(|| "an app".to_string())
 }
 
-/// Sweeps Chromium/Electron cache leaves under `~/Library/Application Support`.
+/// Sweeps app cache directories under `~/Library/Application Support`.
 /// ALL `Review` tier: these apps hold the cache open while running, so clearing
 /// a live app reclaims nothing and can corrupt its profile — the user should
 /// quit the app first. Surfaced for review, never auto-selected.
@@ -874,6 +924,9 @@ impl Scanner for AppSupportCacheScanner {
             })
             .collect::<Result<Vec<_>, _>>()?;
         for (path, size) in sized {
+            if size == 0 {
+                continue; // nothing to free (or just trashed and still memoized)
+            }
             let owner = app_support_owner(&path, &ctx.home);
             let leaf = path
                 .file_name()
@@ -1444,14 +1497,21 @@ mod unit_tests {
         use tabibu_engine::{CancelToken, SafetyTier, ScanCtx, Scanner};
         let home = tempfile::tempdir().unwrap();
         let h = home.path();
-        for (folder, file) in [("Homebrew", "x"), ("SomeRandomThing", "y")] {
+        for (folder, file) in [
+            ("Homebrew", "x"),
+            ("SomeRandomThing", "y"),
+            ("com.apple.duetexpertd", "d"), // cache of a daemon (no bundle id)
+            ("TemporaryItems", "t"),        // owned by TempScanner
+        ] {
             std::fs::create_dir_all(h.join("Library/Caches").join(folder)).unwrap();
             std::fs::write(h.join("Library/Caches").join(folder).join(file), b"z").unwrap();
         }
+        std::fs::create_dir_all(h.join("Library/Caches/com.empty.app")).unwrap(); // 0 bytes
         let ctx = ScanCtx {
             home: h.to_path_buf(),
             allowed_roots: vec![h.join("Library/Caches")],
-            running_bundle_ids: std::collections::HashSet::new(),
+            // A daemon is only known by its executable name.
+            running_bundle_ids: std::collections::HashSet::from(["duetexpertd".to_string()]),
             full_disk_access: true,
         };
         let mut items = Vec::new();
@@ -1469,6 +1529,16 @@ mod unit_tests {
         // non-bundle-id folder → Review (surfaced, never auto-selected).
         assert_eq!(tier_of("Homebrew"), SafetyTier::Safe);
         assert_eq!(tier_of("SomeRandomThing"), SafetyTier::Review);
+        // A running daemon's cache is Review, not "Safe (not running)".
+        assert_eq!(tier_of("com.apple.duetexpertd"), SafetyTier::Review);
+        // Not emitted at all: TempScanner's folder (would double-count) and an
+        // empty cache folder (frees nothing).
+        for absent in ["TemporaryItems", "com.empty.app"] {
+            assert!(
+                !items.iter().any(|i| i.path.ends_with(absent)),
+                "{absent} must not be emitted"
+            );
+        }
     }
 
     #[test]
@@ -1488,8 +1558,21 @@ mod unit_tests {
         // App DATA that must NEVER be matched.
         mk("Library/Application Support/Google/Chrome/Default/Local Storage/leveldb/d");
         mk("Library/Application Support/Spotify/PersistentCache/Storage/s");
+        // "cache" in the name is not proof of a disposable cache — none of these
+        // may be matched, nor anything inside them:
+        mk("Library/Application Support/Spotify/PersistentCache/Cache/s"); // inside a skipped dir
+        mk("Library/Application Support/Zed/languages/x/node_modules/lru-cache/index.js"); // a package
+        mk("Library/Application Support/Google/DriveFS/1/content_cache/chunks.db"); // live store
+        mk("Library/Application Support/GitTool/.cache/KEYREGISTRY"); // hidden app state
+        mk("Library/Application Support/Blender/scripts/__pycache__/a.pyc"); // app bytecode
 
         let roots = super::app_support_cache_roots(h);
+        for skipped in ["node_modules", "content_cache", ".cache", "__pycache__"] {
+            assert!(
+                !roots.iter().any(|r| r.to_string_lossy().contains(skipped)),
+                "{skipped} must never be matched as a cache"
+            );
+        }
         let has = |suffix: &str| roots.iter().any(|r| r.ends_with(suffix));
         assert!(has("Google/Chrome/Default/Cache"), "HTTP Cache leaf found");
         assert!(

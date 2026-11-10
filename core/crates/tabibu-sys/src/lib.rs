@@ -71,7 +71,8 @@ type BundleIdCache = Mutex<Option<(Instant, HashSet<String>)>>;
 static BUNDLE_ID_CACHE: LazyLock<BundleIdCache> = LazyLock::new(|| Mutex::new(None));
 const BUNDLE_ID_TTL: Duration = Duration::from_secs(15);
 
-/// Bundle IDs of currently running apps (cached for [`BUNDLE_ID_TTL`]).
+/// Identities of everything running right now — app bundle IDs plus bare
+/// executable names (cached for [`BUNDLE_ID_TTL`]).
 #[must_use]
 pub fn running_bundle_ids() -> HashSet<String> {
     let mut guard = BUNDLE_ID_CACHE
@@ -89,7 +90,9 @@ pub fn running_bundle_ids() -> HashSet<String> {
 
 /// Derived from each process's executable path: walk up to the enclosing
 /// `*.app` bundle and read `Contents/Info.plist`'s `CFBundleIdentifier`.
-/// Best-effort — processes not inside an `.app` contribute no ID.
+/// Every process also contributes its bare executable name — the only identity
+/// a daemon outside an `.app` has (`/usr/libexec/duetexpertd`); the junk
+/// scanners match a cache folder's last dotted segment against these.
 fn compute_running_bundle_ids() -> HashSet<String> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
@@ -103,6 +106,9 @@ fn compute_running_bundle_ids() -> HashSet<String> {
     let mut seen_bundles = HashSet::new();
     for proc in sys.processes().values() {
         let Some(exe) = proc.exe() else { continue };
+        if let Some(name) = exe.file_name() {
+            ids.insert(name.to_string_lossy().into_owned());
+        }
         let Some(bundle) = enclosing_app_bundle(exe) else {
             continue;
         };

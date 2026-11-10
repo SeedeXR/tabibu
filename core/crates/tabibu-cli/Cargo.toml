@@ -22,6 +22,7 @@ tabibu-walk.workspace = true
 tabibu-dupes.workspace = true
 tabibu-malware.workspace = true
 tabibu-devscan.workspace = true
+tabibu-sys.workspace = true
 tabibu-brew.workspace = true
 tabibu-docker.workspace = true
 tabibu-uninstall.workspace = true

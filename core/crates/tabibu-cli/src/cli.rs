@@ -182,21 +182,37 @@ pub enum CleanCmd {
         /// Move them to the Trash (otherwise just report).
         #[arg(long)]
         yes: bool,
+        /// Also act on items that need review (caches of running apps, large old
+        /// files, …). Without it only items that are safe to remove are touched.
+        #[arg(long)]
+        include_review: bool,
     },
     /// App + developer caches only (`~/Library/Caches`, npm/cargo/gradle/…).
     Caches {
         #[arg(long)]
         yes: bool,
+        /// Also act on items that need review (caches of running apps, large old
+        /// files, …). Without it only items that are safe to remove are touched.
+        #[arg(long)]
+        include_review: bool,
     },
     /// Log files only (`~/Library/Logs`).
     Logs {
         #[arg(long)]
         yes: bool,
+        /// Also act on items that need review (caches of running apps, large old
+        /// files, …). Without it only items that are safe to remove are touched.
+        #[arg(long)]
+        include_review: bool,
     },
     /// Everything: all junk plus rebuildable dev artifacts across your home.
     All {
         #[arg(long)]
         yes: bool,
+        /// Also act on items that need review (caches of running apps, large old
+        /// files, …). Without it only items that are safe to remove are touched.
+        #[arg(long)]
+        include_review: bool,
     },
     /// Rebuildable dev build artifacts (target, node_modules, dist, …).
     DevArtifacts {

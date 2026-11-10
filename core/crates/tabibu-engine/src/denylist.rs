@@ -41,6 +41,10 @@ pub enum DenyReason {
     UserData,
     Traversal,
     Root,
+    /// Not protected itself, but an ANCESTOR of something that is (`/usr`,
+    /// `/Library`, `/Users`, `~/Library`, …) — removing it would take the
+    /// protected location with it. Never overridable.
+    ContainsProtected,
 }
 
 fn starts_with(path: &Path, prefix: &Path) -> bool {
@@ -87,6 +91,17 @@ pub fn denied(path: &Path, home: &Path) -> Option<DenyReason> {
             return Some(DenyReason::UserData);
         }
     }
+    // A path that CONTAINS a protected location is protected too: `/usr` holds
+    // `/usr/bin`, `/Library` holds `/Library/Apple`, `/Users` holds the home
+    // folder, `~/Library` holds Mail and Keychains. Without this only OS flags
+    // stood between a whole-disk selection and trashing those parents.
+    let contains = |protected: &Path| starts_with(protected, &path);
+    if contains(&home)
+        || SYSTEM_DENY.iter().any(|p| contains(Path::new(p)))
+        || HOME_DENY.iter().any(|rel| contains(&home.join(rel)))
+    {
+        return Some(DenyReason::ContainsProtected);
+    }
     None
 }
 
@@ -127,6 +142,34 @@ mod tests {
     #[test]
     fn usr_local_is_not_denied() {
         assert_eq!(denied(Path::new("/usr/local/bin/tool"), &home()), None);
+    }
+
+    #[test]
+    fn ancestors_of_protected_locations_are_denied() {
+        for p in [
+            "/usr",                                    // holds /usr/bin
+            "/private",                                // holds /private/var/db
+            "/var",                                    // alias of /private/var
+            "/Library",                                // holds /Library/Apple
+            "/Users",                                  // holds the home folder
+            "/Users/test/Library",                     // holds Mail, Keychains
+            "/Users/test/Library/Application Support", // holds MobileSync
+        ] {
+            assert_eq!(
+                denied(Path::new(p), &home()),
+                Some(DenyReason::ContainsProtected),
+                "{p}"
+            );
+        }
+        // Siblings and unrelated parents stay permissible.
+        for p in [
+            "/Applications",
+            "/opt",
+            "/Users/test/Library/Caches",
+            "/Users/other",
+        ] {
+            assert_eq!(denied(Path::new(p), &home()), None, "{p}");
+        }
     }
 
     #[test]

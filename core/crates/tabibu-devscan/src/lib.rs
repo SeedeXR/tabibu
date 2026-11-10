@@ -256,12 +256,21 @@ fn walk(dir: &Path, home: &Path, cancel: &CancelToken, out: &mut Vec<DevArtifact
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        if name.ends_with(".app") && path.join("Contents/Info.plist").exists() {
+            // An installed app bundle (e.g. in ~/Applications): its node_modules
+            // or build dirs are the app itself — nothing can "rebuild" them. The
+            // Info.plist check keeps a source repo merely NAMED `todo.app` scanned.
+            continue;
+        }
         if let Some(rule) = rule_for(&name, dir) {
             // A "venv"/".venv" is only a real virtualenv if it holds pyvenv.cfg
             // (PEP 405) — otherwise a hand-named folder called "venv" would be
             // flagged. If it isn't one, fall through and treat it as a normal dir.
             if rule.kind != "python-venv" || path.join("pyvenv.cfg").exists() {
-                let size = tabibu_walk::dir_size(&path, cancel).unwrap_or(0);
+                // Physical (allocated) bytes, like the rest of the app — the
+                // logical length overstates what trashing actually frees.
+                let size = tabibu_walk::size_tree(&path, cancel, Some(0))
+                    .map_or(0, |node| node.alloc_bytes);
                 out.push(DevArtifact {
                     path,
                     kind: rule.kind,
@@ -363,6 +372,11 @@ mod tests {
         touch(&home.join(".vscode/extensions/e/node_modules/w/i.js"));
         // A project's OWN deeper .venv is still found.
         touch(&home.join("code/api/.venv/pyvenv.cfg"));
+        // An installed app's bundled node_modules is the app, not build output…
+        touch(&home.join("Applications/Tool.app/Contents/Info.plist"));
+        touch(&home.join("Applications/Tool.app/Contents/Resources/app/node_modules/n/i.js"));
+        // …but a source repo that is merely NAMED like one is still a project.
+        touch(&home.join("code/todo.app/node_modules/t/i.js"));
 
         let arts = scan(&[home.to_path_buf()], home, &CancelToken::new());
         let has = |needle: &str| {
@@ -384,6 +398,8 @@ mod tests {
         );
         assert!(!has("/Library/"), "~/Library trees are excluded");
         assert!(!has("/Movies/"), "media trees (~/Movies) are excluded");
+        assert!(!has("Tool.app/"), "real app bundles are never entered");
+        assert!(has("code/todo.app/"), "a repo named *.app is still scanned");
     }
 
     #[test]

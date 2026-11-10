@@ -1085,6 +1085,7 @@ dependencies = [
  "tabibu-malware",
  "tabibu-monitor",
  "tabibu-salama",
+ "tabibu-sys",
  "tabibu-uninstall",
  "tabibu-universal",
  "tabibu-walk",

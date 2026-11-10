@@ -45,6 +45,7 @@ tabibu-vpnproto = { path = "crates/tabibu-vpnproto" }
 tabibu-route = { path = "crates/tabibu-route" }
 tabibu-salama = { path = "crates/tabibu-salama" }
 tabibu-devscan = { path = "crates/tabibu-devscan" }
+tabibu-sys = { path = "crates/tabibu-sys" }
 
 rayon = "1.10"
 blake3 = { version = "1.5", features = ["rayon"] }

@@ -4,10 +4,7 @@
 //! in pure Rust + the `plist` crate.
 
 use serde::Serialize;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
 use tabibu_engine::ScanCtx;
 
 // Battery + Startup now live in the shared `tabibu-sys` crate (the permanent home
@@ -100,79 +97,10 @@ mod tests {
     }
 }
 
-/// Cached `running_bundle_ids` — the full process+plist sweep is expensive and
-/// the set changes slowly, so we reuse it across commands fired close together
-/// (a Smart Scan → Security → Leftovers burst would otherwise sweep 3×).
-type BundleIdCache = Mutex<Option<(Instant, HashSet<String>)>>;
-static BUNDLE_ID_CACHE: LazyLock<BundleIdCache> = LazyLock::new(|| Mutex::new(None));
-const BUNDLE_ID_TTL: Duration = Duration::from_secs(15);
-
-/// Bundle IDs of currently running apps (cached for [`BUNDLE_ID_TTL`]).
-#[must_use]
-pub fn running_bundle_ids() -> HashSet<String> {
-    let mut guard = BUNDLE_ID_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((at, ids)) = guard.as_ref() {
-        if at.elapsed() < BUNDLE_ID_TTL {
-            return ids.clone();
-        }
-    }
-    let ids = compute_running_bundle_ids();
-    *guard = Some((Instant::now(), ids.clone()));
-    ids
-}
-
-/// Derived from each process's executable path: walk up to the enclosing
-/// `*.app` bundle and read `Contents/Info.plist`'s `CFBundleIdentifier`.
-/// Best-effort — processes not inside an `.app` contribute no ID.
-fn compute_running_bundle_ids() -> HashSet<String> {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
-    );
-
-    let mut ids = HashSet::new();
-    let mut seen_bundles = HashSet::new();
-    for proc in sys.processes().values() {
-        let Some(exe) = proc.exe() else { continue };
-        let Some(bundle) = enclosing_app_bundle(exe) else {
-            continue;
-        };
-        if !seen_bundles.insert(bundle.clone()) {
-            continue; // already read this bundle's plist
-        }
-        if let Some(id) = bundle_identifier(&bundle) {
-            ids.insert(id);
-        }
-    }
-    ids
-}
-
-/// Given `/Applications/Foo.app/Contents/MacOS/Foo`, return `…/Foo.app`.
-fn enclosing_app_bundle(exe: &Path) -> Option<PathBuf> {
-    let mut cur = exe;
-    while let Some(parent) = cur.parent() {
-        if parent.extension().is_some_and(|e| e == "app") {
-            return Some(parent.to_path_buf());
-        }
-        cur = parent;
-    }
-    None
-}
-
-fn bundle_identifier(app: &Path) -> Option<String> {
-    let plist_path = app.join("Contents/Info.plist");
-    let value = plist::Value::from_file(plist_path).ok()?;
-    value
-        .as_dictionary()
-        .and_then(|d| d.get("CFBundleIdentifier"))
-        .and_then(plist::Value::as_string)
-        .map(str::to_owned)
-}
+// Running-process identities (bundle ids + bare executable names) come from the
+// shared `tabibu-sys` crate — the SAME function the CLI uses, so the app and the
+// terminal judge "is this cache in use?" identically.
+pub use tabibu_sys::running_bundle_ids;
 
 /// Build the standard junk-scan context (home roots + running-process guard).
 #[must_use]
