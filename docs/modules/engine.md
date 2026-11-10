@@ -43,6 +43,18 @@ home-relative user data (`Documents`, `Desktop`, `Library/Mail`, iCloud
 Drive, Keychains, device backups…). Relative paths and any `..` component
 are rejected outright. `home` is injected — fully testable.
 
+`reclaim` may waive a home denial only for an explicit, reversible Trash of
+a `DevCache` item, and only by class (`DenyReason`):
+
+| Class | Locations | Waived when |
+|---|---|---|
+| `UserData` | Documents, Desktop, Pictures, Movies, Music, iCloud Drive | explicit pick |
+| `ReviewOnly` | `Library/Mail`, `Library/Messages`, `Library/Photos`, device backups | explicit pick **and** `reclaim_with_review(…, reviewed = true)` — sent only by a review screen's confirm button |
+| `Secrets` | `Library/Keychains` | never |
+
+System paths, traversal, the roots, and any ancestor of a protected
+location (`ContainsProtected`) are never waived either.
+
 ## Tests (15)
 
 7 unit (denylist, cancel, undo) + 3 adversarial property tests + 5

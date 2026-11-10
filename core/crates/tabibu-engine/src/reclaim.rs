@@ -118,6 +118,22 @@ pub fn reclaim(
     items: &[CleanupItem],
     undo_dir: &Path,
 ) -> Result<ReclaimReport, ReclaimError> {
+    reclaim_with_review(ctx, items, undo_dir, false)
+}
+
+/// [`reclaim`], with `reviewed` attesting that the user confirmed this exact
+/// list on a review screen. That is the only thing that lets a
+/// [`DenyReason::ReviewOnly`] store (Mail, Messages, …) go to the Trash;
+/// nothing lets `~/Library/Keychains` go.
+///
+/// # Errors
+/// As [`reclaim`].
+pub fn reclaim_with_review(
+    ctx: &ScanCtx,
+    items: &[CleanupItem],
+    undo_dir: &Path,
+    reviewed: bool,
+) -> Result<ReclaimReport, ReclaimError> {
     let selected: Vec<&CleanupItem> = items.iter().filter(|i| i.selected).collect();
     let mut report = ReclaimReport::default();
 
@@ -134,22 +150,37 @@ pub fn reclaim(
         // A recognized rebuildable dev artifact (`DevCache`) may be reclaimed even
         // from a user-data dir like ~/Documents or ~/Desktop — that's where many
         // developers keep projects, the folder is not user data, and the move is
-        // reversible (Trash). System paths, path traversal, and the user's own
-        // protected list are NEVER overridden — only the user-data (`UserData`)
-        // denial is, and only for a `DevCache` item being moved to the Trash.
+        // reversible (Trash). Live personal stores (`ReviewOnly`: Mail, Messages,
+        // …) get the same waiver only when the caller says the list was reviewed.
+        // System paths, credentials (`Secrets`), ancestors of protected places,
+        // path traversal and the user's own protected list are NEVER overridden.
         let deny = denylist::denied(&item.path, &ctx.home);
-        let dev_override = item.category == Category::DevCache
-            && item.action == ReclaimAction::Trash
-            && matches!(deny, Some(DenyReason::UserData));
+        let waivable = match deny {
+            Some(DenyReason::UserData) => true,
+            Some(DenyReason::ReviewOnly) => reviewed,
+            _ => false,
+        };
+        let dev_override =
+            item.category == Category::DevCache && item.action == ReclaimAction::Trash && waivable;
         if !denylist::within_roots(&item.path, &ctx.allowed_roots)
             || (deny.is_some() && !dev_override)
             || protect::is_protected(&item.path, &user_protected)
         {
+            // Only point at Review when review is what would have unlocked it.
+            let why = if deny == Some(DenyReason::ReviewOnly)
+                && !reviewed
+                && item.category == Category::DevCache
+                && item.action == ReclaimAction::Trash
+            {
+                "needs review — remove it from the Review screen"
+            } else {
+                "protected location — left untouched"
+            };
             report.failed += 1;
             report.outcomes.push(ItemOutcome {
                 path: item.path.clone(),
                 reclaimed_bytes: 0,
-                error: Some("protected location — left untouched".to_string()),
+                error: Some(why.to_string()),
             });
             continue;
         }
@@ -302,5 +333,47 @@ mod tests {
         let r2 = reclaim(&ctx, &[item], &home.join("undo")).unwrap();
         assert_eq!(r2.failed, 1, "non-DevCache under Documents is refused");
         assert!(keep.exists(), "the non-artifact file is untouched");
+    }
+
+    /// The user's rule: Keychains can never be trashed; Mail and Messages only
+    /// through the reviewed path — even for the explicit-pick (`DevCache`) item
+    /// the Space Analyzer sends.
+    #[test]
+    fn keychains_never_and_mail_only_after_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let ctx = ScanCtx {
+            home: home.clone(),
+            allowed_roots: vec![home.clone()],
+            running_bundle_ids: HashSet::new(),
+            full_disk_access: false,
+        };
+        let pick = |rel: &str| {
+            let p = home.join(rel);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("f"), b"x").unwrap();
+            let mut i = CleanupItem::new(p, Category::DevCache, 1, SafetyTier::Review, "picked");
+            i.selected = true;
+            i
+        };
+        let (keys, mail, msgs) = (
+            pick("Library/Keychains"),
+            pick("Library/Mail/V10"),
+            pick("Library/Messages"),
+        );
+        let items = [keys.clone(), mail.clone(), msgs.clone()];
+        let undo = home.join("undo");
+
+        // Direct (un-reviewed) removal: nothing moves.
+        let r = reclaim(&ctx, &items, &undo).unwrap();
+        assert_eq!((r.succeeded, r.failed), (0, 3));
+        assert!(items.iter().all(|i| i.path.exists()));
+        assert!(r.outcomes[1].error.as_deref().unwrap().contains("review"));
+
+        // Reviewed: Mail and Messages go, Keychains still stays.
+        let r = reclaim_with_review(&ctx, &items, &undo, true).unwrap();
+        assert_eq!((r.succeeded, r.failed), (2, 1));
+        assert!(keys.path.exists(), "Keychains must never be trashed");
+        assert!(!mail.path.exists() && !msgs.path.exists());
     }
 }

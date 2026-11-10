@@ -19,26 +19,38 @@ const SYSTEM_DENY: &[&str] = &[
     "/Library/Apple",
 ];
 
-/// Home-relative prefixes that are always protected (user data / live stores).
-const HOME_DENY: &[&str] = &[
-    "Documents",
-    "Desktop",
-    "Pictures",
-    "Movies", // media libraries — sensitive, non-disposable user data
-    "Music",
-    "Library/Mail",
-    "Library/Messages",
-    "Library/Mobile Documents", // iCloud Drive
-    "Library/Photos",
-    "Library/Keychains",
-    "Library/Application Support/MobileSync", // device backups: surfaced read-only, never reclaimed
+/// Home-relative prefixes that are always protected (user data / live stores),
+/// with the class that decides whether `reclaim` may ever waive the denial.
+const HOME_DENY: &[(&str, DenyReason)] = &[
+    ("Documents", DenyReason::UserData),
+    ("Desktop", DenyReason::UserData),
+    ("Pictures", DenyReason::UserData),
+    ("Movies", DenyReason::UserData), // media libraries — sensitive, non-disposable user data
+    ("Music", DenyReason::UserData),
+    ("Library/Mobile Documents", DenyReason::UserData), // iCloud Drive
+    ("Library/Mail", DenyReason::ReviewOnly),
+    ("Library/Messages", DenyReason::ReviewOnly),
+    ("Library/Photos", DenyReason::ReviewOnly),
+    (
+        "Library/Application Support/MobileSync",
+        DenyReason::ReviewOnly,
+    ), // device backups
+    ("Library/Keychains", DenyReason::Secrets),
 ];
 
 /// Why a path is protected, suitable for logging/tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
     SystemPath,
+    /// The user's own files (Documents, Desktop, media, iCloud Drive). `reclaim`
+    /// waives this for an explicit, reversible Trash of a `DevCache` item.
     UserData,
+    /// A live personal store (Mail, Messages, Photos support, device backups):
+    /// waived like `UserData`, but ONLY when the caller attests the user
+    /// confirmed the exact list on a review screen.
+    ReviewOnly,
+    /// Credentials (`~/Library/Keychains`). Never overridable, by anything.
+    Secrets,
     Traversal,
     Root,
     /// Not protected itself, but an ANCESTOR of something that is (`/usr`,
@@ -86,9 +98,9 @@ pub fn denied(path: &Path, home: &Path) -> Option<DenyReason> {
             return Some(DenyReason::SystemPath);
         }
     }
-    for rel in HOME_DENY {
+    for (rel, reason) in HOME_DENY {
         if starts_with(&path, &home.join(rel)) {
-            return Some(DenyReason::UserData);
+            return Some(*reason);
         }
     }
     // A path that CONTAINS a protected location is protected too: `/usr` holds
@@ -98,7 +110,7 @@ pub fn denied(path: &Path, home: &Path) -> Option<DenyReason> {
     let contains = |protected: &Path| starts_with(protected, &path);
     if contains(&home)
         || SYSTEM_DENY.iter().any(|p| contains(Path::new(p)))
-        || HOME_DENY.iter().any(|rel| contains(&home.join(rel)))
+        || HOME_DENY.iter().any(|(rel, _)| contains(&home.join(rel)))
     {
         return Some(DenyReason::ContainsProtected);
     }
@@ -182,6 +194,27 @@ mod tests {
             "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/a",
         ] {
             assert!(denied(Path::new(p), &home()).is_some(), "{p}");
+        }
+    }
+
+    /// The class decides what `reclaim` may waive: Keychains never, Mail and
+    /// Messages only after review, ordinary user folders on an explicit pick.
+    #[test]
+    fn home_stores_carry_their_class() {
+        for (p, want) in [
+            ("/Users/test/Library/Keychains", DenyReason::Secrets),
+            (
+                "/Users/test/Library/Keychains/login.keychain-db",
+                DenyReason::Secrets,
+            ),
+            ("/Users/test/Library/Mail", DenyReason::ReviewOnly),
+            (
+                "/Users/test/Library/Messages/chat.db",
+                DenyReason::ReviewOnly,
+            ),
+            ("/Users/test/Documents/a.txt", DenyReason::UserData),
+        ] {
+            assert_eq!(denied(Path::new(p), &home()), Some(want), "{p}");
         }
     }
 

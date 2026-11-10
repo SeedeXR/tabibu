@@ -9,7 +9,7 @@ use tauri::ipc::Channel;
 
 use tabibu_dupes::{DupeConfig, DuplicateGroup};
 use tabibu_engine::{
-    reclaim as engine_reclaim, smart_scan, CancelToken, CleanupItem, ReclaimReport,
+    reclaim_with_review as engine_reclaim, smart_scan, CancelToken, CleanupItem, ReclaimReport,
 };
 use tabibu_monitor::{Sampler, SystemSample, TopBy};
 use tabibu_walk::DirNode;
@@ -172,10 +172,13 @@ pub fn cancel_scan() {
 /// Reclaim the supplied items. `extra_roots` widens the allowed-roots set for
 /// targets outside the standard junk locations (duplicates / remnants in a
 /// chosen folder); the engine still re-checks every path against the denylist.
+/// `reviewed` is sent only by a review screen's confirm button: it is what lets
+/// Mail / Messages go to the Trash (never Keychains — nothing unlocks those).
 #[tauri::command(async)]
 pub fn reclaim(
     mut items: Vec<CleanupItem>,
     extra_roots: Vec<String>,
+    reviewed: Option<bool>,
 ) -> Result<ReclaimReport, String> {
     let home = system::home_dir();
     // Defense in depth against a compromised/injected webview (the CSP is the
@@ -188,9 +191,10 @@ pub fn reclaim(
     //      else (another volume, an arbitrary absolute dir) is dropped. Even with
     //      "/", the engine DENYLIST remains the hard guard: `/System`, `/usr/bin`,
     //      `/private/var/db`, path traversal and the home/volume roots themselves
-    //      can never be trashed; user-data dirs (Documents/Desktop/…) only go when
-    //      the item is a `DevCache` Trash (the explicit-pick override). Everything
-    //      is still a reversible Trash move.
+    //      can never be trashed, nor can `~/Library/Keychains`; user-data dirs
+    //      (Documents/Desktop/…) only go when the item is a `DevCache` Trash (the
+    //      explicit-pick override), and Mail/Messages only with `reviewed` too.
+    //      Everything is still a reversible Trash move.
     for item in &mut items {
         item.selected = true;
         item.action = tabibu_engine::ReclaimAction::Trash;
@@ -200,8 +204,13 @@ pub fn reclaim(
         .filter(|r| r == "/" || std::path::Path::new(r).starts_with(&home))
         .collect();
     let ctx = system::default_scan_ctx(&safe_roots);
-    engine_reclaim(&ctx, &items, std::path::Path::new(&system::undo_dir()))
-        .map_err(|e| e.to_string())
+    engine_reclaim(
+        &ctx,
+        &items,
+        std::path::Path::new(&system::undo_dir()),
+        reviewed.unwrap_or(false),
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

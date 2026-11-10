@@ -124,6 +124,16 @@ const underHome = (p) => state.home && (p === state.home || p.startsWith(state.h
 function displayPath(p) {
   return underHome(p) ? "~" + p.slice(state.home.length) : p;
 }
+// Space Analyzer's view of two engine rules (the engine denylist is the guard;
+// this only drives the UI): Keychains can never be removed, and personal stores
+// only from the Review screen. If this list drifts the engine still refuses.
+const inHomeDirs = (p, rels) => !!state.home && rels.some((r) => {
+  const base = `${state.home}/${r}`;
+  return p === base || p.startsWith(base + "/");
+});
+const spaceLocked = (p) => inHomeDirs(p, ["Library/Keychains"]);
+const spaceReviewOnly = (p) => inHomeDirs(p, [
+  "Library/Mail", "Library/Messages", "Library/Photos", "Library/Application Support/MobileSync"]);
 const CAT_NAMES = {
   Trash: "Trash", UserCache: "User Caches", DevCache: "Developer Caches",
   Temp: "Temporary Files", Log: "Logs", Duplicate: "Duplicates",
@@ -1196,6 +1206,8 @@ function spaceRow(c, depth, parentTotal, ancestorsLast, isLast) {
     treeGuides(depth, ancestorsLast || [], isLast),
     disclosure,
     h("input", { type: "checkbox", checked: s.sel.has(c.path) ? "" : null,
+      disabled: spaceLocked(c.path) ? "" : null,
+      title: spaceLocked(c.path) ? "Protected — your keychains hold passwords and can't be removed" : null,
       onClick: (e) => { e.stopPropagation(); toggleSel(c); } }),
     icon(c.is_dir ? "folder" : "file", "ficon"),
     h("div", { class: "path" },
@@ -1235,7 +1247,7 @@ function spaceFooter() {
     n ? h("button", { onClick: () => { s.sel.clear(); spaceView(); } }, "Clear") : null,
     // Two paths, as requested: review the exact list first, OR trash directly.
     n ? h("button", { style: "margin-left:8px", onClick: () => { s.phase = "review"; spaceView(); } }, "Review…") : null,
-    h("button", { class: "danger", style: "margin-left:8px", disabled: n ? null : "", onClick: doSpaceRemove }, "Move to Trash"));
+    h("button", { class: "danger", style: "margin-left:8px", disabled: n ? null : "", onClick: () => doSpaceRemove(false) }, "Move to Trash"));
 }
 
 // Review screen: the exact de-duped list that will be trashed, with per-item
@@ -1245,6 +1257,7 @@ function spaceReview() {
   const refresh = () => { if (!spaceSelTotals().paths.length) s.phase = "browse"; spaceView(); };
   const { paths, bytes, items } = spaceSelTotals();
   const outside = paths.filter((p) => !underHome(p)).length;
+  const personal = paths.filter(spaceReviewOnly).length;
   const wrap = h("div", { class: "review" });
   wrap.append(h("div", { class: "notice", style: "margin:16px 24px 0;align-items:center" },
     icon("trash-2"),
@@ -1252,7 +1265,8 @@ function spaceReview() {
       h("h3", {}, "Review before removing"),
       h("p", { style: "margin:0" },
         `${paths.length} item(s) · ${fmtBytes(bytes)} · ${nItems(items)} — all reversible (Trash).`
-        + (outside ? `  ⚠️ ${outside} outside your home folder.` : ""))),
+        + (outside ? `  ⚠️ ${outside} outside your home folder.` : "")
+        + (personal ? `  ⚠️ ${personal} with mail, messages or device backups.` : ""))),
     h("div", { style: "flex:1" }),
     h("button", { onClick: () => { s.phase = "browse"; spaceView(); } }, "Back")));
   const list = h("div", { class: "list" });
@@ -1265,6 +1279,7 @@ function spaceReview() {
         h("div", { class: "nm", title: displayPath(p) }, name),
         h("div", { class: "reason" }, displayPath(p))),
       underHome(p) ? null : h("span", { class: "badge Review wide" }, "Outside home"),
+      spaceReviewOnly(p) ? h("span", { class: "badge Review wide" }, "Personal data") : null,
       h("span", { class: "isize" }, fmtBytes(v.bytes || 0)),
       h("button", { title: "Remove from selection", onClick: () => { s.sel.delete(p); refresh(); } }, "✕")));
   }
@@ -1273,39 +1288,51 @@ function spaceReview() {
     h("div", {}, `${paths.length} selected · ${fmtBytes(bytes)}`),
     h("div", { style: "flex:1" }),
     h("button", { onClick: () => { s.phase = "browse"; spaceView(); } }, "Back"),
-    // Reviewed items go straight to Trash — EXCEPT any outside the home folder,
-    // which still route through the strong out-of-home confirm (doSpaceRemove),
-    // so the Review path never silently narrows that guard.
+    // Reviewed items go straight to Trash — EXCEPT any outside the home folder
+    // or holding personal data (Mail, Messages…), which still route through the
+    // strong confirm (doSpaceRemove), so the Review path never narrows that guard.
     h("button", { class: "danger", style: "margin-left:8px", disabled: paths.length ? null : "",
-      onClick: () => (spaceSelTotals().paths.some((p) => !underHome(p)) ? doSpaceRemove() : spaceReclaim()) }, "Move to Trash")));
+      onClick: () => (spaceSelTotals().paths.some((p) => !underHome(p) || spaceReviewOnly(p))
+        ? doSpaceRemove(true) : spaceReclaim(true)) }, "Move to Trash")));
   return wrap;
 }
 
-// Direct path: a quick confirm (flagging anything outside home), then trash.
-async function doSpaceRemove() {
+// A quick confirm (flagging anything outside home or personal), then trash.
+// `reviewed` is true only when called from the Review screen: Mail, Messages and
+// device backups are never taken by the direct button — it opens Review instead.
+async function doSpaceRemove(reviewed) {
   const { paths, bytes, items } = spaceSelTotals(); // de-duped, physical bytes
   if (!paths.length) return;
+  const personal = paths.filter(spaceReviewOnly);
+  if (personal.length && !reviewed) {
+    spaceState.phase = "review"; spaceView();
+    uiToast(`${displayPath(personal[0])} holds personal data — review the list, then move it to the Trash from here.`);
+    return;
+  }
   const outside = paths.filter((p) => !underHome(p));
-  const warn = outside.length
+  const warn = (outside.length
     ? `\n\n⚠️ ${outside.length} of these are OUTSIDE your home folder (e.g. ${displayPath(outside[0])}) — system, app, or other-user locations. Only move them if you're sure.`
-    : "";
+    : "") + (personal.length
+    ? `\n\n⚠️ This includes your mail, messages or device backups (e.g. ${displayPath(personal[0])}). The app that owns them loses that data.`
+    : "");
   const ok = await uiConfirm(
     `Move ${paths.length} item(s) (${fmtBytes(bytes)}, ${nItems(items)}) to the Trash?${warn}\n\nReversible — everything goes to the Trash, restore it anytime.`,
     { danger: true, okLabel: "Move to Trash" });
   if (!ok) return;
-  spaceReclaim();
+  spaceReclaim(reviewed);
 }
 
 // Shared trash routine for both the direct "Move to Trash" and the Review
 // screen. Operates on the de-duped selection with physical on-disk bytes.
-async function spaceReclaim() {
+async function spaceReclaim(reviewed) {
   const s = spaceState;
   const { paths, bytes } = spaceSelTotals();
   if (!paths.length) return;
   // Category DevCache so reclaim's user-data override lets explicit picks inside
   // Documents/Desktop/etc. go to the Trash (the user asked for no protection).
   // reclaim still forces action=Trash (reversible) and still refuses true system
-  // paths (/System, /usr/bin, …) via the engine denylist.
+  // paths (/System, /usr/bin, …) and Keychains via the engine denylist; Mail and
+  // Messages only pass with `reviewed` (sent by the Review screen's button).
   const items2 = paths.map((p) => ({
     path: p, category: "DevCache", size_bytes: (s.sel.get(p) || {}).bytes || 0,
     tier: "Review", reason: "Selected in Space Analyzer", selected: true, action: "Trash",
@@ -1314,7 +1341,7 @@ async function spaceReclaim() {
   try {
     // Whole-disk scope: reclaim honors "/" here and the engine denylist still
     // blocks true system paths; DevCache + Trash lets user-data picks through.
-    s.report = await invoke("reclaim", { items: items2, extraRoots: [DISK_ROOT] });
+    s.report = await invoke("reclaim", { items: items2, extraRoots: [DISK_ROOT], reviewed: reviewed === true });
     // Freed = physical bytes of the items that actually trashed (outcomes with no
     // error), consistent with the on-disk sizes shown during selection.
     const outs = s.report.outcomes || [];
